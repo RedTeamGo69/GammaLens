@@ -340,6 +340,7 @@ def compare_enhancements(
     conn,
     baseline_spec: str = "M3_extended",
     exclude_covid: bool = True,
+    ticker: str = "SPX",
 ) -> pd.DataFrame:
     """Run walk-forward OOS comparison of model enhancements vs baseline.
 
@@ -347,9 +348,9 @@ def compare_enhancements(
     Only marks an enhancement as 'keep' if it clears the improvement gate.
     Returns a DataFrame with metrics and a 'keep' column.
     """
-    df = get_features(conn, exclude_covid=exclude_covid)
+    df = get_features(conn, exclude_covid=exclude_covid, ticker=ticker)
     if df.empty:
-        raise RuntimeError("model_features is empty — run feature_builder.py first")
+        raise RuntimeError(f"model_features is empty for {ticker} — run feature_builder.py first")
 
     # Create interaction terms if regime feature exists
     if feature_has_enough_data(df, "high_vol_regime"):
@@ -524,11 +525,11 @@ def run_full_pipeline(
 ) -> dict:
     """End-to-end: load features -> fit all specs -> compare -> forecast."""
     # --- Load features ---
-    df = get_features(conn, exclude_covid=exclude_covid)
+    df = get_features(conn, exclude_covid=exclude_covid, ticker=ticker)
     if df.empty:
-        raise RuntimeError("model_features is empty — run feature_builder.py first")
+        raise RuntimeError(f"model_features is empty for {ticker} — run feature_builder.py first")
 
-    log.info(f"Loaded {len(df)} feature rows for modeling")
+    log.info(f"Loaded {len(df)} feature rows for modeling ({ticker})")
 
     # --- Create interaction terms for regime model ---
     if feature_has_enough_data(df, "high_vol_regime"):
@@ -601,7 +602,7 @@ def run_full_pipeline(
         next_week_start = (today + pd.Timedelta(days=days_ahead)).strftime("%Y-%m-%d")
         log.info(f"Forecasting for week starting: {next_week_start}")
 
-    feature_row = get_feature_for_week(conn, next_week_start)
+    feature_row = get_feature_for_week(conn, next_week_start, ticker=ticker)
     if feature_row is None:
         log.warning(
             f"No feature row for {next_week_start} — "

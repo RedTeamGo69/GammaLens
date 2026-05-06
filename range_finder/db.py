@@ -262,6 +262,50 @@ def init_all_tables(conn) -> None:
         )
     """)
 
+    # --- weekly_underlying ---
+    # Per-ticker weekly OHLC + vol-proxy OHLC for tickers that own their HAR
+    # pipeline (QQQ / AMZN / AMD — see phase1.ticker_config.uses_own_har).
+    # SPX/XSP continue to use weekly_spx above; they share SPX history and
+    # don't need a row here. The vol-proxy columns store either VIX (for
+    # stocks) or VXN (for QQQ) as configured in ticker_config.vol_proxy_yf.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_underlying (
+            ticker            TEXT NOT NULL,
+            week_start        TEXT NOT NULL,
+            week_end          TEXT,
+            open              REAL,
+            high              REAL,
+            low               REAL,
+            close             REAL,
+            volume            REAL,
+            vol_proxy_open    REAL,
+            vol_proxy_high    REAL,
+            vol_proxy_low     REAL,
+            vol_proxy_close   REAL,
+            range_pts         REAL,
+            range_pct         REAL,
+            log_range         REAL,
+            return_pct        REAL,
+            updated_at        TEXT,
+            PRIMARY KEY (ticker, week_start)
+        )
+    """)
+
+    # --- earnings_flags ---
+    # Per-ticker weekly earnings flag for the single-stock earnings-week gate
+    # in the Spread Finder (see phase1.ticker_config.has_single_name_earnings).
+    # Index ETFs / cash indexes never set this; only AMZN/AMD will populate it.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS earnings_flags (
+            ticker          TEXT NOT NULL,
+            week_start      TEXT NOT NULL,
+            has_earnings    INTEGER NOT NULL DEFAULT 0,
+            earnings_date   TEXT,
+            updated_at      TEXT,
+            PRIMARY KEY (ticker, week_start)
+        )
+    """)
+
     # --- macro_daily ---
     cur.execute("""
         CREATE TABLE IF NOT EXISTS macro_daily (
@@ -288,9 +332,14 @@ def init_all_tables(conn) -> None:
     """)
 
     # --- model_features ---
+    # Composite PK (week_start, ticker) so each ticker that owns a HAR pipeline
+    # (QQQ / AMZN / AMD — see phase1.ticker_config.uses_own_har) stores its own
+    # feature rows without colliding with SPX. SPX/XSP share the SPX rows
+    # (XSP rides on SPX features at 1/10 scale — see ticker_config xsp_scale_to_spx).
     cur.execute("""
         CREATE TABLE IF NOT EXISTS model_features (
-            week_start          TEXT PRIMARY KEY,
+            week_start          TEXT NOT NULL,
+            ticker              TEXT NOT NULL DEFAULT 'SPX',
             log_range           REAL,
             range_pct           REAL,
             har_d1              REAL,
@@ -319,7 +368,9 @@ def init_all_tables(conn) -> None:
             has_nfp             INTEGER,
             has_opex            INTEGER,
             event_count         INTEGER,
-            updated_at          TEXT
+            has_earnings        INTEGER DEFAULT 0,
+            updated_at          TEXT,
+            PRIMARY KEY (week_start, ticker)
         )
     """)
 
@@ -327,11 +378,36 @@ def init_all_tables(conn) -> None:
     for col, ctype in [
         ("high_vol_regime", "INTEGER"),
         ("gex_normalized", "REAL"),
+        ("has_earnings", "INTEGER DEFAULT 0"),
     ]:
         try:
             cur.execute(f"ALTER TABLE model_features ADD COLUMN IF NOT EXISTS {col} {ctype}")
         except Exception:
             pass
+
+    # Migration: add ticker column on legacy single-PK deploys and rebuild PK.
+    # Legacy rows become ticker='SPX' (accurate — every pre-migration row was
+    # SPX-derived). Idempotent via IF NOT EXISTS + pg_constraint probe so it's
+    # safe to re-run on every init_all_tables() call.
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE model_features ADD COLUMN ticker TEXT NOT NULL DEFAULT 'SPX';
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$
+    """)
+    cur.execute("""
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'model_features_pkey'
+                  AND conrelid = 'model_features'::regclass
+                  AND COALESCE(array_length(conkey, 1), 0) = 1
+            ) THEN
+                ALTER TABLE model_features DROP CONSTRAINT model_features_pkey;
+                ALTER TABLE model_features ADD PRIMARY KEY (week_start, ticker);
+            END IF;
+        END $$
+    """)
 
     # --- gex_inputs ---
     # Composite PK (week_start, ticker) so SPX and XSP runs don't stomp on

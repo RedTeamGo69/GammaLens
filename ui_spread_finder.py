@@ -78,8 +78,8 @@ def _get_rf_conn():
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _cached_rf_get_features(_conn):
-    """Full model_features table, cached for 10 minutes.
+def _cached_rf_get_features(_conn, ticker: str = "SPX"):
+    """model_features table for one ticker, cached for 10 minutes.
 
     Streamlit reruns the Spread Finder render every time any widget changes
     — dropdown, number input, slider, risk-tier button — and the raw
@@ -92,7 +92,7 @@ def _cached_rf_get_features(_conn):
     The ``_conn`` underscore tells Streamlit to skip hashing the connection
     object (psycopg2 connections aren't hashable).
     """
-    return rf_get_features(_conn)
+    return rf_get_features(_conn, ticker=ticker)
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -586,17 +586,56 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     ticker_cfg = RF_TICKER_CONFIG.get(ticker, RF_TICKER_CONFIG["SPX"])
 
-    # ── Fetch latest VIX close (cached for the session) ──
-    if "_sf_live_vix" not in st.session_state:
+    # ── Earnings-week warning (single-stock tickers only) ──
+    # AMZN/AMD set has_single_name_earnings=True in ticker_config; QQQ/SPX/XSP
+    # don't. When the upcoming week is flagged in earnings_flags, surface a
+    # warning banner at the top of the tab but still let the user generate
+    # a plan — single-stock IV is structurally elevated pre-earnings, which
+    # makes weekly OTM credit spreads look juicy but their tail risk is
+    # much higher than the HAR predicts. ("Warn but allow" mode.)
+    from phase1.ticker_config import has_single_name_earnings as _has_sne
+    if _has_sne(ticker):
         try:
-            vix_hist = yf.Ticker("^VIX").history(period="5d")
-            if not vix_hist.empty:
-                st.session_state["_sf_live_vix"] = round(float(vix_hist["Close"].dropna().iloc[-1]), 2)
-            else:
-                st.session_state["_sf_live_vix"] = 18.0
+            from datetime import timedelta as _td_e, datetime as _dt_e
+            _today = _dt_e.now().date()
+            _days_to_mon = (7 - _today.weekday()) % 7 or 7
+            _next_monday = (_today + _td_e(days=_days_to_mon)).strftime("%Y-%m-%d")
+            _conn_e = _get_rf_conn()
+            _cur_e = _conn_e.cursor()
+            _cur_e.execute(
+                "SELECT has_earnings, earnings_date FROM earnings_flags "
+                "WHERE ticker = ? AND week_start = ?",
+                (ticker, _next_monday),
+            )
+            _row_e = _cur_e.fetchone()
+            if _row_e and _row_e[0]:
+                _ed = _row_e[1] or _next_monday
+                st.warning(
+                    f"⚠ **{ticker} reports earnings the week of {_next_monday}** "
+                    f"(scheduled {_ed}). Single-stock IV is structurally elevated "
+                    "pre-earnings — weekly OTM credit spreads will look richer "
+                    "than usual, but realised tail risk is much higher than the "
+                    "HAR model predicts. Verify chain liquidity, and consider "
+                    "sizing down or skipping this week."
+                )
         except Exception:
-            st.session_state["_sf_live_vix"] = 18.0
-    live_vix = st.session_state["_sf_live_vix"]
+            # Don't let an earnings-flag query failure block the tab render.
+            pass
+
+    # ── Fetch latest vol-proxy close (cached for the session) ──
+    # Per-ticker vol proxy: VIX for SPX/XSP/AMZN/AMD, VXN for QQQ.
+    _vol_proxy = ticker_cfg.get("vol_proxy_yf", "^VIX")
+    _vol_cache_key = f"_sf_live_vol_{_vol_proxy}"
+    if _vol_cache_key not in st.session_state:
+        try:
+            vp_hist = yf.Ticker(_vol_proxy).history(period="5d")
+            if not vp_hist.empty:
+                st.session_state[_vol_cache_key] = round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
+            else:
+                st.session_state[_vol_cache_key] = 18.0
+        except Exception:
+            st.session_state[_vol_cache_key] = 18.0
+    live_vix = st.session_state[_vol_cache_key]
 
     # ── Monday open freeze logic ──
     # On the weekly freeze day (Monday or Tue after holiday) at market open,
@@ -639,14 +678,26 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             # TRUE daily-candle Open, not whatever tick `spot` happens to
             # land on while this refresh is running. Fall back to spot
             # only if yfinance hasn't returned today's bar yet.
-            spx_daily_open = _daily_open_today("^SPX")
-            if spx_daily_open is not None:
-                frozen_spot = round(spx_daily_open / 10.0, 2) if ticker == "XSP" else round(spx_daily_open, 2)
+            #
+            # Per-ticker yfinance symbols come from ticker_config:
+            # SPX/XSP read ^SPX (XSP scales /10); QQQ reads QQQ; AMZN/AMD
+            # read their own symbols. Vol proxy is VIX for everyone except
+            # QQQ, which uses VXN.
+            _yf_underlying = ticker_cfg.get("yf_symbol", "^SPX")
+            _yf_vol_proxy  = ticker_cfg.get("vol_proxy_yf", "^VIX")
+            _xsp_scale     = ticker_cfg.get("xsp_scale_to_spx", False)
+
+            underlying_daily_open = _daily_open_today(_yf_underlying)
+            if underlying_daily_open is not None:
+                if _xsp_scale:
+                    frozen_spot = round(underlying_daily_open / 10.0, 2)
+                else:
+                    frozen_spot = round(underlying_daily_open, 2)
             else:
                 frozen_spot = round(spot, 2)
 
-            vix_daily_open = _daily_open_today("^VIX")
-            frozen_vix_val = round(vix_daily_open, 2) if vix_daily_open is not None else live_vix
+            vol_proxy_daily_open = _daily_open_today(_yf_vol_proxy)
+            frozen_vix_val = round(vol_proxy_daily_open, 2) if vol_proxy_daily_open is not None else live_vix
 
             st.session_state[mon_open_key] = frozen_spot
             st.session_state[mon_vix_key] = frozen_vix_val
@@ -861,8 +912,13 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     st.markdown("---")
 
     # ── Check data availability (reload after rebuild if needed) ──
+    # XSP rides on SPX's HAR features at 1/10 scale (see ticker_config
+    # spread_finder_mode="spx_shared"). For its own-HAR tickers (QQQ / AMZN /
+    # AMD) we read the rows that own the per-ticker feature pipeline.
+    from phase1.ticker_config import uses_own_har
+    _features_ticker = ticker if uses_own_har(ticker) else "SPX"
     try:
-        df_feat = _cached_rf_get_features(conn)
+        df_feat = _cached_rf_get_features(conn, ticker=_features_ticker)
     except Exception:
         df_feat = pd.DataFrame()
 
@@ -896,15 +952,17 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         # that's the fast path for iterating on one model.
         _specs_to_fit = list(RF_MODEL_SPECS.keys()) if do_weekly else [model_choice]
 
-        # Weekly Setup also mirrors the cron's ticker matrix: HAR features
-        # are all SPX-derived (weekly_spx, VIX, FRED) and XSP is just
-        # SPX/10, so the fit math is identical under either ticker. Saving
-        # the same fit under both tickers at once means one click on
-        # either sidebar ticker populates Postgres for both — otherwise
-        # the user has to switch tickers and click again, which is how
-        # we ended up with SPX populated and XSP showing "No saved fit."
-        # A plain Forecast click keeps the fast single-ticker path.
-        _tickers_to_save = ["SPX", "XSP"] if do_weekly else [ticker]
+        # SPX and XSP share HAR features (XSP = SPX / 10), so a Weekly
+        # Setup click on either populates both. The own-HAR tickers
+        # (QQQ / AMZN / AMD) each fit on their own per-ticker feature
+        # rows, so they are NOT mirrored — each ticker stands on its own
+        # fit. A plain Forecast click always saves only to the active
+        # ticker for either group.
+        from phase1.ticker_config import uses_own_har as _uses_own_har
+        if do_weekly and not _uses_own_har(ticker):
+            _tickers_to_save = ["SPX", "XSP"]
+        else:
+            _tickers_to_save = [ticker]
 
         _spinner_label = (
             f"4/4 — Fitting {len(_specs_to_fit)} specs..."

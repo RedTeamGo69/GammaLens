@@ -371,6 +371,8 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     from range_finder.db import get_connection, init_all_tables
     from range_finder.data_collector import (
         fetch_spx_vix, save_spx_vix,
+        fetch_underlying_weekly, save_underlying_weekly,
+        populate_earnings_flags,
         fetch_fred_macro, save_fred_macro,
         build_event_flags,
         fred_key_status, FRED_API_KEY,
@@ -385,11 +387,20 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         feature_has_enough_data,
     )
     from range_finder.spread_levels import build_spread_plan, log_spread_plan
+    from phase1.ticker_config import get_config, uses_own_har, has_single_name_earnings
+
+    cfg = get_config(ticker)
 
     conn = get_connection()
     init_all_tables(conn)
 
     # ── Step 1: Refresh market data ──
+    # SPX/XSP keep using fetch_spx_vix (their HAR features come from the
+    # weekly_spx table — SPX-derived; XSP rides on SPX at 1/10 scale).
+    # Own-HAR tickers (QQQ/AMZN/AMD) fetch their own OHLC + vol-proxy series
+    # into weekly_underlying. SPX/VIX history is also refreshed when an
+    # own-HAR job runs because the macro term-structure (^VIX9D, ^VIX3M) and
+    # macro features still come from VIX-based feeds.
     _logger.info("  1/4 Refreshing SPX/VIX weekly data from yfinance...")
     try:
         df_spx = fetch_spx_vix(years=6)
@@ -397,6 +408,28 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         _logger.info(f"  SPX/VIX: {len(df_spx)} weeks fetched, {rows} new")
     except Exception as e:
         _logger.warning(f"  SPX/VIX fetch failed: {e} (continuing with existing data)")
+
+    if uses_own_har(ticker):
+        _logger.info(f"  1/4 Refreshing per-ticker weekly data ({ticker} via {cfg['yf_symbol']}, "
+                     f"vol proxy {cfg['vol_proxy_yf']})...")
+        try:
+            df_t = fetch_underlying_weekly(
+                ticker=ticker,
+                yf_symbol=cfg["yf_symbol"],
+                vol_proxy_yf=cfg["vol_proxy_yf"],
+                years=6,
+            )
+            rows = save_underlying_weekly(conn, ticker, df_t)
+            _logger.info(f"  {ticker}: {len(df_t)} weeks fetched, {rows} upserted")
+        except Exception as e:
+            _logger.warning(f"  {ticker} weekly fetch failed: {e} (continuing with existing data)")
+
+        if has_single_name_earnings(ticker):
+            try:
+                n_earn = populate_earnings_flags(conn, ticker)
+                _logger.info(f"  {ticker} earnings flags: {n_earn} weeks populated")
+            except Exception as e:
+                _logger.warning(f"  {ticker} earnings flag population failed: {e}")
 
     if fred_key:
         _logger.info(f"  FRED key: {fred_key_status()}")
@@ -438,9 +471,12 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     #
     # Do NOT reorder these steps without updating the HAR model's
     # training pipeline to match.
-    _logger.info("  2/4 Rebuilding feature matrix...")
+    _logger.info(f"  2/4 Rebuilding feature matrix ({ticker})...")
     try:
-        build_features(conn)
+        # SPX/XSP both feed off the SPX feature rows; only own-HAR tickers
+        # (QQQ/AMZN/AMD) get their own per-ticker build.
+        build_target = ticker if uses_own_har(ticker) else "SPX"
+        build_features(conn, ticker=build_target)
     except Exception as e:
         _logger.error(f"  Feature rebuild failed: {e}")
         return
@@ -464,7 +500,11 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     _logger.info(f"  4/4 Fitting all {len(MODEL_SPECS)} model specs...")
     try:
         from range_finder.feature_builder import get_features
-        df_feat = get_features(conn)
+        # XSP shares SPX's HAR features (spread_finder_mode="spx_shared"); the
+        # own-HAR tickers (QQQ/AMZN/AMD) load their own per-ticker rows.
+        from phase1.ticker_config import uses_own_har
+        _features_ticker = ticker if uses_own_har(ticker) else "SPX"
+        df_feat = get_features(conn, ticker=_features_ticker)
         if df_feat.empty:
             _logger.warning("  No features available — skipping forecast")
             return
@@ -525,31 +565,36 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
                         return float(op)
             return None
 
-        # Index open: ^SPX is the cash index. XSP trades at ~SPX/10, so we
-        # scale for XSP-ticker weekly rows to match the strike space the
-        # rest of the spread finder expects.
-        spx_open = _daily_open("^SPX")
-        if spx_open is not None:
-            monday_open = round(spx_open / 10.0, 2) if ticker == "XSP" else round(spx_open, 2)
-            open_source = f"^SPX daily Open ({session_date})"
+        # Per-ticker daily-Open lookup. SPX uses ^SPX (cash index). XSP
+        # rides on SPX at 1/10 scale (cfg.xsp_scale_to_spx). Own-HAR tickers
+        # (QQQ/AMZN/AMD) read their own yfinance symbol. The vol-proxy
+        # symbol comes from cfg.vol_proxy_yf — ^VIX for SPX/stocks, ^VXN for QQQ.
+        underlying_symbol = cfg["yf_symbol"]
+        underlying_open = _daily_open(underlying_symbol)
+        if underlying_open is not None:
+            if cfg.get("xsp_scale_to_spx", False):
+                monday_open = round(underlying_open / 10.0, 2)
+            else:
+                monday_open = round(underlying_open, 2)
+            open_source = f"{underlying_symbol} daily Open ({session_date})"
         else:
             monday_open = round(spot, 2)
             open_source = "live parity spot (daily bar unavailable)"
 
-        vix_open = _daily_open("^VIX")
-        if vix_open is not None:
-            monday_vix = round(vix_open, 2)
-            vix_source = f"^VIX daily Open ({session_date})"
+        vol_proxy_symbol = cfg["vol_proxy_yf"]
+        vol_proxy_open = _daily_open(vol_proxy_symbol)
+        if vol_proxy_open is not None:
+            monday_vix = round(vol_proxy_open, 2)
+            vix_source = f"{vol_proxy_symbol} daily Open ({session_date})"
         else:
-            # Live-last fallback — same as the legacy path.
             monday_vix = 18.0
             try:
-                vix_hist = yf.Ticker("^VIX").history(period="5d")
-                if not vix_hist.empty:
-                    monday_vix = round(float(vix_hist["Close"].dropna().iloc[-1]), 2)
+                vp_hist = yf.Ticker(vol_proxy_symbol).history(period="5d")
+                if not vp_hist.empty:
+                    monday_vix = round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
             except Exception:
                 pass
-            vix_source = "live ^VIX last close (daily Open unavailable)"
+            vix_source = f"live {vol_proxy_symbol} last close (daily Open unavailable)"
 
         days_since_monday = run_now.weekday()
         monday = run_now - timedelta(days=days_since_monday)

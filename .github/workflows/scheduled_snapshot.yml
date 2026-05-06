@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ticker: [SPX, XSP]
+        ticker: [SPX, XSP, QQQ, AMZN, AMD]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

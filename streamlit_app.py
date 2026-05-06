@@ -323,8 +323,22 @@ def main():
 
         st.divider()
 
-        # Ticker selector
-        ticker = st.selectbox("Index", ["SPX", "XSP"], index=0, key="ticker_select")
+        # Ticker selector — grouped by category (index / etf / stock)
+        from phase1.ticker_config import all_tickers, get_config
+        _ticker_options = all_tickers()
+
+        def _format_ticker(sym: str) -> str:
+            cat = get_config(sym).get("category", "")
+            label_map = {"index": "Index", "etf": "ETF", "stock": "Stock"}
+            return f"{sym}  ({label_map.get(cat, cat)})"
+
+        ticker = st.selectbox(
+            "Ticker",
+            _ticker_options,
+            index=0,
+            key="ticker_select",
+            format_func=_format_ticker,
+        )
 
         # Expiration picker
         with st.spinner("Loading expirations..."):

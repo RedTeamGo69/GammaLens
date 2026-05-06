@@ -197,6 +197,206 @@ def save_spx_vix(conn, df: pd.DataFrame) -> int:
 
 
 # =============================================================================
+# PER-TICKER UNDERLYING + VOL-PROXY DATA
+# =============================================================================
+# QQQ / AMZN / AMD don't piggyback on SPX history — each gets its own weekly
+# OHLC + per-ticker vol-proxy series (VXN for QQQ, VIX for stocks). SPX/XSP
+# continue to use weekly_spx above; the schema split keeps the SPX pipeline
+# unchanged.
+
+def fetch_underlying_weekly(
+    ticker: str,
+    yf_symbol: str,
+    vol_proxy_yf: str,
+    years: int = HISTORY_YEARS,
+) -> pd.DataFrame:
+    """Pull weekly OHLC + per-ticker vol-proxy OHLC from yfinance.
+
+    Returns one DataFrame indexed by week_start with columns:
+        open, high, low, close, volume,
+        vol_proxy_open, vol_proxy_high, vol_proxy_low, vol_proxy_close,
+        range_pts, range_pct, log_range, return_pct, week_end
+
+    Mirrors the schema of ``fetch_spx_vix`` so the downstream feature builder
+    can treat the two outputs uniformly.
+    """
+    end   = datetime.today()
+    start = end - timedelta(weeks=years * 52 + 4)
+
+    log.info(f"[{ticker}] Fetching weekly OHLC ({yf_symbol}) {start.date()} → {end.date()}")
+    raw = yf.download(yf_symbol, start=start, end=end, interval="1wk",
+                      progress=False, timeout=60)
+    if raw.empty:
+        raise RuntimeError(
+            f"yfinance returned empty data for {yf_symbol} ({ticker}) — "
+            "market closed, network issue, or unsupported symbol."
+        )
+
+    log.info(f"[{ticker}] Fetching weekly vol proxy ({vol_proxy_yf})")
+    vp_raw = yf.download(vol_proxy_yf, start=start, end=end, interval="1wk",
+                         progress=False, timeout=60)
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    if isinstance(vp_raw.columns, pd.MultiIndex):
+        vp_raw.columns = vp_raw.columns.get_level_values(0)
+
+    base = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+    base.columns = ["open", "high", "low", "close", "volume"]
+
+    if not vp_raw.empty:
+        vp = vp_raw[["Open", "High", "Low", "Close"]].copy()
+        vp.columns = ["vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"]
+        df = base.join(vp, how="left")
+    else:
+        log.warning(f"[{ticker}] vol proxy {vol_proxy_yf} returned empty — vol_proxy_* will be NaN")
+        for col in ("vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"):
+            base[col] = pd.NA
+        df = base
+
+    df.index.name = "week_start"
+    df.index = pd.to_datetime(df.index).normalize()
+
+    df["range_pts"]   = df["high"] - df["low"]
+    df["range_pct"]   = df["range_pts"] / df["open"]
+    df["log_range"]   = df["range_pct"].apply(lambda x: pd.NA if (x is None or pd.isna(x) or x <= 0) else math.log(x))
+    df["return_pct"]  = (df["close"] - df["open"]) / df["open"]
+    df["week_end"]    = df.index + timedelta(days=4)
+
+    df.dropna(subset=["open", "close", "range_pct"], inplace=True)
+
+    log.info(f"[{ticker}] weekly_underlying: {len(df)} rows collected")
+    return df
+
+
+def save_underlying_weekly(conn, ticker: str, df: pd.DataFrame) -> int:
+    """Upsert weekly_underlying rows for one ticker. Returns number written."""
+    now = datetime.now(timezone.utc).isoformat()
+    rows_written = 0
+    cur = conn.cursor()
+    for week_start, row in df.iterrows():
+        cur.execute("""
+            INSERT INTO weekly_underlying (
+                ticker, week_start, week_end,
+                open, high, low, close, volume,
+                vol_proxy_open, vol_proxy_high, vol_proxy_low, vol_proxy_close,
+                range_pts, range_pct, log_range, return_pct,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (ticker, week_start) DO UPDATE SET
+                week_end        = excluded.week_end,
+                open            = excluded.open,
+                high            = excluded.high,
+                low             = excluded.low,
+                close           = excluded.close,
+                volume          = excluded.volume,
+                vol_proxy_open  = excluded.vol_proxy_open,
+                vol_proxy_high  = excluded.vol_proxy_high,
+                vol_proxy_low   = excluded.vol_proxy_low,
+                vol_proxy_close = excluded.vol_proxy_close,
+                range_pts       = excluded.range_pts,
+                range_pct       = excluded.range_pct,
+                log_range       = excluded.log_range,
+                return_pct      = excluded.return_pct,
+                updated_at      = excluded.updated_at
+        """, (
+            ticker,
+            week_start.strftime("%Y-%m-%d"),
+            row["week_end"].strftime("%Y-%m-%d") if pd.notna(row["week_end"]) else None,
+            _safe(row, "open"),  _safe(row, "high"),
+            _safe(row, "low"),   _safe(row, "close"),
+            _safe(row, "volume"),
+            _safe(row, "vol_proxy_open"),  _safe(row, "vol_proxy_high"),
+            _safe(row, "vol_proxy_low"),   _safe(row, "vol_proxy_close"),
+            _safe(row, "range_pts"),       _safe(row, "range_pct"),
+            _safe(row, "log_range"),       _safe(row, "return_pct"),
+            now,
+        ))
+        rows_written += 1
+
+    conn.commit()
+    log.info(f"[{ticker}] weekly_underlying: {rows_written} rows upserted")
+    return rows_written
+
+
+def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
+    """Return weekly_underlying for one ticker as a DataFrame indexed by week_start."""
+    query = "SELECT * FROM weekly_underlying WHERE ticker = ? ORDER BY week_start ASC"
+    params = (ticker,)
+    if limit:
+        query += " LIMIT ?"
+        params = (ticker, int(limit))
+    df = pd.read_sql_query(query, conn, params=params,
+                           parse_dates=["week_start", "week_end"])
+    df.set_index("week_start", inplace=True)
+    return df
+
+
+# =============================================================================
+# EARNINGS FLAGS (single-stock weekly gate)
+# =============================================================================
+
+def populate_earnings_flags(conn, ticker: str) -> int:
+    """Backfill historical + upcoming earnings dates for a single-stock ticker.
+
+    Pulls dates from yfinance ``Ticker.earnings_dates`` (typically 4-12
+    quarters available) and writes a ``has_earnings=1`` row to
+    ``earnings_flags`` for the week containing each earnings date.
+
+    Index/ETF tickers (SPX, XSP, QQQ) shouldn't call this — they have no
+    single-name earnings event. Returns the number of weeks flagged.
+    """
+    try:
+        edf = yf.Ticker(ticker).earnings_dates
+    except Exception as e:
+        log.warning(f"[{ticker}] yfinance earnings_dates fetch failed: {e}")
+        return 0
+
+    if edf is None or edf.empty:
+        log.info(f"[{ticker}] yfinance returned no earnings_dates")
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    rows = 0
+    cur = conn.cursor()
+
+    # earnings_dates is indexed by tz-aware datetimes. Map each to its Monday-
+    # of-week so it joins with model_features.week_start cleanly.
+    for ts in edf.index:
+        try:
+            d = ts.to_pydatetime().date() if hasattr(ts, "to_pydatetime") else ts.date()
+        except Exception:
+            continue
+        # Monday of the week (weekday() == 0)
+        monday = d - timedelta(days=d.weekday())
+        week_start = monday.strftime("%Y-%m-%d")
+        cur.execute("""
+            INSERT INTO earnings_flags (ticker, week_start, has_earnings, earnings_date, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT (ticker, week_start) DO UPDATE SET
+                has_earnings  = 1,
+                earnings_date = excluded.earnings_date,
+                updated_at    = excluded.updated_at
+        """, (ticker, week_start, d.strftime("%Y-%m-%d"), now))
+        rows += 1
+
+    conn.commit()
+    log.info(f"[{ticker}] earnings_flags: {rows} weeks flagged")
+    return rows
+
+
+def get_earnings_flag(conn, ticker: str, week_start: str) -> bool:
+    """Return True if the (ticker, week_start) row has has_earnings=1."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT has_earnings FROM earnings_flags WHERE ticker = ? AND week_start = ?",
+        (ticker, week_start),
+    )
+    row = cur.fetchone()
+    return bool(row and row[0])
+
+
+# =============================================================================
 # FRED MACRO DATA
 # =============================================================================
 

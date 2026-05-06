@@ -57,24 +57,16 @@ STANDARD_WING_WIDTHS = [15, 20, 25, 30, 40, 50]
 
 MIN_CREDIT_RATIO = 0.05   # 5% — realistic for far-OTM weekly credit spreads
 
-# Per-ticker configuration — XSP is 1/10th of SPX
-TICKER_CONFIG = {
-    "SPX": {
-        "strike_increment": 5,
-        "wing_widths": [15, 20, 25, 30, 40, 50],
-        "min_spread_width": {"normal": 20, "event_1": 25, "event_2": 30, "fomc_week": 35},
-    },
-    "XSP": {
-        "strike_increment": 1,
-        "wing_widths": [1.5, 2, 2.5, 3, 4, 5],
-        "min_spread_width": {"normal": 2, "event_1": 2.5, "event_2": 3, "fomc_week": 3.5},
-    },
-}
+# Per-ticker configuration — re-exported from the central phase1.ticker_config
+# module so any place that historically imported from spread_levels keeps
+# working. The full config (display name, yfinance symbol, vol proxy, etc.)
+# lives in phase1/ticker_config.py.
+from phase1.ticker_config import TICKER_CONFIG, get_config as _get_full_config
 
 
 def get_ticker_config(ticker: str = "SPX") -> dict:
     """Get spread configuration for a given ticker."""
-    return TICKER_CONFIG.get(ticker.upper(), TICKER_CONFIG["SPX"])
+    return _get_full_config(ticker)
 
 
 # =============================================================================

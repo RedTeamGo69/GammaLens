@@ -26,7 +26,7 @@ from ui_sidebar import (
 
 # ── Phase1 engine imports ──
 from phase1.market_clock import now_ny, get_calendar_snapshot
-from phase1.data_client import TradierDataClient
+from phase1.data_client import PublicDataClient
 from phase1.rates import fetch_risk_free_rate
 from phase1.parity import get_reference_spot_details
 import phase1.gex_engine as gex_engine
@@ -141,43 +141,43 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────────────────────────
 def get_credentials():
     """Pull API keys from Streamlit secrets, env vars, or sidebar input."""
-    tradier_token = ""
+    public_secret = ""
     fred_key = ""
 
     # Try st.secrets first (for Streamlit Cloud deployment)
     try:
-        tradier_token = st.secrets.get("TRADIER_TOKEN", "")
+        public_secret = st.secrets.get("PUBLIC_SECRET", "")
         fred_key = st.secrets.get("FRED_API_KEY", "")
     except Exception:
         pass
 
     # Fall back to env vars
-    if not tradier_token:
-        tradier_token = os.environ.get("TRADIER_TOKEN", "")
+    if not public_secret:
+        public_secret = os.environ.get("PUBLIC_SECRET", "")
     if not fred_key:
         fred_key = os.environ.get("FRED_API_KEY", "")
 
-    return tradier_token, fred_key
+    return public_secret, fred_key
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data fetching (cached)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
-def get_expirations_cached(tradier_token: str, ticker: str) -> list[str]:
-    """Tradier expirations change at most once per day; cache for 10 minutes
+def get_expirations_cached(public_secret: str, ticker: str) -> list[str]:
+    """Option expirations change at most once per day; cache for 10 minutes
     so the sidebar render doesn't hit the API on every widget rerun."""
-    return TradierDataClient(token=tradier_token).get_expirations(ticker)
+    return PublicDataClient(token=public_secret).get_expirations(ticker)
 
 
 @st.cache_resource(ttl=90, show_spinner=False)
-def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run_id: str, ticker: str = "SPX"):
+def fetch_all_data(public_secret: str, fred_key: str, selected_exps: tuple, _run_id: str, ticker: str = "SPX"):
     """
     Run the full GEX engine pipeline. Cached for 90 seconds.
     _run_id is kept stable; cache freshness is driven by the TTL and the
     "Refresh Now" button (which calls st.cache_resource.clear()).
     """
-    client = TradierDataClient(token=tradier_token)
+    client = PublicDataClient(token=public_secret)
 
     run_now = now_ny()
     calendar_snapshot = get_calendar_snapshot(run_now)
@@ -188,7 +188,7 @@ def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run
 
     avail = client.get_expirations(ticker)
     if not avail:
-        raise RuntimeError(f"No expirations returned from Tradier API for {ticker}")
+        raise RuntimeError(f"No expirations returned from Public API for {ticker}")
     today_str = run_now.strftime("%Y-%m-%d")
     nearest_exp = next((e for e in avail if e >= today_str), avail[0])
 
@@ -304,21 +304,21 @@ def main():
     st.title("📊 Gamma Exposure Dashboard")
     st.caption(f"GEX Calculator {TOOL_VERSION} — Implied spot | Zero gamma sweep | Expected move | Hybrid IV")
 
-    tradier_token, fred_key = get_credentials()
+    public_secret, fred_key = get_credentials()
 
     # ── Sidebar controls ──
     with st.sidebar:
         st.header("⚙️ Settings")
 
-        if not tradier_token:
-            tradier_token = st.text_input("Tradier API Token", type="password",
-                                           help="Get yours at https://web.tradier.com/user/api")
+        if not public_secret:
+            public_secret = st.text_input("Public API Secret", type="password",
+                                          help="Generate one at https://public.com/settings/security/api")
         if not fred_key:
             fred_key = st.text_input("FRED API Key (optional)", type="password",
                                       help="For live T-bill rates. Get at https://fred.stlouisfed.org/docs/api/api_key.html")
 
-        if not tradier_token:
-            st.warning("Enter your Tradier API token to get started.")
+        if not public_secret:
+            st.warning("Enter your Public API secret to get started.")
             st.stop()
 
         st.divider()
@@ -343,7 +343,7 @@ def main():
         # Expiration picker
         with st.spinner("Loading expirations..."):
             try:
-                avail = get_expirations_cached(tradier_token, ticker)
+                avail = get_expirations_cached(public_secret, ticker)
             except Exception as e:
                 st.error(f"Could not fetch expirations: {e}")
                 st.stop()
@@ -372,7 +372,7 @@ def main():
             days_to_fri = (4 - run_now.weekday()) % 7
             # days_to_fri == 0 on Friday itself, which is correct (include today)
             fri = (run_now + timedelta(days=days_to_fri)).strftime("%Y-%m-%d")
-            # Friday-after-close edge case: Tradier drops today's expired 0DTE
+            # Friday-after-close edge case: the broker drops today's expired 0DTE
             # from the expirations list once it's settled, so every entry in
             # future_exps is already past this Friday. In that case the naive
             # [today_str .. fri] window is empty — roll forward a week so the
@@ -394,7 +394,7 @@ def main():
             else:
                 selected = []
         else:
-            # Custom → date-range picker. Tradier only lists expirations on
+            # Custom → date-range picker. The broker only lists expirations on
             # specific days (weekdays + whatever 0DTE the product offers), so
             # we let the user pick any [from, to] span and then filter the
             # available expirations down to whatever falls inside it.
@@ -435,7 +435,7 @@ def main():
                 )
             else:
                 st.caption(
-                    f"No Tradier expirations fall inside {_from_s} → {_to_s}. "
+                    f"No option expirations fall inside {_from_s} → {_to_s}. "
                     "Widen the range or pick a weekday the product trades on."
                 )
 
@@ -443,7 +443,7 @@ def main():
         # but there ARE future expirations available, fall back to the nearest
         # one rather than killing the page with st.stop(). Covers any residual
         # edge case (e.g. OpEx day post-close where the 3rd-Friday exp has been
-        # removed from Tradier's list).
+        # removed from the broker's list).
         if not selected and future_exps:
             selected = [future_exps[0]]
             st.caption(f"(No exps matched the selected window — falling back to {future_exps[0]})")
@@ -476,13 +476,13 @@ def main():
     # Stable key: cache freshness is driven by the @st.cache_resource TTL and
     # the "Refresh Now" button (which calls st.cache_resource.clear()). Using a
     # per-rerun timestamp here previously busted the cache on every widget
-    # interaction, forcing a full Tradier/FRED/Yahoo/GEX repipeline each time.
+    # interaction, forcing a full broker/FRED/Yahoo/GEX repipeline each time.
     run_id = "stable"
 
     # ── Fetch data ──
     with st.spinner("Crunching GEX..."):
         try:
-            data = fetch_all_data(tradier_token, fred_key or "", tuple(selected), run_id, ticker=ticker)
+            data = fetch_all_data(public_secret, fred_key or "", tuple(selected), run_id, ticker=ticker)
         except Exception as e:
             st.error(f"Engine error: {e}")
             st.stop()
@@ -525,10 +525,10 @@ def main():
 
     # ── Weekly & Monthly EM ──
     run_now = now_ny()
-    temp_client = TradierDataClient(token=tradier_token)
+    temp_client = PublicDataClient(token=public_secret)
     # Seed the temp client's chain cache with the snapshot we captured
     # inside fetch_all_data so weekly/monthly EM lookups reuse the chains
-    # we already paid for instead of hitting Tradier again. Without this,
+    # we already paid for instead of hitting Public again. Without this,
     # every rerun pays for 2+ extra option-chain fetches (one per
     # compute_em_for_expiration call) even when fetch_all_data has already
     # pre-warmed the target expirations (see the "pre-fetch" block near

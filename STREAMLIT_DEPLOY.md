@@ -40,9 +40,15 @@ your-repo/
 5. Click **Advanced settings** → paste your secrets:
 
 ```toml
-TRADIER_TOKEN = "your_tradier_token"
+PUBLIC_SECRET = "your_public_api_secret"
 FRED_API_KEY = "your_fred_api_key"
 ```
+
+> Generate the Public secret at **public.com → Settings → Security → API**.
+> It is long-lived but revocable; the app exchanges it for short-lived
+> access tokens automatically. Optional secrets: `PUBLIC_ACCOUNT_ID` (pin a
+> specific account if your secret has more than one) and
+> `PUBLIC_TOKEN_VALIDITY_MIN` (access-token lifetime, default 120).
 
 6. Click **Deploy**
 

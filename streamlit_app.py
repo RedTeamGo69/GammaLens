@@ -665,8 +665,8 @@ def main():
             on_label = "Today's Move"
         else:
             on_label = "Session Move"
-        display_pts = overnight.get("overnight_move_pts", 0)
-        display_pct = overnight.get("overnight_move_pct", 0)
+        display_pts = overnight.get("overnight_move_pts") or 0
+        display_pct = overnight.get("overnight_move_pct") or 0
 
         ratio = classification.get("move_ratio")
 

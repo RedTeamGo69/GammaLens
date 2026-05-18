@@ -89,6 +89,28 @@ def test_full_quote_normalizes_public_shape(monkeypatch):
     assert client._account_id == "ACC-1"
 
 
+def test_prevclose_derived_when_public_omits_it():
+    # Public omits previousClose on cash indexes (SPX/XSP). It must be
+    # reconstructed from last - oneDayChange.change so overnight/session
+    # move math doesn't collapse to None and crash the EM render.
+    q = {
+        "instrument": {"symbol": "SPX", "type": "INDEX"},
+        "last": "7403.05",
+        "oneDayChange": {"change": "12.50", "percentChange": "0.17"},
+    }
+    norm = PublicDataClient._normalize_quote(q, "SPX")
+    assert norm["last"] == 7403.05
+    assert abs(norm["prevclose"] - (7403.05 - 12.50)) < 1e-9
+    assert norm["change"] == 12.50
+
+
+def test_prevclose_used_when_present():
+    q = {"instrument": {"symbol": "AMZN"}, "last": "200.0",
+         "previousClose": "195.5", "oneDayChange": {"change": "4.5"}}
+    norm = PublicDataClient._normalize_quote(q, "AMZN")
+    assert norm["prevclose"] == 195.5
+
+
 def test_expirations_are_sorted(monkeypatch):
     _wire_fake_public(monkeypatch)
     client = PublicDataClient(token="SECRET")

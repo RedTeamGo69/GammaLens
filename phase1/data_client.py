@@ -197,22 +197,30 @@ class PublicDataClient:
 
     @staticmethod
     def _normalize_quote(q, fallback_symbol):
-        # Public exposes last/bid/ask/previousClose plus a oneDayChange
-        # object. It does NOT publish intraday open/high/low — those keys
-        # are kept (zeroed) only so the dict shape is unchanged for callers;
-        # downstream OHLC comes from yfinance, never the broker quote.
+        # Public exposes last/bid/ask plus a oneDayChange object. It does
+        # NOT publish intraday open/high/low — those keys are kept (zeroed)
+        # only so the dict shape is unchanged for callers; downstream OHLC
+        # comes from yfinance, never the broker quote.
         inst = q.get("instrument") or {}
         odc = q.get("oneDayChange") or {}
+        last = safe_float(q.get("last", 0), 0.0)
+        change = safe_float(odc.get("change", 0), 0.0)
+        prevclose = safe_float(q.get("previousClose", 0), 0.0)
+        if prevclose <= 0 and last > 0:
+            # Public omits previousClose on some instruments (notably cash
+            # indexes like SPX/XSP). Reconstruct it from last minus today's
+            # change so overnight/session-move math still has a reference.
+            prevclose = last - change
         return {
             "symbol": inst.get("symbol", fallback_symbol),
-            "last": safe_float(q.get("last", 0), 0.0),
-            "prevclose": safe_float(q.get("previousClose", 0), 0.0),
+            "last": last,
+            "prevclose": prevclose,
             "open": 0.0,
             "high": 0.0,
             "low": 0.0,
             "bid": safe_float(q.get("bid", 0), 0.0),
             "ask": safe_float(q.get("ask", 0), 0.0),
-            "change": safe_float(odc.get("change", 0), 0.0),
+            "change": change,
             "change_pct": safe_float(odc.get("percentChange", 0), 0.0),
         }
 

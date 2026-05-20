@@ -210,7 +210,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             oi = 0.0 if (np.isnan(oi_raw) or oi_raw < 0) else float(oi_raw)
             volume = float(raw_opt.get("volume", 0.0) or 0.0)
 
-            # Effective GEX weight = max(OI, today's volume).  The broker
+            # Effective GEX weight = max(OI, today's volume).  Tradier
             # reports open_interest as the previous day's settlement number,
             # which is especially stale for 0DTE strikes where this morning's
             # flow dwarfs yesterday's EOD OI.  Using the max of the two

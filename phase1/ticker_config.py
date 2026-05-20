@@ -8,7 +8,7 @@ without a circular import. `range_finder/spread_levels.py` re-exports the
 spread-finder-specific keys for backwards compatibility.
 
 Adding a new ticker only requires appending an entry here and confirming
-the Public API returns a chain for it.
+Tradier returns a chain for it.
 """
 from __future__ import annotations
 
@@ -19,9 +19,7 @@ from __future__ import annotations
 #
 # Keys
 #   display_name              — what to show in the sidebar
-#   public_symbol             — symbol for Public API calls
-#   public_type               — Public instrument type: "INDEX" for cash
-#                               indexes (SPX, XSP), "EQUITY" for ETFs/stocks
+#   tradier_symbol            — symbol for Tradier API calls
 #   yf_symbol                 — yfinance symbol for daily/weekly OHLC backfill
 #   vol_proxy_yf              — yfinance symbol for the vol-index feature
 #                               (^VIX for everything except QQQ which gets ^VXN)
@@ -46,8 +44,7 @@ from __future__ import annotations
 TICKER_CONFIG: dict[str, dict] = {
     "SPX": {
         "display_name": "SPX",
-        "public_symbol": "SPX",
-        "public_type": "INDEX",
+        "tradier_symbol": "SPX",
         "yf_symbol": "^GSPC",
         "vol_proxy_yf": "^VIX",
         "strike_increment": 5,
@@ -62,8 +59,7 @@ TICKER_CONFIG: dict[str, dict] = {
     },
     "XSP": {
         "display_name": "XSP",
-        "public_symbol": "XSP",
-        "public_type": "INDEX",
+        "tradier_symbol": "XSP",
         "yf_symbol": "^GSPC",   # XSP shares SPX's underlying history (price ≈ SPX/10)
         "vol_proxy_yf": "^VIX",
         "strike_increment": 1,
@@ -78,8 +74,7 @@ TICKER_CONFIG: dict[str, dict] = {
     },
     "QQQ": {
         "display_name": "QQQ",
-        "public_symbol": "QQQ",
-        "public_type": "EQUITY",
+        "tradier_symbol": "QQQ",
         "yf_symbol": "QQQ",
         "vol_proxy_yf": "^VXN",
         "strike_increment": 1,
@@ -94,8 +89,7 @@ TICKER_CONFIG: dict[str, dict] = {
     },
     "AMZN": {
         "display_name": "AMZN",
-        "public_symbol": "AMZN",
-        "public_type": "EQUITY",
+        "tradier_symbol": "AMZN",
         "yf_symbol": "AMZN",
         "vol_proxy_yf": "^VIX",
         "strike_increment": 2.5,
@@ -110,8 +104,7 @@ TICKER_CONFIG: dict[str, dict] = {
     },
     "AMD": {
         "display_name": "AMD",
-        "public_symbol": "AMD",
-        "public_type": "EQUITY",
+        "tradier_symbol": "AMD",
         "yf_symbol": "AMD",
         "vol_proxy_yf": "^VIX",
         "strike_increment": 1,

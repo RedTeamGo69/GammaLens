@@ -185,7 +185,7 @@ def find_spread_finder_friday_exp(
     avail: "list[str]",
     ref_date: "date_cls | None" = None,
 ) -> "str | None":
-    """Return the broker-listed expiration that matches the target Friday.
+    """Return the Tradier-listed expiration that matches the target Friday.
 
     Prefers an exact ISO-date match against ``avail``; falls back to the
     nearest listed expiration within 3 calendar days of the target (handles
@@ -1225,7 +1225,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     # Live chain quotes for the Spread Finder's planned Friday, read from
     # data.chain_cache on every rerun (fetch_all_data repopulates that
-    # snapshot with fresh broker bid/ask on each refresh — see the
+    # snapshot with fresh Tradier bid/ask on each refresh — see the
     # pre-fetch block in streamlit_app.fetch_all_data).
     chain_quotes, chain_exp = _build_chain_quotes_for_spreads(
         data, ticker, ref_date=sf_ref_date,

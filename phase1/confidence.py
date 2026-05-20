@@ -12,10 +12,10 @@ def build_run_confidence(stats: dict, spot_info: dict, staleness_info: dict | No
     source = spot_info.get("source", "") or ""
     pdiag = spot_info.get("parity_diagnostics") or {}
 
-    if source.startswith("broker (forced, market closed)"):
+    if source.startswith("tradier (forced, market closed)"):
         score -= 5
-        reasons.append("Market closed: using broker spot instead of live parity.")
-    elif source.startswith("broker"):
+        reasons.append("Market closed: using Tradier spot instead of live parity.")
+    elif source.startswith("tradier"):
         score -= 12
         reasons.append("Reference spot did not use implied parity.")
     elif source.startswith("implied median"):

@@ -6,14 +6,9 @@ Designed to be triggered by GitHub Actions (or any cron scheduler) at:
   - 9:30 AM ET  (market open — freeze opening prices, EM levels)
 
 Required env vars:
-  PUBLIC_SECRET  — Public API personal secret (from public.com settings)
+  TRADIER_TOKEN  — Tradier API bearer token
   DATABASE_URL   — Postgres connection string (e.g. Neon)
   FRED_API_KEY   — (optional) FRED API key for risk-free rate
-
-Optional env vars:
-  PUBLIC_ACCOUNT_ID         — pin a specific Public account (multi-account
-                              secrets); auto-resolved when unset
-  PUBLIC_TOKEN_VALIDITY_MIN — access-token lifetime in minutes (default 120)
 """
 from __future__ import annotations
 
@@ -29,9 +24,9 @@ def capture_snapshot():
     """Run the full GEX pipeline and save a snapshot + EM to Postgres."""
 
     # ── Validate env ──
-    public_secret = os.environ.get("PUBLIC_SECRET", "")
-    if not public_secret:
-        _logger.error("PUBLIC_SECRET not set — aborting")
+    tradier_token = os.environ.get("TRADIER_TOKEN", "")
+    if not tradier_token:
+        _logger.error("TRADIER_TOKEN not set — aborting")
         sys.exit(1)
 
     db_url = os.environ.get("DATABASE_URL", "")
@@ -44,7 +39,7 @@ def capture_snapshot():
 
     # ── Imports (after env check so errors are clear) ──
     from phase1.market_clock import now_ny, get_calendar_snapshot
-    from phase1.data_client import PublicDataClient
+    from phase1.data_client import TradierDataClient
     from phase1.rates import fetch_risk_free_rate
     from phase1.parity import get_reference_spot_details
     import phase1.gex_engine as gex_engine
@@ -56,7 +51,7 @@ def capture_snapshot():
     # FORCE_WEEKLY_SETUP=1 bypasses the market-hours / weekend / holiday gates
     # so the workflow can be triggered manually (e.g. after a DB wipe) on any
     # day at any time to rebuild features and refit the HAR model. When set,
-    # the GEX snapshot may be using stale broker quotes (API returns last
+    # the GEX snapshot may be using stale Tradier quotes (API returns last
     # tick), which is fine — the weekly setup cares about SPX/VIX history
     # from yfinance, not the current GEX value.
     force_weekly_setup = os.environ.get("FORCE_WEEKLY_SETUP", "").strip() in ("1", "true", "yes")
@@ -97,8 +92,8 @@ def capture_snapshot():
     # during that idle window, so the post-9:30 critical path is only
     # spot/chain fetch + GEX compute + DB save.
     #
-    # Safe to pre-fetch: data-client construction, FRED risk-free rate
-    # (daily series, not 9:30-gated), and the expirations list
+    # Safe to pre-fetch: Tradier client construction, FRED risk-free rate
+    # (daily series, not 9:30-gated), and the Tradier expirations list
     # (set by CBOE in advance, doesn't change intraday).
     # NOT safe to pre-fetch: spot price, option chains — those need the open.
     #
@@ -110,7 +105,7 @@ def capture_snapshot():
     # XSP matrix job under compute throttling, which delayed the snapshot save
     # well past 9:30. Removed.
 
-    client = PublicDataClient(token=public_secret)
+    client = TradierDataClient(token=tradier_token)
     client.clear_cache()
 
     rfr_info = fetch_risk_free_rate(fred_key)
@@ -123,7 +118,7 @@ def capture_snapshot():
 
     avail = client.get_expirations(ticker)
     if not avail:
-        _logger.error(f"No expirations returned from Public API for {ticker}")
+        _logger.error(f"No expirations returned from Tradier API for {ticker}")
         sys.exit(1)
     nearest_exp = next((e for e in avail if e >= today_str), avail[0])
     # ── Select expirations: 0DTE + next 3 nearest ──

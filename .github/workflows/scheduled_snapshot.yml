@@ -42,8 +42,7 @@ jobs:
 
       - name: Run scheduled snapshot (${{ matrix.ticker }})
         env:
-          PUBLIC_SECRET: ${{ secrets.PUBLIC_SECRET }}
-          PUBLIC_ACCOUNT_ID: ${{ secrets.PUBLIC_ACCOUNT_ID }}
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           TICKER: ${{ matrix.ticker }}

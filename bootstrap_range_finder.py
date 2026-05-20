@@ -25,7 +25,7 @@ Usage:
   DATABASE_URL=postgres://... FRED_API_KEY=... python bootstrap_range_finder.py
   DATABASE_URL=postgres://... python bootstrap_range_finder.py --skip-fred
 
-No Public secret needed — this only touches yfinance + FRED + Postgres.
+No Tradier token needed — this only touches yfinance + FRED + Postgres.
 GEX values will be NaN for all historical weeks (expected; fresh Monday
 cron runs will start populating gex_inputs going forward).
 """

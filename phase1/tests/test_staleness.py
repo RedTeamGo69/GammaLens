@@ -28,7 +28,7 @@ def test_staleness_info_penalizes_closed_market():
     calendar_snapshot = {}
     spot_info = {
         "market_open": False,
-        "source": "broker (forced, market closed)",
+        "source": "tradier (forced, market closed)",
         "parity_attempted": False,
         "parity_chain_status": None,
         "parity_diagnostics": None,

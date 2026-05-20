@@ -181,8 +181,8 @@ def compute_overnight_move(
     """
     Compute the overnight move from previous close to the current reference price.
 
-    current_price: live spot (parity-implied or broker quote)
-    prev_close: yesterday's SPX close from the broker quote
+    current_price: live spot (parity-implied or Tradier quote)
+    prev_close: yesterday's SPX close from the Tradier quote
     source: label for what provided the current price
     """
     if prev_close <= 0 or current_price <= 0:
@@ -230,8 +230,8 @@ def build_expected_move_analysis(
     (SPY proxy, ES futures, overnight range) has been removed.
 
     Parameters:
-        spot:             Current reference spot (parity-implied or broker)
-        prev_close:       SPX previous close from broker quote
+        spot:             Current reference spot (parity-implied or Tradier)
+        prev_close:       SPX previous close from Tradier quote
         zero_gamma:       Zero-gamma level from GEX engine
         gamma_regime:     "Positive Gamma" / "Negative Gamma" / "At Zero Gamma"
         calls_0dte:       Call chain for the 0DTE expiration (the nearest

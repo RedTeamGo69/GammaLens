@@ -678,9 +678,27 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
     today_iso = run_now.strftime("%Y-%m-%d")
 
     # ── 1: Refresh daily SPX/VIX/VIX1D (SPX only — XSP rides on SPX) ──
-    _logger.info("  [0DTE] 1/5 Refreshing daily SPX/VIX/VIX1D...")
+    # Adaptive backfill: on the first run after deploy (daily_spx empty) we
+    # need ~4 years so M2/M3 daily specs have enough rows to fit. On
+    # subsequent runs the rolling 20-day HAR window only needs the last
+    # ~30 days. Keep the fetch small in steady state — the yfinance daily
+    # endpoint is slow and we run this every market day.
     try:
-        df_d = fetch_daily_spx_vix(years=1)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM daily_spx WHERE ticker = 'SPX'")
+        existing_rows = (cur.fetchone() or [0])[0] or 0
+    except Exception:
+        existing_rows = 0
+    is_first_run = existing_rows < 100
+    fetch_years = 4 if is_first_run else 0.1  # 0.1y ≈ 37 calendar days
+
+    _logger.info(
+        f"  [0DTE] 1/5 Refreshing daily SPX/VIX/VIX1D "
+        f"({'INITIAL BACKFILL' if is_first_run else 'incremental'}, "
+        f"fetch_years={fetch_years}, existing daily_spx rows={existing_rows})..."
+    )
+    try:
+        df_d = fetch_daily_spx_vix(years=fetch_years)
         save_daily_spx(conn, df_d, ticker="SPX")
         _logger.info(f"  [0DTE] {len(df_d)} daily rows upserted")
     except Exception as e:
@@ -694,16 +712,33 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
     except Exception as e:
         _logger.warning(f"  [0DTE] Daily feature rebuild failed: {e}")
 
-    # ── 3: Refit daily HAR (Mondays / forced only) ──
-    if refit_today:
-        _logger.info("  [0DTE] 3/5 Refitting daily HAR specs...")
+    # ── 3: Refit daily HAR (Mondays / forced / first-ever run) ──
+    # On the very first deploy after this code lands, saved_models has no
+    # M*_daily_* row, so we MUST fit even on a non-Monday. After that, only
+    # Mondays / FORCE_WEEKLY_SETUP refit (daily refits don't move OLS
+    # coefficients meaningfully — a week of fresh rows does).
+    should_refit = refit_today or is_first_run
+    if not should_refit:
+        try:
+            from range_finder.model_persistence import load_model
+            try:
+                load_model("M2_daily_vix", conn=conn, ticker="SPX")
+            except Exception:
+                # No daily fit saved yet → bootstrap-style first fit
+                should_refit = True
+                _logger.info("  [0DTE] No daily model in saved_models — forcing first fit")
+        except Exception:
+            should_refit = True
+
+    if should_refit:
+        _logger.info("  [0DTE] 3/5 Fitting daily HAR specs...")
         try:
             out = run_daily_pipeline(conn, preferred_model="M2_daily_vix")
-            _logger.info(f"  [0DTE] Daily HAR refit done — saved {out['preferred']}")
+            _logger.info(f"  [0DTE] Daily HAR fit done — saved {out['preferred']}")
         except Exception as e:
-            _logger.warning(f"  [0DTE] Daily HAR refit failed: {e}")
+            _logger.warning(f"  [0DTE] Daily HAR fit failed: {e}")
     else:
-        _logger.info("  [0DTE] 3/5 Skipping daily HAR refit (not Monday)")
+        _logger.info("  [0DTE] 3/5 Skipping daily HAR refit (not Monday / model present)")
 
     # ── 4: Generate today's 0DTE plan and persist ──
     _logger.info(f"  [0DTE] 4/5 Generating today's plan for {ticker}...")

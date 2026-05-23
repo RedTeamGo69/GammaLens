@@ -163,3 +163,54 @@ def build_event_flags(conn) -> int:
     conn.commit()
     log.info(f"Event flags: {rows_written} weeks flagged")
     return rows_written
+
+
+def build_event_flags_daily(conn) -> int:
+    """
+    Build day-of FOMC / CPI / NFP flags for the 0DTE spread finder.
+
+    Unlike ``build_event_flags`` (which keys by week_start and aggregates any
+    event in that week), this keys by the exact event date. OpEx is omitted
+    because it's a weekly-cycle concept that doesn't translate to a single
+    day's risk.
+
+    Returns the number of rows upserted.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    flags: dict[str, dict] = {}
+
+    def mark(date_str: str, field: str):
+        d = pd.to_datetime(date_str).strftime("%Y-%m-%d")
+        if d not in flags:
+            flags[d] = {"has_fomc": 0, "has_cpi": 0, "has_nfp": 0}
+        flags[d][field] = 1
+
+    for d in FOMC_DATES:
+        mark(d, "has_fomc")
+    for d in CPI_DATES:
+        mark(d, "has_cpi")
+    for d in NFP_DATES:
+        mark(d, "has_nfp")
+
+    cur = conn.cursor()
+    rows_written = 0
+    for session_date, f in flags.items():
+        event_count = f["has_fomc"] + f["has_cpi"] + f["has_nfp"]
+        cur.execute("""
+            INSERT INTO event_flags_daily (
+                session_date, has_fomc, has_cpi, has_nfp, event_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_date) DO UPDATE SET
+                has_fomc    = excluded.has_fomc,
+                has_cpi     = excluded.has_cpi,
+                has_nfp     = excluded.has_nfp,
+                event_count = excluded.event_count,
+                updated_at  = excluded.updated_at
+        """, (session_date, f["has_fomc"], f["has_cpi"], f["has_nfp"],
+              event_count, now))
+        rows_written += 1
+
+    conn.commit()
+    log.info(f"event_flags_daily: {rows_written} days flagged")
+    return rows_written

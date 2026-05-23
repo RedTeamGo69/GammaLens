@@ -536,5 +536,109 @@ def init_all_tables(conn) -> None:
         )
     """)
 
+    # =========================================================================
+    # 0DTE / daily-cadence tables (separate from the weekly stack above so the
+    # weekly path stays byte-for-byte unchanged). Only SPX rows are populated
+    # by the bootstrap / cron paths; XSP reuses the SPX-trained daily HAR fit
+    # at inference time (XSP = SPX / 10). Other tickers are not supported by
+    # the 0DTE finder.
+    # =========================================================================
+
+    # --- daily_spx — daily SPX OHLC + VIX + VIX1D ---
+    # VIX1D only exists on yfinance from ~2022-04-25, so pre-2022 rows have
+    # NULL vix1d_close. Models that require it (M2_daily_vix / M3_daily_extended)
+    # auto-skip those rows via feature_has_enough_data.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_spx (
+            session_date    TEXT NOT NULL,
+            ticker          TEXT NOT NULL DEFAULT 'SPX',
+            spx_open        REAL,
+            spx_high        REAL,
+            spx_low         REAL,
+            spx_close       REAL,
+            range_pts       REAL,
+            range_pct       REAL,
+            log_range       REAL,
+            spx_return      REAL,
+            vix_close       REAL,
+            vix1d_close     REAL,
+            updated_at      TEXT,
+            PRIMARY KEY (session_date, ticker)
+        )
+    """)
+
+    # --- event_flags_daily — exact day-of FOMC/CPI/NFP flags (no week aggregation) ---
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS event_flags_daily (
+            session_date    TEXT PRIMARY KEY,
+            has_fomc        INTEGER DEFAULT 0,
+            has_cpi         INTEGER DEFAULT 0,
+            has_nfp         INTEGER DEFAULT 0,
+            event_count     INTEGER DEFAULT 0,
+            updated_at      TEXT
+        )
+    """)
+
+    # --- daily_model_features — feature matrix for the daily HAR ---
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_model_features (
+            session_date         TEXT NOT NULL,
+            ticker               TEXT NOT NULL DEFAULT 'SPX',
+            log_range            REAL,
+            range_pct            REAL,
+            har_d1_daily         REAL,
+            har_w_daily          REAL,
+            har_m_daily          REAL,
+            vix_close            REAL,
+            vix1d_close          REAL,
+            vix1d_implied_range  REAL,
+            vrp_daily            REAL,
+            hv5                  REAL,
+            spx_return_lag1      REAL,
+            abs_return_lag1      REAL,
+            has_fomc_today       INTEGER DEFAULT 0,
+            has_cpi_today        INTEGER DEFAULT 0,
+            has_nfp_today        INTEGER DEFAULT 0,
+            event_count          INTEGER DEFAULT 0,
+            gex                  REAL,
+            gex_normalized       REAL,
+            updated_at           TEXT,
+            PRIMARY KEY (session_date, ticker)
+        )
+    """)
+
+    # --- spread_log_daily — per-session 0DTE plans + breach outcomes ---
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS spread_log_daily (
+            session_date         TEXT NOT NULL,
+            ticker               TEXT NOT NULL DEFAULT 'SPX',
+            generated_at         TEXT,
+            spx_ref_open         REAL,
+            vix1d_open           REAL,
+            vrp_at_open          REAL,
+            point_pct            REAL,
+            upper_pct            REAL,
+            effective_range_pct  REAL,
+            call_short           REAL,
+            call_long            REAL,
+            put_short            REAL,
+            put_long             REAL,
+            wing_width_used      INTEGER,
+            buffer_pct           REAL,
+            event_count          INTEGER,
+            gex_flag             INTEGER,
+            warnings             TEXT,
+            actual_high          REAL,
+            actual_low           REAL,
+            actual_range_pct     REAL,
+            call_breached        INTEGER,
+            put_breached         INTEGER,
+            outcome              TEXT,
+            pnl_pts              REAL,
+            updated_at           TEXT,
+            PRIMARY KEY (session_date, ticker)
+        )
+    """)
+
     conn.commit()
     log.info("All range finder tables initialized (postgres)")

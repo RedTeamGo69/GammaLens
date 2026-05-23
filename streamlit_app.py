@@ -733,7 +733,9 @@ def main():
             st.caption(f"📌 {display_em_label} captured at {snap_time} — frozen for the horizon. Today's move and vol budget update live.")
 
     # ── Charts ──
-    tab_gex, tab_spread_finder = st.tabs(["📊 Strike GEX", "🎯 Spread Finder"])
+    tab_gex, tab_spread_finder, tab_0dte = st.tabs(
+        ["📊 Strike GEX", "🎯 Spread Finder", "⚡ 0DTE Finder"]
+    )
 
     with tab_gex:
         # Weekly/monthly markers ONLY use the frozen snap — never the live EM.
@@ -833,6 +835,11 @@ side of zero**, not by sign of the number.
         # live EM would invalidate the spread plan intra-week.
         _sf_weekly_em = weekly_em_snap or {}
         _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=_sf_weekly_em)
+
+    # ── 0DTE Finder — Same-day credit spread placement (SPX / XSP only) ──
+    with tab_0dte:
+        from ui_spread_finder_0dte import _render_0dte_spread_finder_tab
+        _render_0dte_spread_finder_tab(spot, levels, regime, data, ticker=ticker)
 
     # ── Auto-refresh ──
     # The old implementation was `while _elapsed < refresh_seconds: time.sleep()`

@@ -31,9 +31,19 @@ from range_finder.gex_bridge import (
 from range_finder.spread_levels import (
     build_spread_plan as rf_build_spread_plan,
     TICKER_CONFIG as RF_TICKER_CONFIG,
-    log_daily_spread_plan,
     SpreadPlan,
 )
+# NB: ``log_daily_spread_plan`` is imported lazily inside the render function
+# below, NOT here at module top. Reason: Streamlit Cloud's hot-reload does not
+# re-execute already-loaded Python modules when files change on disk — it just
+# clears st.cache_* and re-runs the script. So if a deploy lands AFTER
+# ``range_finder.spread_persistence`` (or its re-export host ``spread_levels``)
+# was loaded by the weekly tab, the new symbol ``log_daily_spread_plan`` won't
+# be visible in the cached module object even though it exists in the file on
+# disk. Importing it at module top would crash this whole tab with an
+# ``ImportError`` on first click; importing lazily lets the rest of the tab
+# render and degrades the logging step to a logged warning until the user
+# reboots the app (Manage app → Reboot).
 from range_finder.feature_builder_daily import get_daily_features
 from range_finder.har_model_daily import (
     MODEL_SPECS_DAILY,
@@ -105,9 +115,18 @@ def _fetch_live_vix1d_cached() -> tuple[float | None, str]:
         age = int(now - cached_ts)
         return cached_val, f"cached {age}s ago"
 
-    # Refresh via the data_collector helper (single yfinance quote)
-    from range_finder.data_collector import fetch_live_vix1d
-    val = fetch_live_vix1d()
+    # Refresh via the data_collector helper (single yfinance quote).
+    # Lazy import + AttributeError catch: defends against a stale
+    # range_finder.data_collector module object in sys.modules (Streamlit
+    # Cloud hot-reload doesn't fully invalidate Python's import cache when
+    # a deploy adds new symbols to an existing module). If the cached
+    # module lacks fetch_live_vix1d, fall through to a no-quote state and
+    # let the user reboot the app.
+    try:
+        from range_finder.data_collector import fetch_live_vix1d
+        val = fetch_live_vix1d()
+    except (ImportError, AttributeError):
+        val = None
     st.session_state[cache_key] = val
     st.session_state[ts_key]    = now
     return val, "live"
@@ -461,14 +480,26 @@ def _render_0dte_spread_finder_tab(
     # duplicate logging in the same Streamlit session: each render would
     # otherwise upsert a fresh `generated_at` and clobber the morning's
     # first row.
+    #
+    # Lazy import (see module-top comment): defers the lookup of
+    # log_daily_spread_plan to call time so a stale module cache from
+    # Streamlit Cloud's hot-reload can't break the entire tab — it just
+    # skips logging until the next reboot.
     log_key = f"_sf0_logged_{ticker}_{today_iso}"
     if not st.session_state.get(log_key):
         try:
+            from range_finder.spread_persistence import log_daily_spread_plan
             log_daily_spread_plan(
                 conn, plan, session_date=today_iso, ticker=ticker,
                 vix1d_open=vix1d_input,
                 vrp_at_open=vrp_daily_live,
             )
             st.session_state[log_key] = True
+        except (ImportError, AttributeError) as e:
+            log.warning(
+                f"Daily spread logging unavailable — likely a stale "
+                f"Streamlit Cloud module cache. Reboot the app via "
+                f"Manage app → Reboot to enable logging. ({e})"
+            )
         except Exception as e:
             log.warning(f"Failed to log daily spread plan: {e}")

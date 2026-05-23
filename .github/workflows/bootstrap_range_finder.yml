@@ -1,0 +1,88 @@
+name: Bootstrap Range Finder
+
+# One-shot bootstrap for the range_finder data + model tables. Use this:
+#
+#   • After a Postgres wipe.
+#   • After a HAR feature-definition change (SCHEMA_VERSION bump).
+#   • When you want to refresh the daily HAR fit independent of the
+#     Monday cron (e.g. after deploying the 0DTE finder code).
+#
+# NOT a recurring job — there is no cron schedule. Trigger manually from
+# the GitHub Actions UI with the desired mode.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which pipeline to bootstrap."
+        required: true
+        default: "daily-only"
+        type: choice
+        options:
+          - "daily-only"        # 0DTE / daily HAR only (recommended for first 0DTE deploy)
+          - "full"              # Weekly + daily (after Postgres wipe)
+          - "weekly-only"       # Weekly HAR only (preserves daily fits)
+      weekly_model:
+        description: "Weekly model spec to fit and save (ignored in daily-only)."
+        required: false
+        default: "M3_extended"
+        type: choice
+        options:
+          - "M1_baseline"
+          - "M2_vix"
+          - "M3_extended"
+          - "M4_full"
+          - "M6_regime"
+      daily_model:
+        description: "Daily model spec to fit and save (ignored in weekly-only)."
+        required: false
+        default: "M2_daily_vix"
+        type: choice
+        options:
+          - "M1_daily_baseline"
+          - "M2_daily_vix"
+          - "M3_daily_extended"
+      daily_years:
+        description: "Years of daily history to backfill (^VIX1D only exists from ~2022)."
+        required: false
+        default: "4"
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run bootstrap (${{ inputs.mode }})
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          ARGS="--daily-model ${{ inputs.daily_model }} --daily-years ${{ inputs.daily_years }} --model ${{ inputs.weekly_model }}"
+          case "${{ inputs.mode }}" in
+            daily-only)
+              python bootstrap_range_finder.py --daily-only $ARGS
+              ;;
+            weekly-only)
+              python bootstrap_range_finder.py --skip-daily $ARGS
+              ;;
+            full)
+              python bootstrap_range_finder.py $ARGS
+              ;;
+            *)
+              echo "Unknown mode: ${{ inputs.mode }}"; exit 1
+              ;;
+          esac

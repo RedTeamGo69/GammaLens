@@ -480,7 +480,7 @@ def _render_0dte_spread_finder_tab(
             "**Why GEX matters intraday for 0DTE**  \n"
             "Negative-gamma regimes amplify same-day moves — dealer hedging "
             "buys highs and sells lows. The buffer in this plan widens "
-            "automatically when `gex_normalized < 0`. Re-click *Recompute "
+            "automatically when `gex_normalized` is negative. Re-click *Recompute "
             "now* after a big GEX shift to see strikes re-snap."
         )
 

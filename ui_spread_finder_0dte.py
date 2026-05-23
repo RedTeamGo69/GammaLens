@@ -409,10 +409,20 @@ def _render_0dte_spread_finder_tab(
             ticker=ticker,
             chain_quotes=chain_quotes,
         )
-        plan = adjust_spread_with_gex(plan, gex_ctx)
+        # adjust_spread_with_gex returns an *annotation* dict (call/put-wall
+        # distance, regime notes) — NOT a modified SpreadPlan. Keep `plan`
+        # as the dataclass and capture the annotations separately so the
+        # warnings list below can pick them up.
+        gex_adj = adjust_spread_with_gex(plan, gex_ctx)
     except Exception as e:
         st.error(f"Build spread plan failed: {e}")
         return
+
+    # Surface the GEX annotation notes as plan warnings so the existing
+    # "Warnings & context" expander renders them.
+    for note in (gex_adj.get("gex_adjustment_notes") or []):
+        if note not in plan.warnings:
+            plan.warnings.append(note)
 
     # ── VRP banner ──────────────────────────────────────────────────
     _vrp_banner(vrp_daily_live if vrp_daily_live is not None

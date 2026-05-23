@@ -706,23 +706,53 @@ def fetch_live_vix1d() -> float | None:
 # =============================================================================
 
 def print_summary(conn) -> None:
-    """Print a quick data health summary to console."""
-    cur = conn.cursor()
+    """Print a quick data health summary to console.
 
-    spx_count = cur.execute("SELECT COUNT(*) FROM weekly_spx").fetchone()[0]
-    spx_range = cur.execute(
-        "SELECT MIN(week_start), MAX(week_start) FROM weekly_spx"
-    ).fetchone()
+    Uses separate execute() + fetchone() calls — psycopg2's cursor.execute()
+    returns None (unlike sqlite3's, which returns the cursor), so the old
+    chained ``cur.execute(...).fetchone()`` pattern AttributeErrors on
+    Postgres. The Postgres migration removed sqlite without auditing this
+    summary path, and it stayed latent until the 0DTE bootstrap exercised
+    it on a Postgres deploy.
+    """
+    def _scalar(sql: str, default=0):
+        cur = conn.cursor()
+        cur.execute(sql)
+        row = cur.fetchone()
+        return (row[0] if row and row[0] is not None else default)
 
-    macro_count = cur.execute("SELECT COUNT(*) FROM macro_daily").fetchone()[0]
-    event_count = cur.execute(
-        "SELECT SUM(event_count) FROM event_flags"
-    ).fetchone()[0]
+    def _pair(sql: str):
+        cur = conn.cursor()
+        cur.execute(sql)
+        row = cur.fetchone() or (None, None)
+        return (row[0] or "—", row[1] or "—")
 
-    print("\n" + "=" * 55)
+    weekly_count           = _scalar("SELECT COUNT(*) FROM weekly_spx")
+    weekly_min, weekly_max = _pair("SELECT MIN(week_start), MAX(week_start) FROM weekly_spx")
+    macro_count            = _scalar("SELECT COUNT(*) FROM macro_daily")
+    event_count            = _scalar("SELECT SUM(event_count) FROM event_flags")
+
+    # 0DTE / daily tables. Wrapped in try/except so an older deploy that
+    # hasn't run init_all_tables() against the new schema yet doesn't crash
+    # the whole summary — it just shows "—" rows for the new tables.
+    try:
+        daily_count            = _scalar("SELECT COUNT(*) FROM daily_spx")
+        daily_min, daily_max   = _pair("SELECT MIN(session_date), MAX(session_date) FROM daily_spx")
+        daily_feat_count       = _scalar("SELECT COUNT(*) FROM daily_model_features")
+        daily_event_count      = _scalar("SELECT SUM(event_count) FROM event_flags_daily")
+        daily_log_count        = _scalar("SELECT COUNT(*) FROM spread_log_daily")
+    except Exception:
+        daily_count = daily_feat_count = daily_event_count = daily_log_count = 0
+        daily_min = daily_max = "—"
+
+    print("\n" + "=" * 60)
     print("  DATA COLLECTOR — DATABASE SUMMARY")
-    print("=" * 55)
-    print(f"  weekly_spx  : {spx_count:>5} rows  ({spx_range[0]} → {spx_range[1]})")
-    print(f"  macro_daily : {macro_count:>5} rows")
-    print(f"  event_flags : {event_count:>5} total event-weeks flagged")
-    print("=" * 55 + "\n")
+    print("=" * 60)
+    print(f"  weekly_spx           : {weekly_count:>5} rows  ({weekly_min} → {weekly_max})")
+    print(f"  macro_daily          : {macro_count:>5} rows")
+    print(f"  event_flags          : {event_count:>5} total event-weeks flagged")
+    print(f"  daily_spx            : {daily_count:>5} rows  ({daily_min} → {daily_max})")
+    print(f"  daily_model_features : {daily_feat_count:>5} rows")
+    print(f"  event_flags_daily    : {daily_event_count:>5} total event-days flagged")
+    print(f"  spread_log_daily     : {daily_log_count:>5} rows")
+    print("=" * 60 + "\n")

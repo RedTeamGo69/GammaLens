@@ -284,106 +284,120 @@ def _build_spread_finder_excel(
     chain_exp: str | None,
     model_spec: str | None = None,
 ) -> bytes:
-    """Build an .xlsx workbook of the current spread-finder forecast and tiers.
+    """Build the weekly forward-test tracking workbook for this instrument.
 
-    Only call this after the forecast/plan/tiers have actually been generated
-    (the render function already gates on that via an early return when no
-    model is loaded), so every field referenced here is guaranteed populated.
+    Emits the user's *exact* tracking template (the bundled
+    ``assets/weekly_tracking_template.xlsx`` — two sheets: ``Scoreboard`` and
+    ``Weekly Model Ranges``) with the current week's predicted bands written
+    into the row for ``ticker``:
+
+      • POINT     (G/H) — HAR base band        : forecast point_lower/upper_px
+      • PI BAND   (I/J) — 80% interval          : forecast pi_lower/upper_px
+      • EFFECTIVE (K/L) — PI + event/GEX buffer : plan.effective_lower/upper_px
+      • VIX       (M/N) — options-implied ref   : Ref*(1 ∓ vix_implied_pct/2)
+
+    ``Weekly Close`` (col E) is deliberately left blank — the user fills it in
+    after the week closes, at which point the template's own CLOSE-INSIDE
+    formulas (cols O–R) + conditional formatting flip each band green (hit) or
+    red (miss) and the Scoreboard rolls up the per-model hit rate. Every other
+    aspect of the template (fonts, fills, the per-band comments, the formulas
+    and the Scoreboard) is carried through untouched because we populate a copy
+    of the real file rather than rebuilding it.
+
+    Only call this after the forecast/plan have actually been generated (the
+    render function gates on that via an early return when no model is loaded),
+    so the band fields referenced here are always populated.
     """
     from io import BytesIO
+    from pathlib import Path
 
-    # ── Summary sheet ──
-    summary_rows = [
-        ("Ticker",                    ticker),
-        ("Week start (Mon)",          week_start),
-        ("Chain expiration",          chain_exp or "n/a"),
-        ("Generated at",              getattr(plan, "generated_at", "")),
-        ("Model spec",                model_spec or "n/a"),
-        ("SPX reference close",       round(spx_ref, 2)),
-        ("VIX level",                 round(vix, 2)),
-        ("", ""),
-        ("Point estimate %",          round(forecast["point_pct"] * 100, 4)),
-        (f"PI upper % ({forecast['confidence_level']}% CI)",
-                                      round(forecast["upper_pct"] * 100, 4)),
-        (f"PI lower % ({forecast['confidence_level']}% CI)",
-                                      round(forecast["lower_pct"] * 100, 4)),
-        ("VIX-implied weekly %",      round(forecast["vix_implied_pct"] * 100, 4)),
-        ("Model vs VIX %",            round(forecast["model_vs_vix"] * 100, 4)),
-        ("", ""),
-        ("Effective range %",         round(plan.effective_range_pct * 100, 4)),
-        ("Effective upper px",        round(plan.effective_upper_px, 2)),
-        ("Effective lower px",        round(plan.effective_lower_px, 2)),
-        ("Buffer %",                  round(plan.buffer_pct * 100, 4)),
-        ("Buffer pts",                round(plan.buffer_pts, 2)),
-        ("Buffer reason",             plan.buffer_reason),
-        ("Recommended wing width",    plan.recommended_width),
-        ("", ""),
-        ("GEX regime",                gex_ctx.gamma_regime),
-        ("GEX flag",                  gex_adj.get("gex_regime_flag")),
-        ("Zero gamma",                round(gex_ctx.zero_gamma, 2)),
-        ("Call wall",                 round(gex_ctx.call_wall, 2)),
-        ("Put wall",                  round(gex_ctx.put_wall, 2)),
-        ("Net GEX ($)",               gex_ctx.net_gex),
-        ("", ""),
-        ("Model OOS R²",              round(metrics["oos_r2"], 6)),
-        ("Model MAE %",               round(metrics["mae_pct"] * 100, 4)),
-        ("", ""),
-        ("Event: FOMC",               plan.has_fomc),
-        ("Event: CPI",                plan.has_cpi),
-        ("Event: NFP",                plan.has_nfp),
-        ("Event: OPEX",               plan.has_opex),
-        ("Event count",               plan.event_count),
-    ]
-    summary_df = pd.DataFrame(summary_rows, columns=["Field", "Value"])
+    import openpyxl
 
-    # ── Spread tiers sheet: one row per (tier, side, wing width) ──
-    tier_rows = []
-    for tier in spread_tiers:
-        for side in list(tier.call_spreads or []) + list(tier.put_spreads or []):
-            tier_rows.append({
-                "Tier":             tier.label,
-                "Risk level":       tier.risk_level,
-                "Range %":          round(tier.range_pct * 100, 4),
-                "Side":             side.side,
-                "Wing width":       side.wing_width,
-                "Short strike":     side.short_strike,
-                "Long strike":      side.long_strike,
-                "Short % OTM":      round(side.short_pct * 100, 4),
-                "Est credit":       round(side.estimated_credit, 2),
-                "Credit source":    side.credit_source,
-                "Max profit":       round(side.max_profit, 2),
-                "Max loss":         round(side.max_loss, 2),
-                "Breakeven":        round(side.breakeven, 2),
-                "Credit ratio":     round(side.credit_ratio, 4),
-                "Meets min credit": side.meets_min_credit,
-                "Below min width":  getattr(side, "below_min_width", False),
-            })
-    tiers_df = pd.DataFrame(tier_rows)
+    # ── Load the user's tracking template (bundled in the repo) ──
+    template_path = Path(__file__).resolve().parent / "assets" / "weekly_tracking_template.xlsx"
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb["Weekly Model Ranges"]
 
-    # ── Warnings sheet (only if the plan produced any) ──
-    warnings_df = pd.DataFrame(
-        {"Warning": list(getattr(plan, "warnings", []) or [])}
-    )
+    DATA_START, DATA_END = 6, 53          # data rows in the template
+    COL_INSTRUMENT       = 2              # column B
 
-    # ── Write workbook ──
+    # The template pre-labels SPX/QQQ/AMZN/AMD down column B (repeating). Drop
+    # this week's row into the first block-row matching the instrument so the
+    # label and class already line up. For anything the template doesn't
+    # pre-list (e.g. XSP) fall back to the first data row and stamp it.
+    _CLASS = {"SPX": "Index", "XSP": "Index", "QQQ": "ETF", "AMZN": "Stock", "AMD": "Stock"}
+    row = None
+    for r in range(DATA_START, DATA_END + 1):
+        if str(ws.cell(r, COL_INSTRUMENT).value or "").strip().upper() == ticker.upper():
+            row = r
+            break
+    if row is None:
+        row = DATA_START
+        ws.cell(row, COL_INSTRUMENT).value = ticker
+        ws.cell(row, 3).value = _CLASS.get(ticker.upper(), "Stock")
+
+    # Anchor on the forecast's own reference close so every band stays
+    # consistent with the point/PI prices the model already derived from it.
+    ref = float(forecast.get("spx_ref_close") or spx_ref)
+
+    def _put(col: int, value) -> None:
+        """Write a rounded price; leave the cell (and its template format) be when value is missing."""
+        if value is not None:
+            ws.cell(row, col).value = round(float(value), 2)
+
+    # A — Week (Mon): write a real date so the template's yyyy-mm-dd format applies.
+    try:
+        ws.cell(row, 1).value = datetime.strptime(week_start, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        ws.cell(row, 1).value = week_start
+
+    _put(4, ref)                                          # D  Ref/Open
+    # E (col 5) Weekly Close — LEFT BLANK on purpose (filled in after the week closes).
+    _put(6, ref)                                          # F  Prev Close
+    _put(7,  forecast.get("point_lower_px"))              # G  POINT Low
+    _put(8,  forecast.get("point_upper_px"))              # H  POINT High
+    _put(9,  forecast.get("pi_lower_px"))                 # I  PI Low
+    _put(10, forecast.get("pi_upper_px"))                 # J  PI High
+    _put(11, getattr(plan, "effective_lower_px", None))   # K  EFFECTIVE Low
+    _put(12, getattr(plan, "effective_upper_px", None))   # L  EFFECTIVE High
+
+    # M/N VIX-implied band — skip when there's no implied range, so the
+    # template's VIX hit-check stays blank rather than scoring a zero-width band.
+    vix_pct = float(forecast.get("vix_implied_pct") or 0.0)
+    if vix_pct > 0:
+        _put(13, ref * (1 - vix_pct / 2))                 # M  VIX Low
+        _put(14, ref * (1 + vix_pct / 2))                 # N  VIX High
+
+    # O–R (CLOSE INSIDE? per model) keep the template's formulas — untouched.
+
+    # S — Notes: a compact, editable record of the context this row fired in.
+    note_bits: list[str] = []
+    if model_spec:
+        note_bits.append(str(model_spec))
+    _regime = getattr(gex_ctx, "gamma_regime", None)
+    _flag   = (gex_adj or {}).get("gex_regime_flag")
+    if _regime:
+        note_bits.append(f"GEX {_regime}" + (f" ({_flag:+d})" if isinstance(_flag, int) else ""))
+    _events = [name for name, fired in (
+        ("FOMC", getattr(plan, "has_fomc", 0)),
+        ("CPI",  getattr(plan, "has_cpi", 0)),
+        ("NFP",  getattr(plan, "has_nfp", 0)),
+        ("OPEX", getattr(plan, "has_opex", 0)),
+    ) if fired]
+    if _events:
+        note_bits.append("/".join(_events))
+    _buf = getattr(plan, "buffer_pct", None)
+    if _buf:
+        note_bits.append(f"buf {_buf * 100:.2f}%")
+    _wing = getattr(plan, "recommended_width", None)
+    if _wing:
+        note_bits.append(f"wing {_wing}")
+    if note_bits:
+        ws.cell(row, 19).value = " · ".join(note_bits)   # S  Notes
+
+    # ── Serialize (preserves styling, comments, formulas, conditional formatting) ──
     buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        if not tiers_df.empty:
-            tiers_df.to_excel(writer, sheet_name="Spread Tiers", index=False)
-        if not warnings_df.empty:
-            warnings_df.to_excel(writer, sheet_name="Warnings", index=False)
-
-        # Auto-size columns for readability
-        for sheet_name in writer.sheets:
-            ws = writer.sheets[sheet_name]
-            for col_cells in ws.columns:
-                max_len = max(
-                    (len(str(cell.value)) for cell in col_cells if cell.value is not None),
-                    default=10,
-                )
-                ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 2, 40)
-
+    wb.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -1316,12 +1330,19 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 model_spec  = active_model,
             )
             st.download_button(
-                label       = f"Export to Excel ({active_model})",
+                label       = f"Export tracking sheet ({active_model})",
                 data        = _xlsx_bytes,
-                file_name   = f"spread_finder_{ticker}_{week_start}_{active_model}.xlsx",
+                file_name   = f"har_forward_test_{ticker}_{week_start}_{active_model}.xlsx",
                 mime        = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key         = f"_sf_xlsx_{ticker}_{week_start}_{active_model}",
+                help        = (
+                    "Forward-test template: this week's predicted POINT / PI / "
+                    "EFFECTIVE / VIX bands for this instrument, dropped into the "
+                    "tracking workbook. Leave 'Weekly Close' blank until Friday — "
+                    "fill it in and the sheet auto-scores hit/miss and updates the "
+                    "Scoreboard."
+                ),
             )
         except Exception as _xlsx_err:
             st.caption(f"Excel export unavailable: {_xlsx_err}")

@@ -282,6 +282,7 @@ def _build_spread_finder_excel(
     week_start: str,
     chain_exp: str | None,
     model_spec: str | None = None,
+    prev_close: float | None = None,
 ) -> bytes:
     """Build the weekly forward-test tracking workbook for this instrument.
 
@@ -355,9 +356,9 @@ def _build_spread_finder_excel(
     except (ValueError, TypeError):
         ws.cell(row, 1).value = week_start
 
-    _put(4, ref)                                          # D  Ref/Open
+    _put(4, ref)                                          # D  Ref/Open (Monday-open reference)
     # E (col 5) Weekly Close — LEFT BLANK on purpose (filled in after the week closes).
-    _put(6, ref)                                          # F  Prev Close
+    _put(6, prev_close)                                   # F  Prev Close (prior week's close; blank if unavailable)
 
     # Each model column = one Spread Finder risk tier, in the same order as the
     # tab's "Risk Tier" selector. Low = the tier's put short ("Puts below"),
@@ -1139,6 +1140,19 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # Reaching this point guarantees the forecast/plan have been generated
     # (the no-model branch above returns early), so the tracking workbook is
     # always populated with this week's real bands — never a blank template.
+
+    # Previous week's close (prior Friday) for the "Prev Close" column — the
+    # spx_close of the most recent completed week before week_start, taken from
+    # the weekly feature frame the model is built on (no extra data fetch).
+    _prev_close = None
+    try:
+        if not df_feat.empty and "spx_close" in df_feat.columns:
+            _prior_close = df_feat.loc[df_feat.index < pd.Timestamp(week_start), "spx_close"].dropna()
+            if not _prior_close.empty:
+                _prev_close = float(_prior_close.iloc[-1])
+    except Exception:
+        _prev_close = None
+
     _xlsx_col, _ = st.columns([1, 3])
     with _xlsx_col:
         try:
@@ -1155,6 +1169,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 week_start  = week_start,
                 chain_exp   = chain_exp,
                 model_spec  = active_model,
+                prev_close  = _prev_close,
             )
             st.download_button(
                 label       = "Export to Excel",

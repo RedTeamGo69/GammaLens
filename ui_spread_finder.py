@@ -44,7 +44,6 @@ from range_finder.har_model import (
 from range_finder.spread_levels import (
     build_spread_plan as rf_build_spread_plan,
     build_spread_tiers as rf_build_spread_tiers,
-    log_spread_plan as rf_log_spread_plan,
     update_outcome as rf_update_outcome,
     STANDARD_WING_WIDTHS as RF_WING_WIDTHS,
     TICKER_CONFIG as RF_TICKER_CONFIG,
@@ -400,191 +399,6 @@ def _build_spread_finder_excel(
     wb.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
-
-
-def _build_multi_spec_spread_finder_excel(
-    *,
-    conn,
-    ticker: str,
-    week_start: str,
-    chain_exp: str | None,
-    feature_row,
-    spx_ref: float,
-    vix: float,
-    chain_quotes: dict,
-    gex_ctx,
-    weekly_em: dict | None,
-) -> tuple[bytes | None, list[str]]:
-    """Build an .xlsx comparing every saved HAR spec side-by-side.
-
-    Loads each saved fit from Postgres, rebuilds forecast/plan/tiers against
-    the shared feature row + live chain quotes, and emits one workbook with:
-      • **Summary** — one column per spec, rows are the same fields as the
-        single-spec export (so the user can compare M3 vs M6 strike-by-strike).
-      • **Tiers** — every tier row from every spec, prefixed with a "Model" column.
-      • **Warnings** — same shape, prefixed with "Model".
-
-    Returns ``(bytes, [spec, ...])``. Returns ``(None, [])`` if no spec has a
-    saved fit yet (i.e. Weekly Setup has never been run).
-    """
-    from io import BytesIO
-
-    per_spec: dict[str, dict] = {}
-    for spec in RF_MODEL_SPECS.keys():
-        try:
-            payload = rf_load_model(spec, conn=conn, ticker=ticker)
-        except FileNotFoundError:
-            continue
-        except Exception:
-            continue
-
-        try:
-            _result    = payload["result"]
-            _feat_cols = payload["feature_cols"]
-            _metrics   = payload["metrics"]
-
-            _forecast = rf_forecast_next_week(
-                _result, feature_row, _feat_cols,
-                spx_ref, alpha=RF_PI_ALPHA,
-            )
-            _plan = rf_build_spread_plan(
-                forecast    = _forecast,
-                feature_row = feature_row,
-                week_start  = week_start,
-                vix_level   = vix,
-                ticker      = ticker,
-                chain_quotes= chain_quotes,
-            )
-            _tiers = rf_build_spread_tiers(
-                forecast     = _forecast,
-                plan         = _plan,
-                spx_ref      = spx_ref,
-                vix_level    = vix,
-                chain_quotes = chain_quotes,
-                ticker       = ticker,
-                weekly_em    = weekly_em,
-            )
-            _gex_adj = adjust_spread_with_gex(_plan, gex_ctx)
-        except Exception:
-            continue
-
-        per_spec[spec] = {
-            "forecast": _forecast,
-            "plan":     _plan,
-            "tiers":    _tiers,
-            "metrics":  _metrics,
-            "gex_adj":  _gex_adj,
-        }
-
-    if not per_spec:
-        return None, []
-
-    specs = list(per_spec.keys())
-
-    # ── Summary sheet: Field | <spec1> | <spec2> | ...
-    # Row template so every spec's column stays aligned. Value lookups are
-    # expressed as lambdas that take the per-spec bundle so we don't have to
-    # duplicate formatting for each column.
-    def _pi_label(fc): return f"PI {fc['confidence_level']}% upper %"
-    def _pi_label_lo(fc): return f"PI {fc['confidence_level']}% lower %"
-
-    first_fc = per_spec[specs[0]]["forecast"]
-    rows = [
-        ("Ticker",                       lambda b: ticker),
-        ("Week start (Mon)",             lambda b: week_start),
-        ("Chain expiration",             lambda b: chain_exp or "n/a"),
-        ("Generated at",                 lambda b: getattr(b["plan"], "generated_at", "")),
-        ("SPX reference close",          lambda b: round(spx_ref, 2)),
-        ("VIX level",                    lambda b: round(vix, 2)),
-        ("", lambda b: ""),
-        ("Point estimate %",             lambda b: round(b["forecast"]["point_pct"] * 100, 4)),
-        (_pi_label(first_fc),            lambda b: round(b["forecast"]["upper_pct"] * 100, 4)),
-        (_pi_label_lo(first_fc),         lambda b: round(b["forecast"]["lower_pct"] * 100, 4)),
-        ("VIX-implied weekly %",         lambda b: round(b["forecast"]["vix_implied_pct"] * 100, 4)),
-        ("Model vs VIX %",               lambda b: round(b["forecast"]["model_vs_vix"] * 100, 4)),
-        ("", lambda b: ""),
-        ("Effective range %",            lambda b: round(b["plan"].effective_range_pct * 100, 4)),
-        ("Effective upper px",           lambda b: round(b["plan"].effective_upper_px, 2)),
-        ("Effective lower px",           lambda b: round(b["plan"].effective_lower_px, 2)),
-        ("Buffer %",                     lambda b: round(b["plan"].buffer_pct * 100, 4)),
-        ("Buffer pts",                   lambda b: round(b["plan"].buffer_pts, 2)),
-        ("Recommended wing width",       lambda b: b["plan"].recommended_width),
-        ("", lambda b: ""),
-        ("GEX regime",                   lambda b: gex_ctx.gamma_regime),
-        ("GEX flag",                     lambda b: b["gex_adj"].get("gex_regime_flag")),
-        ("Zero gamma",                   lambda b: round(gex_ctx.zero_gamma, 2)),
-        ("Call wall",                    lambda b: round(gex_ctx.call_wall, 2)),
-        ("Put wall",                     lambda b: round(gex_ctx.put_wall, 2)),
-        ("Net GEX ($)",                  lambda b: gex_ctx.net_gex),
-        ("", lambda b: ""),
-        ("Model OOS R²",                 lambda b: round(b["metrics"]["oos_r2"], 6)),
-        ("Model MAE %",                  lambda b: round(b["metrics"]["mae_pct"] * 100, 4)),
-        ("", lambda b: ""),
-        ("Event: FOMC",                  lambda b: b["plan"].has_fomc),
-        ("Event: CPI",                   lambda b: b["plan"].has_cpi),
-        ("Event: NFP",                   lambda b: b["plan"].has_nfp),
-        ("Event: OPEX",                  lambda b: b["plan"].has_opex),
-        ("Event count",                  lambda b: b["plan"].event_count),
-    ]
-
-    summary_data = {"Field": [r[0] for r in rows]}
-    for spec in specs:
-        bundle = per_spec[spec]
-        summary_data[spec] = [fn(bundle) for _, fn in rows]
-    summary_df = pd.DataFrame(summary_data)
-
-    # ── Tiers sheet: one row per (spec, tier, side)
-    tier_rows = []
-    for spec in specs:
-        for tier in per_spec[spec]["tiers"]:
-            for side in list(tier.call_spreads or []) + list(tier.put_spreads or []):
-                tier_rows.append({
-                    "Model":            spec,
-                    "Tier":             tier.label,
-                    "Risk level":       tier.risk_level,
-                    "Range %":          round(tier.range_pct * 100, 4),
-                    "Side":             side.side,
-                    "Wing width":       side.wing_width,
-                    "Short strike":     side.short_strike,
-                    "Long strike":      side.long_strike,
-                    "Short % OTM":      round(side.short_pct * 100, 4),
-                    "Est credit":       round(side.estimated_credit, 2),
-                    "Credit source":    side.credit_source,
-                    "Max profit":       round(side.max_profit, 2),
-                    "Max loss":         round(side.max_loss, 2),
-                    "Breakeven":        round(side.breakeven, 2),
-                    "Credit ratio":     round(side.credit_ratio, 4),
-                    "Meets min credit": side.meets_min_credit,
-                    "Below min width":  getattr(side, "below_min_width", False),
-                })
-    tiers_df = pd.DataFrame(tier_rows)
-
-    # ── Warnings sheet
-    warning_rows = []
-    for spec in specs:
-        for w in getattr(per_spec[spec]["plan"], "warnings", []) or []:
-            warning_rows.append({"Model": spec, "Warning": w})
-    warnings_df = pd.DataFrame(warning_rows)
-
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        if not tiers_df.empty:
-            tiers_df.to_excel(writer, sheet_name="Tiers", index=False)
-        if not warnings_df.empty:
-            warnings_df.to_excel(writer, sheet_name="Warnings", index=False)
-
-        for sheet_name in writer.sheets:
-            ws = writer.sheets[sheet_name]
-            for col_cells in ws.columns:
-                max_len = max(
-                    (len(str(cell.value)) for cell in col_cells if cell.value is not None),
-                    default=10,
-                )
-                ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 2, 40)
-
-    buffer.seek(0)
-    return buffer.getvalue(), specs
 
 
 @st.fragment
@@ -1309,10 +1123,10 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     )
 
     # ── Excel export ──
-    # Reaching this point guarantees the forecast/plan/tiers have all been
-    # generated (the no-model branch above returns early), so the workbook
-    # is always populated with real data — never a blank template.
-    _xlsx_col, _xlsx_all_col, _ = st.columns([1, 1, 3])
+    # Reaching this point guarantees the forecast/plan have been generated
+    # (the no-model branch above returns early), so the tracking workbook is
+    # always populated with this week's real bands — never a blank template.
+    _xlsx_col, _ = st.columns([1, 3])
     with _xlsx_col:
         try:
             _xlsx_bytes = _build_spread_finder_excel(
@@ -1330,80 +1144,21 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 model_spec  = active_model,
             )
             st.download_button(
-                label       = f"Export tracking sheet ({active_model})",
+                label       = "Export to Excel",
                 data        = _xlsx_bytes,
                 file_name   = f"har_forward_test_{ticker}_{week_start}_{active_model}.xlsx",
                 mime        = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key         = f"_sf_xlsx_{ticker}_{week_start}_{active_model}",
                 help        = (
-                    "Forward-test template: this week's predicted POINT / PI / "
-                    "EFFECTIVE / VIX bands for this instrument, dropped into the "
-                    "tracking workbook. Leave 'Weekly Close' blank until Friday — "
-                    "fill it in and the sheet auto-scores hit/miss and updates the "
-                    "Scoreboard."
+                    "Your forward-test template, prefilled with this week's "
+                    "predicted POINT / PI / EFFECTIVE / VIX bands for this "
+                    "instrument. Leave 'Weekly Close' blank until Friday — fill it "
+                    "in and the sheet auto-scores hit/miss and updates the Scoreboard."
                 ),
             )
         except Exception as _xlsx_err:
             st.caption(f"Excel export unavailable: {_xlsx_err}")
-
-    # Multi-spec export: pull every saved fit for this ticker, rebuild
-    # forecast/plan/tiers against the same feature row and live chain, and
-    # write one workbook with a combined Summary + per-spec Tiers sheets.
-    # Gated behind an explicit "Prepare" click — the build loads every
-    # saved model from Postgres (one pickle blob per spec), so running it
-    # on every Streamlit rerun (hover, slider, auto-refresh) would chew
-    # through Neon CU-hours. Once prepared the bytes are cached in session
-    # state and the download button renders immediately.
-    _multi_key = f"_sf_multi_xlsx_{ticker}_{week_start}"
-    with _xlsx_all_col:
-        _multi_cached = st.session_state.get(_multi_key)
-        if _multi_cached is None:
-            if st.button(
-                "Prepare multi-spec export",
-                key=f"_sf_multi_prep_{ticker}_{week_start}",
-                use_container_width=True,
-                help="Loads every saved HAR spec and builds a side-by-side comparison workbook. Runs on click only to conserve database compute.",
-            ):
-                try:
-                    with st.spinner("Loading every saved HAR spec..."):
-                        _multi_bytes, _multi_specs = _build_multi_spec_spread_finder_excel(
-                            conn         = conn,
-                            ticker       = ticker,
-                            week_start   = week_start,
-                            chain_exp    = chain_exp,
-                            feature_row  = feature_row,
-                            spx_ref      = spx_close_input,
-                            vix          = vix_input,
-                            chain_quotes = chain_quotes,
-                            gex_ctx      = gex_ctx,
-                            weekly_em    = weekly_em,
-                        )
-                    if _multi_bytes is None:
-                        st.caption("No saved fits yet — run **Weekly Setup** to enable multi-spec export.")
-                    else:
-                        st.session_state[_multi_key] = (_multi_bytes, _multi_specs)
-                        st.rerun()
-                except Exception as _multi_err:
-                    st.caption(f"Multi-spec export unavailable: {_multi_err}")
-        else:
-            _multi_bytes, _multi_specs = _multi_cached
-            st.download_button(
-                label       = f"Export all specs ({len(_multi_specs)})",
-                data        = _multi_bytes,
-                file_name   = f"spread_finder_{ticker}_{week_start}_all_specs.xlsx",
-                mime        = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key         = f"_sf_xlsx_all_{ticker}_{week_start}",
-                help        = f"Specs included: {', '.join(_multi_specs)}",
-            )
-            if st.button(
-                "↻ Rebuild",
-                key=f"_sf_multi_refresh_{ticker}_{week_start}",
-                help="Discard cached bytes and re-run every spec against the current inputs.",
-            ):
-                st.session_state.pop(_multi_key, None)
-                st.rerun()
 
     st.markdown("---")
 
@@ -1603,18 +1358,6 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 st.caption("No major events this week")
 
     _risk_tier_fragment()
-
-    # =========================================================================
-    # LOG PLAN BUTTON
-    # =========================================================================
-
-    st.markdown("---")
-    if st.button("Save Spread Plan to Database", key=f"sf_log_plan_{ticker}"):
-        try:
-            rf_log_spread_plan(conn, plan, wing_width_used=plan.recommended_width)
-            st.success(f"Plan for {week_start} logged")
-        except Exception as e:
-            st.error(f"Failed to log plan: {e}")
 
 
 def _render_gex_context_panel(gex_ctx: GEXContext, spot: float):

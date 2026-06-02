@@ -287,13 +287,18 @@ def _build_spread_finder_excel(
 
     Emits the user's *exact* tracking template (the bundled
     ``assets/weekly_tracking_template.xlsx`` — two sheets: ``Scoreboard`` and
-    ``Weekly Model Ranges``) with the current week's predicted bands written
-    into the row for ``ticker``:
+    ``Weekly Model Ranges``) with the current week's predicted strikes written
+    into the row for ``ticker``. The four model columns are the Spread Finder's
+    risk tiers, in the tab's order:
 
-      • POINT     (G/H) — HAR base band        : forecast point_lower/upper_px
-      • PI BAND   (I/J) — 80% interval          : forecast pi_lower/upper_px
-      • EFFECTIVE (K/L) — PI + event/GEX buffer : plan.effective_lower/upper_px
-      • VIX       (M/N) — options-implied ref   : Ref*(1 ∓ vix_implied_pct/2)
+      • LOWER PI       (G/H) — tightest tier (richest credit)
+      • POINT ESTIMATE (I/J) — HAR base
+      • 80% PI UPPER   (K/L) — 80% prediction interval
+      • EFFECTIVE      (M/N) — PI + event/GEX buffer (your condor)
+
+    Low/High for each are that tier's put-short / call-short strikes — the same
+    rounded, EM-floored levels the tab shows as "Puts below" / "Calls above" —
+    so the workbook matches the Spread Finder one-for-one.
 
     ``Weekly Close`` (col E) is deliberately left blank — the user fills it in
     after the week closes, at which point the template's own CLOSE-INSIDE
@@ -335,8 +340,8 @@ def _build_spread_finder_excel(
         ws.cell(row, COL_INSTRUMENT).value = ticker
         ws.cell(row, 3).value = _CLASS.get(ticker.upper(), "Stock")
 
-    # Anchor on the forecast's own reference close so every band stays
-    # consistent with the point/PI prices the model already derived from it.
+    # Reference close the tier strikes were derived from (also written to
+    # Ref/Open and Prev Close).
     ref = float(forecast.get("spx_ref_close") or spx_ref)
 
     def _put(col: int, value) -> None:
@@ -353,19 +358,27 @@ def _build_spread_finder_excel(
     _put(4, ref)                                          # D  Ref/Open
     # E (col 5) Weekly Close — LEFT BLANK on purpose (filled in after the week closes).
     _put(6, ref)                                          # F  Prev Close
-    _put(7,  forecast.get("point_lower_px"))              # G  POINT Low
-    _put(8,  forecast.get("point_upper_px"))              # H  POINT High
-    _put(9,  forecast.get("pi_lower_px"))                 # I  PI Low
-    _put(10, forecast.get("pi_upper_px"))                 # J  PI High
-    _put(11, getattr(plan, "effective_lower_px", None))   # K  EFFECTIVE Low
-    _put(12, getattr(plan, "effective_upper_px", None))   # L  EFFECTIVE High
 
-    # M/N VIX-implied band — skip when there's no implied range, so the
-    # template's VIX hit-check stays blank rather than scoring a zero-width band.
-    vix_pct = float(forecast.get("vix_implied_pct") or 0.0)
-    if vix_pct > 0:
-        _put(13, ref * (1 - vix_pct / 2))                 # M  VIX Low
-        _put(14, ref * (1 + vix_pct / 2))                 # N  VIX High
+    # Each model column = one Spread Finder risk tier, in the same order as the
+    # tab's "Risk Tier" selector. Low = the tier's put short ("Puts below"),
+    # High = its call short ("Calls above") — the exact rounded / EM-floored
+    # strikes the UI shows, so the workbook matches the Spread Finder one-for-one.
+    def _find_tier(predicate):
+        for _t in (spread_tiers or []):
+            if predicate(str(getattr(_t, "label", "") or "").strip().lower()):
+                return _t
+        return None
+
+    _model_cols = (
+        ( 7,  8, _find_tier(lambda l: l == "lower pi")),            # G/H  LOWER PI
+        ( 9, 10, _find_tier(lambda l: l.startswith("point"))),     # I/J  POINT ESTIMATE
+        (11, 12, _find_tier(lambda l: "pi upper" in l)),           # K/L  80% PI UPPER
+        (13, 14, _find_tier(lambda l: l.startswith("effective"))), # M/N  EFFECTIVE (+buffer)
+    )
+    for _lo_col, _hi_col, _tier in _model_cols:
+        if _tier is not None:
+            _put(_lo_col, getattr(_tier, "put_short", None))   # Low  = put short  (Puts below)
+            _put(_hi_col, getattr(_tier, "call_short", None))  # High = call short (Calls above)
 
     # O–R (CLOSE INSIDE? per model) keep the template's formulas — untouched.
 

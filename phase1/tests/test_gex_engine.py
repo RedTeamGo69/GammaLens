@@ -229,3 +229,42 @@ def test_calculate_all_iv_stats_fall_back_when_first_exp_expired():
     assert stats["expired_exp_count"] == 1
     assert abs(stats["call_iv"] - 15.0) < 1e-9
     assert abs(stats["put_iv"] - 17.0) < 1e-9
+
+
+def test_calculate_all_after_hours_all_expirations_expired():
+    """0DTE selected after the close: every expiration is dropped by the
+    expired-exp guard. calculate_all must return an EMPTY-but-schema'd
+    gex_df (plus coherent stats) instead of raising KeyError('net_gex')
+    on the column-less frame — that crash masked the friendly 'all
+    expirations have settled' notice in the app."""
+    class FakeClient:
+        def prefetch_chains(self, ticker, expirations):
+            return None
+
+        def get_chain_cached(self, ticker, exp):
+            raise AssertionError("expired expirations must be skipped before any chain fetch")
+
+    # 8 PM ET on expiration day — the 2026-03-20 session settled at 4 PM.
+    fake_now = datetime(2026, 3, 20, 20, 0, tzinfo=NY_TZ)
+
+    gex_df, stats, all_options, strike_support_df, expiration_support_df = gex_engine.calculate_all(
+        client=FakeClient(),
+        ticker="SPX",
+        target_exps=["2026-03-20"],
+        spot=5000,
+        r=0.04,
+        now=fake_now,
+    )
+
+    assert gex_df.empty
+    assert "net_gex" in gex_df.columns  # schema present even when empty
+    assert stats["expired_exp_count"] == 1
+    assert stats["used_option_count"] == 0
+    assert stats["net_gex"] == 0.0
+    assert all_options == []
+
+    # The downstream pipeline (mirroring fetch_all_data) must also cope.
+    levels = gex_engine.find_key_levels(gex_df, 5000, all_options=all_options, r=0.04)
+    assert levels["zero_gamma"] == 5000
+    regime = gex_engine.get_gamma_regime_text(5000, levels["zero_gamma"])
+    assert regime["regime"] == "At Zero Gamma"

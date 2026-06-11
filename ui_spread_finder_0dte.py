@@ -110,10 +110,13 @@ def _fetch_live_vix1d_cached() -> tuple[float | None, str]:
     now = time.monotonic()
     cached_val = st.session_state.get(cache_key)
     cached_ts  = st.session_state.get(ts_key)
-    if cached_val is not None and cached_ts is not None \
-       and (now - cached_ts) < _LIVE_VIX1D_TTL_SECONDS:
+    # Honor the TTL even when the cached value is None — otherwise a
+    # failed quote (weekend, yfinance hiccup) re-fires the ~1s blocking
+    # fetch on every single widget interaction until it succeeds.
+    if cached_ts is not None and (now - cached_ts) < _LIVE_VIX1D_TTL_SECONDS:
         age = int(now - cached_ts)
-        return cached_val, f"cached {age}s ago"
+        label = f"cached {age}s ago" if cached_val is not None else "unavailable"
+        return cached_val, label
 
     # Refresh via the data_collector helper (single yfinance quote).
     # Lazy import + AttributeError catch: defends against a stale
@@ -223,7 +226,8 @@ def _render_metric_row(forecast: dict, plan: SpreadPlan, spot: float,
     c3.metric("HAR Point Range",  f"{forecast['point_pct']*100:.2f}%")
     c4.metric(f"PI Upper ({forecast['confidence_level']}%)",
               f"{forecast['upper_pct']*100:.2f}%")
-    vrp_str = f"{vrp_daily*100:+.2f}%" if vrp_daily is not None else "—"
+    vrp_ok = vrp_daily is not None and not (isinstance(vrp_daily, float) and math.isnan(vrp_daily))
+    vrp_str = f"{vrp_daily*100:+.2f}%" if vrp_ok else "—"
     c5.metric("VRP (IV-RV)", vrp_str)
 
 
@@ -301,10 +305,14 @@ def _render_0dte_spread_finder_tab(
     col_a, col_b, col_c = st.columns([2, 2, 1])
     with col_a:
         ref_key = f"sf0_ref_price_{ticker}"
+        # Seed once, then let the widget own the key — passing `value=`
+        # alongside an existing session-state key logs a Streamlit warning
+        # on every rerun.
+        if ref_key not in st.session_state:
+            st.session_state[ref_key] = float(spot)
         spx_ref_input = st.number_input(
             f"{ticker} reference (today's open or live spot)",
             min_value=10.0, max_value=20000.0,
-            value=float(st.session_state.get(ref_key, spot)),
             step=float(ticker_cfg["strike_increment"]),
             help="Reference price for strike placement. Defaults to live spot; "
                  "override with today's open if you prefer a fixed anchor.",
@@ -313,11 +321,13 @@ def _render_0dte_spread_finder_tab(
     with col_b:
         live_vix1d, vix1d_label = _fetch_live_vix1d_cached()
         vix1d_key = f"sf0_vix1d_level_{ticker}"
-        default_vix1d = float(live_vix1d) if live_vix1d is not None else 15.0
+        if vix1d_key not in st.session_state:
+            st.session_state[vix1d_key] = (
+                float(live_vix1d) if live_vix1d is not None else 15.0
+            )
         vix1d_input = st.number_input(
             f"VIX1D ({vix1d_label})",
             min_value=1.0, max_value=200.0,
-            value=float(st.session_state.get(vix1d_key, default_vix1d)),
             step=0.1,
             help="Live ^VIX1D quote; override if you want to stress-test a level. "
                  f"Cache TTL is {_LIVE_VIX1D_TTL_SECONDS}s.",
@@ -424,12 +434,12 @@ def _render_0dte_spread_finder_tab(
         if note not in plan.warnings:
             plan.warnings.append(note)
 
-    # ── VRP banner ──────────────────────────────────────────────────
-    _vrp_banner(vrp_daily_live if vrp_daily_live is not None
-                else feature_row.get("vrp_daily"))
-
-    # ── Top metric row ──────────────────────────────────────────────
-    _render_metric_row(forecast, plan, spot, vix1d_input, vrp_daily_live)
+    # ── VRP banner + metric row (same resolved value for both, so the
+    # banner can't say "moderate" while the metric card shows "—") ────
+    vrp_display = (vrp_daily_live if vrp_daily_live is not None
+                   else feature_row.get("vrp_daily"))
+    _vrp_banner(vrp_display)
+    _render_metric_row(forecast, plan, spot, vix1d_input, vrp_display)
 
     # ── Chain provenance ────────────────────────────────────────────
     if chain_quotes:

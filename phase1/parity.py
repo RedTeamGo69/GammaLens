@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 import numpy as np
 
 from phase1.config import (
@@ -19,7 +18,7 @@ from phase1.config import (
 )
 
 from phase1.quote_filters import usable_for_parity, quote_mid, summarize_quote_quality
-from phase1.market_clock import is_cash_market_open, compute_time_to_expiry_years
+from phase1.market_clock import is_cash_market_open, compute_time_to_expiry_years, now_ny
 
 def weighted_median(values, weights):
     """
@@ -242,7 +241,11 @@ def get_reference_spot_details(
     """
     Full reference-spot decision engine.
     """
-    now = now or datetime.now()
+    # Default to a tz-aware NY timestamp. A naive datetime.now() on a
+    # UTC-hosted server gets interpreted as NY wall-clock downstream
+    # (market_clock replaces the missing tzinfo with NY_TZ), shifting the
+    # market-open check by 4-5 hours for callers that omit `now`.
+    now = now or now_ny()
 
     tradier_spot = float(get_spot_price_func(ticker))
     details = {

@@ -170,6 +170,14 @@ def get_expirations_cached(tradier_token: str, ticker: str) -> list[str]:
     return TradierDataClient(token=tradier_token).get_expirations(ticker)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_risk_free_rate_cached(fred_key: str) -> dict:
+    """FRED publishes these series once per business day; cache for an hour
+    so switching expiration modes (which busts the fetch_all_data cache key)
+    doesn't re-fire the 5-request FRED scalar+curve fetch every time."""
+    return fetch_risk_free_rate(fred_key)
+
+
 @st.cache_resource(ttl=90, show_spinner=False)
 def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run_id: str, ticker: str = "SPX"):
     """
@@ -182,11 +190,13 @@ def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run
     run_now = now_ny()
     calendar_snapshot = get_calendar_snapshot(run_now)
 
-    rfr_info = fetch_risk_free_rate(fred_key)
+    rfr_info = get_risk_free_rate_cached(fred_key)
     rfr = rfr_info["rate"]
     rfr_curve = rfr_info.get("curve")  # None → flat-rate fallback path
 
-    avail = client.get_expirations(ticker)
+    # Reuse the sidebar's cached expirations list instead of issuing a
+    # second Tradier /expirations request inside this pipeline.
+    avail = get_expirations_cached(tradier_token, ticker)
     if not avail:
         raise RuntimeError(f"No expirations returned from Tradier API for {ticker}")
     today_str = run_now.strftime("%Y-%m-%d")
@@ -262,6 +272,22 @@ def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run
             client.get_chain_cached(ticker, sf_friday_exp)
     except Exception as _sf_err:
         _logger.warning(f"Spread finder weekly chain pre-fetch failed: {_sf_err}")
+
+    # Pre-fetch the weekly / monthly EM chains as well. main() recomputes
+    # the weekly and OpEx-cycle expected-move straddles on EVERY rerun via
+    # a throwaway client seeded from this snapshot's chain_cache — if those
+    # expirations aren't in the snapshot (e.g. the monthly 3rd-Friday chain
+    # while in 0DTE mode), every widget interaction pays for a full Tradier
+    # chain fetch that is then thrown away with the temp client.
+    try:
+        for _em_exp in {
+            find_weekly_expiration(avail, run_now.date()),
+            find_monthly_expiration(avail, run_now.date()),
+        }:
+            if _em_exp and (ticker, _em_exp) not in client.chain_cache:
+                client.get_chain_cached(ticker, _em_exp)
+    except Exception as _em_err:
+        _logger.warning(f"Weekly/monthly EM chain pre-fetch failed: {_em_err}")
 
     return GEXData(
         spot=spot,
@@ -657,7 +683,10 @@ def main():
     # ── Expected Move panel (top of page) ──
     em_data = em_analysis.get("expected_move", {})
 
-    if em_data.get("expected_move_pts"):
+    # Render whenever EITHER the daily EM or the view-matched EM exists —
+    # gating on the daily EM alone hid the whole bar (including a valid
+    # weekly/monthly EM) any time the 0DTE straddle was unavailable.
+    if em_data.get("expected_move_pts") or display_em.get("expected_move_pts"):
         classification = em_analysis.get("classification", {})
         overnight = em_analysis.get("overnight_move", {})
 

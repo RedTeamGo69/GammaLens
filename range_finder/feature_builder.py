@@ -596,6 +596,17 @@ def get_features(conn, min_date: str = None, exclude_covid: bool = False,
         covid_end = pd.Timestamp("2020-09-30")
         df = df[(df.index < covid_start) | (df.index > covid_end)]
 
+    # Derive the M6_regime interaction terms here so EVERY consumer sees
+    # them. They used to be created ad-hoc only inside run_full_pipeline /
+    # compare_enhancements — the Streamlit Spread Finder and the Monday
+    # cron fit straight off this frame, which silently dropped both
+    # interactions from M6_regime (feature_has_enough_data treats a
+    # missing column as unusable), so "M6_regime" was really just
+    # M2_vix + hv_ratio + a level regime dummy in those paths.
+    if "har_d1" in df.columns and "high_vol_regime" in df.columns:
+        df["har_d1_x_regime"] = df["har_d1"] * df["high_vol_regime"]
+        df["har_w_x_regime"] = df["har_w"] * df["high_vol_regime"]
+
     return df
 
 
@@ -611,6 +622,11 @@ def get_feature_for_week(conn, week_start: str, ticker: str = "SPX") -> pd.Serie
         log.warning(f"No feature row found for week_start={week_start} ticker={ticker}")
         return None
     df.set_index("week_start", inplace=True)
+    # Same derived interaction terms as get_features() so forecasts made
+    # from a single-week row line up with fits made on the full frame.
+    if "har_d1" in df.columns and "high_vol_regime" in df.columns:
+        df["har_d1_x_regime"] = df["har_d1"] * df["high_vol_regime"]
+        df["har_w_x_regime"] = df["har_w"] * df["high_vol_regime"]
     return df.iloc[0]
 
 

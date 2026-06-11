@@ -133,6 +133,11 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
     max_put_oi_strike = (0.0, 0)
 
     all_exps = unique_preserve_order(target_exps)
+    # IV stats come from the first expiration that actually contributes
+    # data. Keying on target_exps[0] alone meant call_iv/put_iv silently
+    # read 0.0 whenever the nearest expiration was skipped (already
+    # settled after the close, or its chain fetch failed).
+    first_live_exp = None
     first_exp_call_ivs = []
     first_exp_put_ivs = []
 
@@ -200,6 +205,9 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             print(f"  [{i+1}/{len(all_exps)}] {exp}  — FAILED ({entry.get('error', 'unknown error')})")
             continue
 
+        if first_live_exp is None:
+            first_live_exp = exp
+
         for raw_opt, sign in [(c, +1) for c in calls_raw] + [(p, -1) for p in puts_raw]:
             K = raw_opt["strike"]
             if K < lower or K > upper:
@@ -254,12 +262,18 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             charm_now = norm_opt.get("charm_now", 0.0)
             gex = sign * size * gamma_now * 100.0 * spot * spot
             # Dollar charm exposure: dealer-book Δ drift per unit of T,
-            # scaled to notional ($). Same sign convention as GEX — a call
-            # (sign=+1) with positive charm means the assumed-short-call
-            # dealer book is shedding delta as time passes, so dealers
-            # must buy the underlying to stay hedged (positive CEX →
-            # supportive flow). Units are $-delta per trading-year;
-            # divide by 252 downstream for a per-trading-day figure.
+            # scaled to notional ($). Same dealer-positioning assumption
+            # as GEX (dealers long calls, short puts — sign=+1 for calls,
+            # -1 for puts), so:
+            #   CEX > 0 → dealer book GAINS delta as time passes → dealer
+            #             must SELL the underlying to stay hedged →
+            #             repelling/distributing flow.
+            #   CEX < 0 → dealer book LOSES delta (e.g. long OTM calls
+            #             decaying toward 0Δ) → dealer must BUY →
+            #             supportive/pinning flow.
+            # This matches the chart guide and sidebar color logic. Units
+            # are $-delta per trading-year; divide by 252 for per-day or
+            # TRADING_HOURS_PER_YEAR for per-hour downstream.
             cex = sign * size * charm_now * 100.0 * spot
 
             if exp in target_exps:
@@ -277,7 +291,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
                     total_call_oi += oi
                     if oi > max_call_oi_strike[0]:
                         max_call_oi_strike = (oi, K)
-                    if exp == target_exps[0]:
+                    if exp == first_live_exp:
                         first_exp_call_ivs.append(model_iv)
                 else:
                     agg[K]["put_gex"] += gex
@@ -286,7 +300,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
                     total_put_oi += oi
                     if oi > max_put_oi_strike[0]:
                         max_put_oi_strike = (oi, K)
-                    if exp == target_exps[0]:
+                    if exp == first_live_exp:
                         first_exp_put_ivs.append(model_iv)
 
                 # all_options gets the full wider range for sweep/profile/scenarios.

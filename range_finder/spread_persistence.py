@@ -346,6 +346,21 @@ def update_daily_outcome(conn, session_date: str, ticker: str = "SPX") -> str:
     # want the first non-empty row (the session_date itself).
     actual_high = float(raw["High"].iloc[0])
     actual_low  = float(raw["Low"].iloc[0])
+
+    # XSP strikes live at 1/10 of SPX. The H/L above come from ^GSPC, so
+    # without rescaling, an XSP row (call_short ≈ 600) would compare
+    # against an SPX high (≈ 6000) and register a breach on every single
+    # session — poisoning the outcome log this table exists to build.
+    try:
+        from phase1.ticker_config import get_config
+        if get_config(ticker).get("xsp_scale_to_spx", False):
+            actual_high /= 10.0
+            actual_low  /= 10.0
+    except Exception:
+        if ticker.upper() == "XSP":
+            actual_high /= 10.0
+            actual_low  /= 10.0
+
     actual_range_pct = (actual_high - actual_low) / spx_ref if spx_ref else None
 
     call_breached = int(actual_high >= call_short) if call_short else 0

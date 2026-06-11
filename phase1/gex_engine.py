@@ -361,7 +361,19 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             }
         )
 
-    gex_df = pd.DataFrame(rows)
+    # Build the frame with an explicit schema. pd.DataFrame([]) has NO
+    # columns, so when every selected expiration was skipped (the classic
+    # case: 0DTE selected after the close — the expired-exp guard drops
+    # the settled session), the unguarded `gex_df["net_gex"]` selections
+    # below raised KeyError('net_gex') and the app surfaced a bare
+    # "Engine error: 'net_gex'" instead of the friendly "all expirations
+    # have settled" notice that main() renders for an empty frame.
+    _GEX_DF_COLUMNS = [
+        "strike", "call_oi", "put_oi",
+        "call_gex", "put_gex", "net_gex",
+        "call_charm", "put_charm", "net_charm",
+    ]
+    gex_df = pd.DataFrame(rows, columns=_GEX_DF_COLUMNS)
 
     net_gex_total = gex_df["net_gex"].sum() if not gex_df.empty else 0.0
     net_charm_total = gex_df["net_charm"].sum() if not gex_df.empty else 0.0

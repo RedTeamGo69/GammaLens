@@ -439,21 +439,31 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     if _has_sne(ticker):
         try:
             from datetime import timedelta as _td_e, datetime as _dt_e
+            # Check the SAME week the spread finder is planning for —
+            # this week's Monday on Mon-Thu, next Monday on Fri-Sun
+            # (mirrors _spread_finder_target_friday / week_start below).
+            # The old check always looked at NEXT Monday, so a Tuesday
+            # user planning this week's spreads never saw the warning
+            # for earnings landing on Wednesday.
             _today = _dt_e.now().date()
-            _days_to_mon = (7 - _today.weekday()) % 7 or 7
-            _next_monday = (_today + _td_e(days=_days_to_mon)).strftime("%Y-%m-%d")
+            _wd_e = _today.weekday()
+            if _wd_e <= 3:
+                _plan_monday = _today - _td_e(days=_wd_e)
+            else:
+                _plan_monday = _today + _td_e(days=7 - _wd_e)
+            _plan_week = _plan_monday.strftime("%Y-%m-%d")
             _conn_e = _get_rf_conn()
             _cur_e = _conn_e.cursor()
             _cur_e.execute(
                 "SELECT has_earnings, earnings_date FROM earnings_flags "
                 "WHERE ticker = ? AND week_start = ?",
-                (ticker, _next_monday),
+                (ticker, _plan_week),
             )
             _row_e = _cur_e.fetchone()
             if _row_e and _row_e[0]:
-                _ed = _row_e[1] or _next_monday
+                _ed = _row_e[1] or _plan_week
                 st.warning(
-                    f"⚠ **{ticker} reports earnings the week of {_next_monday}** "
+                    f"⚠ **{ticker} reports earnings the week of {_plan_week}** "
                     f"(scheduled {_ed}). Single-stock IV is structurally elevated "
                     "pre-earnings — weekly OTM credit spreads will look richer "
                     "than usual, but realised tail risk is much higher than the "
@@ -626,9 +636,13 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     with col_ctrl1:
         step_size = ticker_cfg["strike_increment"]
+        # No `value=` — the key is always pre-seeded in session state above,
+        # and passing both makes Streamlit log a "widget created with a
+        # default value but also had its value set via Session State"
+        # warning on every rerun.
         spx_close_input = st.number_input(
             f"{ticker} Reference ({ref_source})",
-            min_value=100.0, max_value=15000.0, value=default_ref, step=float(step_size),
+            min_value=100.0, max_value=15000.0, step=float(step_size),
             help=f"Reference price for range calculation. Source: {ref_source}. "
                  "Frozen at Monday's open on the first market-hours refresh of the week.",
             key=ref_key,
@@ -638,7 +652,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         vix_source = "Mon open" if (frozen_week == current_week and frozen_vix) else "last close"
         vix_input = st.number_input(
             f"VIX Level ({vix_source})",
-            min_value=5.0, max_value=100.0, value=default_vix, step=0.5,
+            min_value=5.0, max_value=100.0, step=0.5,
             help=f"VIX level for BSM credit estimation. Source: {vix_source}. "
                  "Frozen at Monday's open alongside the reference price.",
             key=vix_key,

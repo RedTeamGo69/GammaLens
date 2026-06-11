@@ -165,3 +165,43 @@ def test_normalize_option_for_model_backward_wrapper():
     norm = normalize_option_for_model(opt, sign=1, T=1/365, spot=5000, r=0.04)
     assert norm is not None
     assert norm["iv_source"] == "direct_iv"
+
+
+def test_bs_gamma_sigma_grid_matches_scalar():
+    """The vectorized sigma-grid used by the IV inverter must agree with
+    the scalar bs_gamma reference to numerical precision."""
+    import numpy as np
+    from phase1.model_inputs import _bs_gamma_sigma_grid
+
+    S, K, T, r = 6000.0, 6100.0, 5 / 252.0, 0.045
+    grid = np.linspace(0.01, 3.0, 50)
+    vec = _bs_gamma_sigma_grid(S, K, T, r, grid)
+    ref = np.array([bs_gamma(S, K, T, r, s) for s in grid])
+    assert np.allclose(vec, ref, rtol=1e-12)
+
+
+def test_infer_iv_near_atm_picks_plausible_root():
+    """Near-ATM short-dated strikes have a LOW gamma-peak sigma, so the
+    target gamma has two roots: a spurious tiny-sigma root and the real
+    market-like one. Root selection must land on the plausible root —
+    the old prefer-the-smaller-root rule returned ~0.08 here, which
+    matches gamma at spot but badly distorts the zero-gamma sweep when
+    gamma is re-evaluated at shifted prices."""
+    S, K, T, r = 6000.0, 6100.0, 5 / 252.0, 0.045
+    true_iv = 0.18
+    target = bs_gamma(S, K, T, r, true_iv)
+
+    fitted = infer_iv_from_gamma(target, S, K, T, r)
+    assert abs(fitted - true_iv) < 1e-3
+
+
+def test_infer_iv_deep_otm_still_prefers_low_root():
+    """Deep-OTM strikes keep resolving to the economically-sensible lower
+    root (the high root for the same gamma would be an implausible
+    multi-hundred-percent vol)."""
+    S, K, T, r = 6000.0, 5400.0, 5 / 252.0, 0.045  # 10% OTM put strike
+    true_iv = 0.35
+    target = bs_gamma(S, K, T, r, true_iv)
+
+    fitted = infer_iv_from_gamma(target, S, K, T, r)
+    assert abs(fitted - true_iv) < 1e-3

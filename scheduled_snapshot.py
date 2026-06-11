@@ -774,7 +774,21 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
 
         forecast = forecast_next_session(result, feature_row, feature_cols, spot)
         gex_ctx  = extract_gex_context(levels, spot, regime_info)
-        vix1d    = float(feature_row.get("vix1d_close") or 0) or float(feature_row.get("vix_close") or 18.0)
+
+        # NaN-safe VIX1D resolution. feature_row values are numpy floats:
+        # NaN is truthy, so the old `(x or 0) or fallback` chain happily
+        # propagated NaN into the BSM credit math whenever yesterday's
+        # ^VIX1D close was missing.
+        def _finite_or_none(v):
+            try:
+                f = float(v)
+                return f if (f == f and f > 0) else None
+            except (TypeError, ValueError):
+                return None
+
+        vix1d = (_finite_or_none(feature_row.get("vix1d_close"))
+                 or _finite_or_none(feature_row.get("vix_close"))
+                 or 18.0)
 
         wing_widths = [5, 10, 15, 20, 25] if ticker == "SPX" else [1, 2, 3, 5]
 
@@ -789,7 +803,15 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
             ticker=ticker,
             chain_quotes=None,  # cron doesn't pull 0DTE chain quotes — UI does
         )
-        plan = adjust_spread_with_gex(plan, gex_ctx)
+        # adjust_spread_with_gex returns an ANNOTATION DICT, not a modified
+        # SpreadPlan. The previous `plan = adjust_spread_with_gex(...)`
+        # replaced the dataclass with that dict, so log_daily_spread_plan
+        # blew up on `plan.generated_at` inside the broad except below —
+        # meaning the cron never actually persisted a single daily plan.
+        gex_adj = adjust_spread_with_gex(plan, gex_ctx)
+        for note in (gex_adj.get("gex_adjustment_notes") or []):
+            if note not in plan.warnings:
+                plan.warnings.append(note)
 
         vrp = feature_row.get("vrp_daily")
         try:

@@ -265,13 +265,17 @@ def adjust_spread_with_gex(
                 f"put wall ({gex_ctx.put_wall:.0f}) — consider widening"
             )
 
-    # Regime-specific notes
-    if gex_ctx.gamma_regime.lower() == "positive":
+    # Regime-specific notes. Use the same substring mapping as
+    # regime_to_gex_flag — the dashboard passes "Positive Gamma" /
+    # "Negative Gamma", so the old exact-equality check against
+    # "positive"/"negative" never matched and these notes never rendered.
+    _flag = regime_to_gex_flag(gex_ctx.gamma_regime)
+    if _flag == 1:
         notes.append(
             "Positive GEX — dealer hedging suppresses moves. "
             "Spread buffer tightened proportionally to GEX magnitude."
         )
-    elif gex_ctx.gamma_regime.lower() == "negative":
+    elif _flag == -1:
         notes.append(
             "Negative GEX — dealer hedging amplifies moves. "
             "Spread buffer widened proportionally to GEX magnitude. Exercise caution on position sizing."

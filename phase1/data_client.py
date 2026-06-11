@@ -61,7 +61,16 @@ class TradierDataClient:
         q = r.json()["quotes"]["quote"]
         if isinstance(q, list):
             q = q[0]
-        return safe_float(q.get("last", q.get("close", 0)), 0.0)
+        # Tradier can return "last": null outside regular hours (the key
+        # exists, so dict.get(key, default) never falls back). Walk the
+        # candidates explicitly so a null last degrades to close, then
+        # prevclose, instead of silently returning spot = 0.0 — a zero
+        # spot empties every downstream strike filter.
+        for field in ("last", "close", "prevclose"):
+            val = safe_float(q.get(field), 0.0)
+            if val > 0:
+                return val
+        return 0.0
 
     @staticmethod
     def _normalize_quote(q, fallback_symbol):

@@ -175,9 +175,10 @@ def render_key_levels(levels, spot, regime_info, confidence_info, staleness_info
             )
 
     st.caption(
-        "**Dealer positioning assumption:** GEX models assume dealers are net short calls and net short puts "
-        "(the standard retail convention). In reality, dealer positioning varies by strike — institutional "
-        "overlays (collars, risk reversals) and retail put-selling can invert the sign at specific strikes. "
+        "**Dealer positioning assumption:** this GEX model assumes dealers are net **long calls** and net "
+        "**short puts** (the standard SqueezeMetrics-style convention: customers overwrite calls and buy "
+        "protective puts). In reality, dealer positioning varies by strike — institutional overlays "
+        "(collars, risk reversals) and retail put-selling can invert the sign at specific strikes. "
         "Open interest updates once daily (EOD), so intraday flow is not reflected. "
         "Treat GEX levels as probabilistic zones, not hard barriers."
     )

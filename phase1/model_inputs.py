@@ -7,6 +7,7 @@ from phase1.config import (
     SYNTH_IV_MIN,
     SYNTH_IV_MAX,
     SYNTH_FIT_MAX_REL_ERROR,
+    SYNTH_IV_REFERENCE,
     HYBRID_IV_MODE,
 )
 
@@ -32,6 +33,26 @@ def bs_gamma(S, K, T, r, sigma):
         return 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     return norm.pdf(d1) / (S * sigma * np.sqrt(T))
+
+
+_INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
+
+
+def _bs_gamma_sigma_grid(S, K, T, r, sigmas):
+    """
+    Vectorized BS gamma across an array of sigmas (fixed S, K, T, r).
+
+    Used by infer_iv_from_gamma's grid scan — the scalar bs_gamma() loop
+    made 200 scipy norm.pdf calls per synthetic-IV option, which dominated
+    the engine runtime on chains with many missing-IV contracts. The
+    standard-normal pdf is inlined (exp(-d1²/2)/√(2π)) so the whole grid
+    is one numpy pass.
+    """
+    sigmas = np.asarray(sigmas, dtype=float)
+    sqrt_T = np.sqrt(T)
+    d1 = (np.log(S / K) + (r + 0.5 * sigmas**2) * T) / (sigmas * sqrt_T)
+    pdf = np.exp(-0.5 * d1 * d1) * _INV_SQRT_2PI
+    return pdf / (S * sigmas * sqrt_T)
 
 
 def bs_charm(S, K, T, r, sigma, sign):
@@ -77,7 +98,19 @@ def infer_iv_from_gamma(target_gamma, S, K, T, r, low=SYNTH_IV_MIN, high=SYNTH_I
 
     BS gamma(sigma) is unimodal (rises to a peak, then falls), so naive bisection
     can fail. We locate the peak, then use Brent's method on the sub-interval(s)
-    that bracket the target. Prefers the lower-sigma (left) solution.
+    that bracket the target.
+
+    Root selection: both roots reproduce the vendor gamma AT SPOT, but they
+    imply very different gamma profiles AWAY from spot — which is what the
+    zero-gamma sweep and scenario math actually consume. The old rule
+    ("prefer the lower-sigma root") is right for deep-OTM strikes (whose
+    gamma peak sits at high sigma) but lands on the wrong branch for
+    near-ATM strikes, where the peak sigma is tiny and the economically
+    real IV is the HIGHER root. We instead pick the root closest to
+    SYNTH_IV_REFERENCE in log space: near-ATM ambiguity resolves to the
+    plausible ~15-30% root, deep-OTM noise roots (2-4% or 150%+) lose to
+    whichever is nearer the reference, and the economic floor in
+    fit_synthetic_iv still rejects the truly absurd survivors.
 
     Returns:
         inferred sigma (float) or 0.0 if no reasonable solution.
@@ -93,7 +126,7 @@ def infer_iv_from_gamma(target_gamma, S, K, T, r, low=SYNTH_IV_MIN, high=SYNTH_I
     # Dense grid to find the peak of gamma(sigma) and bracket solutions
     n_grid = 200
     grid = np.linspace(low, high, n_grid)
-    gammas = np.array([bs_gamma(S, K, T, r, s) for s in grid])
+    gammas = _bs_gamma_sigma_grid(S, K, T, r, grid)
 
     peak_idx = int(np.argmax(gammas))
     peak_gamma = float(gammas[peak_idx])
@@ -132,8 +165,8 @@ def infer_iv_from_gamma(target_gamma, S, K, T, r, low=SYNTH_IV_MIN, high=SYNTH_I
             return best_sigma
         return 0.0
 
-    # Prefer the lower-sigma solution (left side of gamma peak)
-    return float(min(solutions))
+    # Pick the root closest to the reference IV in log space (see docstring)
+    return float(min(solutions, key=lambda s: abs(np.log(s / SYNTH_IV_REFERENCE))))
 
 
 def fit_synthetic_iv(target_gamma, S, K, T, r):

@@ -69,6 +69,13 @@ PARITY_DISTANCE_SIGMA_PCT = 0.01
 SYNTH_IV_MIN = 0.01
 SYNTH_IV_MAX = 3.00
 SYNTH_FIT_MAX_REL_ERROR = 0.08
+# Root-selection anchor for the gamma→IV inverter. BS gamma(σ) is unimodal,
+# so any sub-peak target gamma has TWO σ roots that both reproduce the
+# vendor gamma at current spot. The inverter picks the root closest to this
+# reference in log space — a tenor-typical SPX IV — instead of blindly
+# taking the smaller root, which lands on the wrong branch for near-ATM
+# strikes (where the gamma peak sits at very low σ).
+SYNTH_IV_REFERENCE = 0.20
 
 # Hybrid IV mode
 HYBRID_IV_MODE = True
@@ -135,6 +142,7 @@ def build_config_snapshot() -> dict:
         "synth_iv_min": SYNTH_IV_MIN,
         "synth_iv_max": SYNTH_IV_MAX,
         "synth_fit_max_rel_error": SYNTH_FIT_MAX_REL_ERROR,
+        "synth_iv_reference": SYNTH_IV_REFERENCE,
         "hybrid_iv_mode": HYBRID_IV_MODE,
         "parity_method": PARITY_METHOD,
         "parity_weight_eps": PARITY_WEIGHT_EPS,

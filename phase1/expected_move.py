@@ -93,10 +93,12 @@ def compute_expected_move(straddle_info: dict | None, spot: float) -> dict:
 # ── Expiration finders for weekly / monthly EM ─────────────────────────────
 
 def find_weekly_expiration(avail_exps: list[str], ref_date: date) -> str | None:
-    """Find this Friday's expiration (or nearest weekly within 7 days)."""
+    """Find this Friday's expiration (or nearest weekly within 7 days).
+
+    On Friday itself days_to_fri is 0, so "this Friday" is today; on
+    Sat/Sun it rolls forward to next week's Friday.
+    """
     days_to_fri = (4 - ref_date.weekday()) % 7
-    if days_to_fri == 0 and ref_date.weekday() != 4:
-        days_to_fri = 7  # not actually Friday, wrap around
     friday = (ref_date + timedelta(days=days_to_fri)).strftime("%Y-%m-%d")
 
     # Exact Friday match

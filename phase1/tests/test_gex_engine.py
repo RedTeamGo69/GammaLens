@@ -186,3 +186,46 @@ def test_zero_gamma_sweep_details_detects_true_crossing(monkeypatch):
     assert details["is_true_crossing"] is True
     assert details["zero_gamma_type"] == "True crossing"
     assert details["method"].startswith("crossing")
+
+def test_calculate_all_iv_stats_fall_back_when_first_exp_expired():
+    """When the nearest selected expiration has already settled, the
+    call_iv / put_iv stats must come from the first LIVE expiration
+    instead of silently reading 0.0 (the old behavior keyed the IV
+    sample on target_exps[0] even when that exp was skipped)."""
+    def _opt(iv):
+        return {
+            "strike": 5000,
+            "openInterest": 100,
+            "impliedVolatility": iv,
+            "vendorGamma": 0.0,
+            "bid": 10.0,
+            "ask": 10.5,
+            "mid": 10.25,
+        }
+
+    class FakeClient:
+        def prefetch_chains(self, ticker, expirations):
+            return None
+
+        def get_chain_cached(self, ticker, exp):
+            # Expired Wednesday chain carries a poison IV that must NOT
+            # leak into stats; the live Friday chain carries 15%/17%.
+            if exp == "2026-03-18":
+                return {"status": "ok", "calls": [_opt(0.99)], "puts": [_opt(0.99)], "error": None}
+            return {"status": "ok", "calls": [_opt(0.15)], "puts": [_opt(0.17)], "error": None}
+
+    # Thursday 10am ET — the 2026-03-18 (Wed) expiration settled yesterday.
+    fake_now = datetime(2026, 3, 19, 10, 0, tzinfo=NY_TZ)
+
+    gex_df, stats, all_options, _, _ = gex_engine.calculate_all(
+        client=FakeClient(),
+        ticker="SPX",
+        target_exps=["2026-03-18", "2026-03-20"],
+        spot=5000,
+        r=0.04,
+        now=fake_now,
+    )
+
+    assert stats["expired_exp_count"] == 1
+    assert abs(stats["call_iv"] - 15.0) < 1e-9
+    assert abs(stats["put_iv"] - 17.0) < 1e-9

@@ -34,8 +34,11 @@ FOMC_DATES = [
     # 2025
     "2025-01-29","2025-03-19","2025-05-07","2025-06-18","2025-07-30",
     "2025-09-17","2025-10-29","2025-12-10",
-    # 2026
-    "2026-01-28","2026-03-18","2026-04-29","2026-06-17",
+    # 2026 (decision days — second day of each scheduled meeting, per the
+    # Fed's published 2026 calendar: Jan 27-28, Mar 17-18, Apr 28-29,
+    # Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9)
+    "2026-01-28","2026-03-18","2026-04-29","2026-06-17","2026-07-29",
+    "2026-09-16","2026-10-28","2026-12-09",
 ]
 
 CPI_DATES = [
@@ -63,8 +66,11 @@ CPI_DATES = [
     "2025-01-15","2025-02-12","2025-03-12","2025-04-10","2025-05-13",
     "2025-06-11","2025-07-15","2025-08-12","2025-09-10","2025-10-14",
     "2025-11-12","2025-12-10",
-    # 2026
-    "2026-01-14","2026-02-11","2026-03-11","2026-04-10",
+    # 2026 (BLS revised 2026 schedule — Dec'25 CPI landed Jan 13 and
+    # Jan'26 CPI on Feb 13, not the originally-penciled Jan 14 / Feb 11)
+    "2026-01-13","2026-02-13","2026-03-11","2026-04-10","2026-05-12",
+    "2026-06-10","2026-07-14","2026-08-12","2026-09-11","2026-10-14",
+    "2026-11-10","2026-12-10",
 ]
 
 NFP_DATES = [
@@ -92,8 +98,12 @@ NFP_DATES = [
     "2025-01-10","2025-02-07","2025-03-07","2025-04-04","2025-05-02",
     "2025-06-06","2025-07-03","2025-08-01","2025-09-05","2025-10-03",
     "2025-11-07","2025-12-05",
-    # 2026
-    "2026-01-09","2026-02-06","2026-03-06","2026-04-03",
+    # 2026 (Jan'26 jobs report was released Wed Feb 11 — schedule shifted
+    # after the late-2025 data disruption — then back to first-Friday
+    # cadence; Jun'26 data lands Thu Jul 2 ahead of the July-4th holiday)
+    "2026-01-09","2026-02-11","2026-03-06","2026-04-03","2026-05-08",
+    "2026-06-05","2026-07-02","2026-08-07","2026-09-04","2026-10-02",
+    "2026-11-06","2026-12-04",
 ]
 
 
@@ -104,6 +114,25 @@ def _get_week_start(date_str: str) -> str:
     return monday.strftime("%Y-%m-%d")
 
 
+def _warn_if_calendar_stale(name: str, dates: list[str], horizon_days: int = 45) -> None:
+    """Log loudly when a hardcoded calendar is close to running out.
+
+    These lists need a manual refresh every year; when they lapse, event
+    flags silently read 0 for upcoming weeks and the spread buffer stops
+    widening for FOMC/CPI/NFP — exactly the weeks where it matters most.
+    """
+    if not dates:
+        return
+    last = pd.to_datetime(max(dates))
+    days_left = (last - pd.Timestamp(datetime.today().date())).days
+    if days_left < horizon_days:
+        log.warning(
+            f"{name} calendar runs out on {last.date()} ({days_left} days away) — "
+            f"extend range_finder/event_calendars.py with the next published dates "
+            f"or upcoming event weeks will be flagged as event-free."
+        )
+
+
 def build_event_flags(conn) -> int:
     """
     Generate event flag rows for all weeks that have FOMC, CPI, or NFP events.
@@ -112,6 +141,10 @@ def build_event_flags(conn) -> int:
     Returns number of rows upserted.
     """
     now = datetime.now(timezone.utc).isoformat()
+
+    _warn_if_calendar_stale("FOMC", FOMC_DATES)
+    _warn_if_calendar_stale("CPI", CPI_DATES)
+    _warn_if_calendar_stale("NFP", NFP_DATES)
 
     # Map week_start → flags
     flags: dict[str, dict] = {}
@@ -129,17 +162,18 @@ def build_event_flags(conn) -> int:
     for d in NFP_DATES:
         mark(d, "has_nfp")
 
-    # Monthly opex: 3rd Friday of each month from 2020 to present
-    year = 2020
+    # Monthly opex: 3rd Friday of each month, 2020 through the END of next
+    # year. 3rd Fridays are deterministic, so flagging future weeks is
+    # exact — the old `third_friday <= today` filter meant the UPCOMING
+    # opex week (the one the HAR forecast and buffer logic actually care
+    # about) was never flagged until after it had already passed.
     today = datetime.today()
-    while year <= today.year:
+    for year in range(2020, today.year + 2):
         for month in range(1, 13):
             first_day = datetime(year, month, 1)
             first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)
             third_friday = first_friday + timedelta(weeks=2)
-            if third_friday <= today:
-                mark(third_friday.strftime("%Y-%m-%d"), "has_opex")
-        year += 1
+            mark(third_friday.strftime("%Y-%m-%d"), "has_opex")
 
     # Upsert into DB
     cur = conn.cursor()

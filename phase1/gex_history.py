@@ -437,12 +437,22 @@ def get_em_snapshot(date_str, ticker="SPX", em_type="daily"):
 
 
 def get_weekly_em_date_key(now):
-    """Return Monday's date string for the current trading week."""
-    days_since_monday = now.weekday()  # 0=Mon
+    """Return Monday's date string for the trading week the weekly EM
+    refers to.
+
+    Mon-Fri → this week's Monday (matches the cron's Monday-open capture).
+    Sat-Sun → the UPCOMING Monday: the completed week's straddle has
+    expired and find_weekly_expiration() already points at next Friday,
+    so keying the lookup to last Monday would restore (and chart) a stale
+    snapshot anchored at last week's spot. With the forward key the lookup
+    simply misses and the UI falls back to the live next-week EM.
+    """
+    wd = now.weekday()  # 0=Mon
+    delta_days = -wd if wd < 5 else (7 - wd)
     if hasattr(now, 'date'):
-        monday = (now - timedelta(days=days_since_monday)).date()
+        monday = (now + timedelta(days=delta_days)).date()
     else:
-        monday = now - timedelta(days=days_since_monday)
+        monday = now + timedelta(days=delta_days)
     return monday.strftime("%Y-%m-%d")
 
 

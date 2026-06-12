@@ -830,12 +830,20 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             st.session_state[mon_vix_key] = frozen_vix_val
             st.session_state[mon_open_week_key] = current_week
 
-    # Determine the reference price/VIX and their source label
+    # Determine the reference price/VIX and their source label.
+    #
+    # The Monday-open anchor only applies while we're planning THIS week's
+    # spreads (Mon-Thu). From Friday on, the planner targets NEXT week
+    # (see week_start below), and anchoring next week's strikes to the
+    # *current* week's Monday open carries up to a full week of drift —
+    # the best available proxy for next Monday's open is simply the
+    # latest price (Friday's close over the weekend).
+    _planning_this_week = run_now.weekday() <= 3
     frozen_open = st.session_state.get(mon_open_key)
     frozen_vix = st.session_state.get(mon_vix_key)
     frozen_week = st.session_state.get(mon_open_week_key)
 
-    if frozen_week == current_week and frozen_open:
+    if _planning_this_week and frozen_week == current_week and frozen_open:
         default_ref = frozen_open
         default_vix = frozen_vix or live_vix
         ref_source = "Mon open (frozen)"
@@ -848,7 +856,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         # invalidate explicitly.
         restored_open = None
         restored_vix = None
-        if run_now.weekday() < 5:
+        if _planning_this_week:
             try:
                 from datetime import timedelta as _td
                 days_since_monday = run_now.weekday()
@@ -872,7 +880,43 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         else:
             default_ref = round(spot, 2)
             default_vix = live_vix
-            ref_source = "Fri close" if run_now.weekday() >= 5 else "live spot"
+            if run_now.weekday() >= 5:
+                ref_source = "Fri close (next-week plan)"
+            elif run_now.weekday() == 4:
+                ref_source = "live spot (next-week plan)"
+            else:
+                ref_source = "live spot"
+
+    # ── Reference-price sanity guard ──
+    # The ref is sticky (keyed session state, frozen Monday captures, a DB
+    # restore, manual edits), so a single bad write anchors every strike
+    # in the tab to a bogus level for the rest of the session — e.g. an
+    # SPX ref of 100 against a ~7,400 spot walks the whole ladder to the
+    # chain edge and produces nonsense spreads. Live spot is always in
+    # hand here, so validate against it: hard-correct values that can only
+    # be data corruption (no weekly market move is that big), and surface
+    # a warning for large-but-conceivable gaps so the user double-checks.
+    _REF_RESET_DEV = 0.25   # >25% off spot: corruption, not a market move
+    _REF_WARN_DEV  = 0.12   # >12%: extreme — keep it, but make the user look
+
+    def _ref_deviation(v) -> "float | None":
+        """|v/spot - 1|, or None when v isn't a usable price."""
+        if not spot or spot <= 0:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        if v <= 0:
+            return None
+        return abs(v / spot - 1.0)
+
+    ref_guard_msg = None
+    if spot and spot > 0:
+        _dev_default = _ref_deviation(default_ref)
+        if _dev_default is None or _dev_default > _REF_RESET_DEV:
+            default_ref = round(spot, 2)
+            ref_source = "live spot (auto-corrected)"
 
     # ── Auto-update reference price and VIX when ticker changes ──
     # Also evict the ticker we're *leaving*'s cached HAR fit so the
@@ -900,8 +944,35 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     if vix_key not in st.session_state:
         st.session_state[vix_key] = default_vix
 
+    # Validate whatever the session is actually carrying (stale seed from a
+    # broken feed, fat-fingered edit, corrupt weekly_setup restore) — the
+    # default-ref heal above can't see a value written on an earlier rerun.
+    if spot and spot > 0:
+        _cur_ref = st.session_state.get(ref_key)
+        _dev_cur = _ref_deviation(_cur_ref)
+        if _dev_cur is None or _dev_cur > _REF_RESET_DEV:
+            ref_guard_msg = (
+                f"⚠️ The stored {ticker} reference (`{_cur_ref}`) was "
+                f"{'unusable' if _dev_cur is None else f'{_dev_cur:.0%} away from live spot'} "
+                f"(spot ≈ {spot:,.2f}) — strikes built from it would be nonsense, "
+                f"so it was reset to **{default_ref:,.2f}** ({ref_source}). "
+                "If this keeps happening, the Monday-open capture in "
+                "`weekly_setup` for this week is bad — re-run **Weekly Setup** "
+                "to overwrite it."
+            )
+            st.session_state[ref_key] = default_ref
+        elif _dev_cur > _REF_WARN_DEV:
+            ref_guard_msg = (
+                f"⚠️ The {ticker} reference ({float(_cur_ref):,.2f}) is "
+                f"{_dev_cur:.0%} away from live spot ({spot:,.2f}). That's an "
+                "extreme gap for a weekly anchor — verify the reference before "
+                "trusting the strikes below."
+            )
+
     st.markdown(f"### {ticker} Weekly Credit Spread Finder")
     st.caption("HAR regression range forecast + live GEX adjustment for optimal strike placement &nbsp;|&nbsp; 💾 Neon Postgres")
+    if ref_guard_msg:
+        st.warning(ref_guard_msg)
 
     # ── Extract GEX context from current dashboard data ──
     gex_ctx = extract_gex_context(levels, spot, regime)
@@ -915,9 +986,13 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         # and passing both makes Streamlit log a "widget created with a
         # default value but also had its value set via Session State"
         # warning on every rerun.
+        # Wide bounds on purpose: a tight min_value made the frontend clamp
+        # any out-of-range value to a plausible-looking bound (e.g. 100 for
+        # SPX) instead of letting the sanity guard above see — and heal —
+        # the real garbage value.
         spx_close_input = st.number_input(
             f"{ticker} Reference ({ref_source})",
-            min_value=100.0, max_value=15000.0, step=float(step_size),
+            min_value=1.0, max_value=100000.0, step=float(step_size),
             help=f"Reference price for range calculation. Source: {ref_source}. "
                  "Frozen at Monday's open on the first market-hours refresh of the week.",
             key=ref_key,
@@ -967,6 +1042,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         _cached_weekly_setup.clear()
 
     conn = _get_rf_conn()
+    from phase1.ticker_config import uses_own_har as _uses_own_har
 
     # ── Step 1: Refresh market data ──
     if do_refresh:
@@ -983,6 +1059,27 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                     st.warning(f"SPX/VIX fetch returned empty data (expected on weekends/holidays). Existing data is still valid.")
                 else:
                     st.error(f"SPX/VIX fetch failed: {e}")
+
+        # Own-HAR tickers (QQQ/AMZN/AMD) model their own weekly OHLC +
+        # vol proxy, not SPX's. The cron always refreshed both; this
+        # button used to refresh only SPX/VIX, so Weekly Setup on those
+        # tickers fit against stale weekly_underlying rows.
+        if _uses_own_har(ticker):
+            with st.spinner(f"1/4 — Fetching {ticker} weekly data..."):
+                try:
+                    from range_finder.data_collector import (
+                        fetch_underlying_weekly, save_underlying_weekly,
+                    )
+                    df_t = fetch_underlying_weekly(
+                        ticker=ticker,
+                        yf_symbol=ticker_cfg["yf_symbol"],
+                        vol_proxy_yf=ticker_cfg["vol_proxy_yf"],
+                        years=6,
+                    )
+                    _n_t = save_underlying_weekly(conn, ticker, df_t)
+                    st.success(f"{ticker} weekly data refreshed — {len(df_t)} weeks fetched, {_n_t} upserted")
+                except Exception as e:
+                    st.error(f"{ticker} weekly fetch failed: {e}")
 
         with st.spinner("1/4 — Fetching FRED macro data..."):
             try:
@@ -1017,7 +1114,11 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     if do_rebuild:
         with st.spinner("2/4 — Computing feature matrix..."):
             try:
-                rf_build_features(conn)
+                # Same per-ticker routing as the Monday cron: SPX/XSP share
+                # the SPX feature rows; own-HAR tickers build their own.
+                # (This used to always build SPX, so Rebuild on QQQ/AMZN/AMD
+                # never actually touched the rows the fit below reads.)
+                rf_build_features(conn, ticker=ticker if _uses_own_har(ticker) else "SPX")
                 # Drop the cached feature frame so the next read reflects
                 # the rebuild — otherwise the UI would keep serving the
                 # pre-rebuild rows until the 10-minute TTL expires.
@@ -1309,24 +1410,23 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         )
     if feature_row_is_stale:
         # On Fri-Sun the spread finder forecasts NEXT week, so it asks for
-        # next-Monday's feature row — which legitimately can't exist until
-        # next week's market data lands. Telling the user to click Weekly
-        # Setup in that case is actively wrong (the click can't materialize
-        # a row for a future week). Distinguish the two cases honestly.
+        # next-Monday's feature row. The feature builder appends that
+        # forecast row (features lagged from the current week's bar) on
+        # every rebuild — so if it's missing here, the features simply
+        # haven't been rebuilt since before this week's data existed.
         _is_weekend_or_friday = run_now.weekday() >= 4
+        _fallback_idx = df_feat.index[-1]
+        _fallback_label = (
+            _fallback_idx.strftime("%Y-%m-%d")
+            if hasattr(_fallback_idx, "strftime") else str(_fallback_idx)
+        )
         if _is_weekend_or_friday:
-            _fallback_idx = df_feat.index[-1]
-            _fallback_label = (
-                _fallback_idx.strftime("%Y-%m-%d")
-                if hasattr(_fallback_idx, "strftime") else str(_fallback_idx)
-            )
-            st.info(
-                f"ℹ️ Forecasting next week ({week_start}) using the most recent "
-                f"completed week's features ({_fallback_label}). Next Monday's "
-                "feature row will only exist once next week's market data lands; "
-                "until then this fallback is the best available input. **Weekly "
-                "Setup will not help right now** — it can't build a row for a "
-                "week that hasn't started."
+            st.warning(
+                f"⚠️ Forecasting next week ({week_start}) but its feature row "
+                f"hasn't been built yet — falling back to the {_fallback_label} "
+                "row, whose inputs are one week staler than necessary. Click "
+                "**Weekly Setup** (or **Refresh Data** + **Rebuild Features**) "
+                "to build next week's forecast row from this week's market data."
             )
         else:
             st.warning(

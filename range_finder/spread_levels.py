@@ -318,7 +318,14 @@ def _snap_to_chain_strike(target: float, chain_quotes: dict, side: str, directio
 
     direction="up"   → for calls, pick the nearest strike >= target (more OTM)
     direction="down" → for puts, pick the nearest strike <= target (more OTM)
-    Returns the original target if the chain has no strikes for this side.
+    Returns the original target if the chain has no strikes for this side,
+    or when no listed strike exists on the required (more-OTM) side of the
+    target. The old fallback in that second case returned the chain's
+    opposite extreme — e.g. a put target below the lowest listed strike
+    "snapped" to that lowest strike, which is *inside* the requested level.
+    Whenever a corrupt reference price pushed targets outside the listed
+    range, that fabricated deep-ITM "spreads" at the chain edge instead of
+    letting the side honestly come back empty.
     """
     side_key = f"{side}_bid"
     available = sorted(k for k, v in chain_quotes.items() if side_key in v)
@@ -327,10 +334,11 @@ def _snap_to_chain_strike(target: float, chain_quotes: dict, side: str, directio
 
     if direction == "up":
         candidates = [k for k in available if k >= target]
-        return candidates[0] if candidates else available[-1]
     else:
         candidates = [k for k in available if k <= target]
-        return candidates[-1] if candidates else available[0]
+    if not candidates:
+        return target
+    return candidates[0] if direction == "up" else candidates[-1]
 
 
 def _lookup_chain_price(chain_quotes: dict, strike: float, side: str, field: str) -> float | None:
@@ -718,6 +726,27 @@ def build_spread_tiers(
                 if chain_quotes:
                     put_short = _snap_to_chain_strike(put_short, chain_quotes, "put", direction="down")
                 em_adjusted_put = True
+
+        # Suppress the "model strikes" ladder when the pre-floor strike sits
+        # on the wrong side of the EM band entirely — a call short BELOW the
+        # band or a put short ABOVE it. The EM band brackets spot, so such a
+        # strike can only come from a corrupt reference price; building its
+        # ladder produces deep-ITM rows masquerading as credit spreads (the
+        # final strikes above are already EM-floored and stay as they are).
+        if em_adjusted_call and model_call_short < em_lower:
+            log.warning(
+                f"[{label}] model call short {model_call_short:.0f} is below the "
+                f"EM band ({em_lower:.0f}-{em_upper:.0f}) — reference price is "
+                "suspect; suppressing the model-strike ladder for this side."
+            )
+            em_adjusted_call = False
+        if em_adjusted_put and model_put_short > em_upper:
+            log.warning(
+                f"[{label}] model put short {model_put_short:.0f} is above the "
+                f"EM band ({em_lower:.0f}-{em_upper:.0f}) — reference price is "
+                "suspect; suppressing the model-strike ladder for this side."
+            )
+            em_adjusted_put = False
 
         em_adjusted = em_adjusted_call or em_adjusted_put
 

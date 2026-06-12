@@ -252,6 +252,25 @@ def upsert_gex(conn, week_start: str, gex: float, notes: str = "",
 # MAIN FEATURE BUILD
 # =============================================================================
 
+def _ny_now() -> pd.Timestamp:
+    """Current NY wall-clock time. Module-level so tests can freeze it."""
+    return pd.Timestamp.now(tz="America/New_York")
+
+
+def _lag_one_week(frame: pd.DataFrame) -> pd.DataFrame:
+    """Lag a weekly Monday-indexed frame by one week by shifting its INDEX
+    forward 7 days: the value observed in week W becomes the feature joined
+    at week W+1. On the gapless Monday indexes produced by the resample
+    helpers this is value-for-value identical to ``.shift(1)`` row-shifting,
+    but unlike a row-shift it also emits an index entry one week PAST the
+    frame's last row — which is what lets the appended forecast row in
+    ``build_features`` pick up HV / term-structure / macro features instead
+    of landing on NaN."""
+    if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+        return frame.shift(1)
+    return frame.shift(1, freq="7D")
+
+
 def _load_weekly_for_ticker(conn, ticker: str) -> pd.DataFrame:
     """Return weekly OHLC + vol-proxy data for a ticker, normalised to the
     legacy SPX-style column names (``spx_open``, ``vix_close``, ``spx_return``,
@@ -347,6 +366,30 @@ def build_features(conn, exclude_covid: bool = True,
         log.warning(f"weekly OHLC empty for {ticker} — skipping feature build")
         return pd.DataFrame()
 
+    # --- Forecast-row scaffold for the upcoming week ---
+    # Every feature is lagged one week, so the features of week W+1 are fully
+    # known once week W's bar exists — but the matrix used to end at the last
+    # week that HAD a bar, so a row for the upcoming week never existed and
+    # Fri-Sun forecasts silently reused the current week's row (features
+    # lagged one week further back than necessary, event flags from the
+    # wrong week). Appending an all-NaN placeholder week lets the shift(1)
+    # pipeline below populate W+1's features naturally; its target
+    # (range_pct / log_range) stays NULL until that week trades, which keeps
+    # it out of every fit (time_series_split drops NaN targets).
+    weekly = weekly.sort_index()
+    last_bar_week = weekly.index.max()
+    forecast_week = last_bar_week + pd.Timedelta(days=7)
+    weekly.loc[forecast_week] = np.nan
+
+    # Is the latest bar a completed week or the in-progress one? yfinance
+    # includes the current partial week (Monday-partial on Mondays), and its
+    # (H-L)/open over a fraction of the week is NOT a valid weekly-range
+    # target. Tracked here; the target gets nulled after assembly below.
+    _last_bar_friday_close = (
+        last_bar_week + pd.Timedelta(days=4, hours=16)
+    ).tz_localize("America/New_York")
+    last_bar_is_complete = _ny_now() >= _last_bar_friday_close
+
     # --- Fetch supplemental data ---
     daily_underlying = _load_daily_for_ticker(ticker, years=6)
     # VIX9D/VIX3M term structure stays VIX-anchored across all tickers — it's
@@ -401,7 +444,7 @@ def build_features(conn, exclude_covid: bool = True,
     df = df.join(har, how="left")
 
     # Join HV (already on Monday index)
-    hv_lagged = hv.shift(1)
+    hv_lagged = _lag_one_week(hv)
     df = df.join(hv_lagged, how="left")
     df["hv_ratio"] = df["hv5"] / df["hv20"]
 
@@ -410,12 +453,12 @@ def build_features(conn, exclude_covid: bool = True,
     df["high_vol_regime"] = (df["vix_close"].rolling(4, min_periods=2).mean() > 20).astype(int)
 
     # Join VIX term structure (lag 1 week)
-    vix_ts_lagged = vix_ts.shift(1)
+    vix_ts_lagged = _lag_one_week(vix_ts)
     df = df.join(vix_ts_lagged, how="left")
     df["vix_wk_ratio"] = df["vix_close"] / df["vix3m_close"]
 
     # Join macro (lag 1 week)
-    macro_lagged = macro_wk.shift(1)
+    macro_lagged = _lag_one_week(macro_wk)
     df = df.join(macro_lagged, how="left")
 
     # Join GEX (Monday open — same week, no lag needed). Per-ticker filter
@@ -449,7 +492,20 @@ def build_features(conn, exclude_covid: bool = True,
     df["has_earnings"] = df["has_earnings"].fillna(0).astype(int)
 
     # Drop rows with insufficient lag history
-    df.dropna(subset=["har_d1", "har_w", "har_m", "vix_close", "log_range"], inplace=True)
+    df.dropna(subset=["har_d1", "har_w", "har_m", "vix_close"], inplace=True)
+
+    # Rows without a realized target are dropped EXCEPT the trailing
+    # forecast row, whose target legitimately doesn't exist yet.
+    df = df[df["log_range"].notna() | (df.index == forecast_week)]
+
+    # Null the in-progress week's target: until its Friday session closes,
+    # range_pct covers only part of the week and would otherwise feed the
+    # fits (and OOS metrics) a systematically-too-small "weekly" range.
+    # Its FEATURE columns are untouched — they're lagged from the prior,
+    # completed week and remain valid. The next rebuild after Friday's
+    # close upserts the real target over the NULL.
+    if not last_bar_is_complete and last_bar_week in df.index:
+        df.loc[last_bar_week, ["range_pct", "log_range"]] = np.nan
 
     # Exclude COVID crash period if requested (default True)
     if exclude_covid:

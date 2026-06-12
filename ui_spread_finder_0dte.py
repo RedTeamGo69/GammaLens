@@ -315,6 +315,17 @@ def _render_0dte_spread_finder_tab(
         # on every rerun.
         if ref_key not in st.session_state:
             st.session_state[ref_key] = float(spot)
+        # The key is sticky across reruns, so a value seeded from a broken
+        # feed or a fat-fingered edit survives the session. 0DTE strikes
+        # hug spot, so a ref >10% from live spot can only be corruption —
+        # heal it before it anchors the ladder to the chain edge.
+        if spot and spot > 0:
+            try:
+                _cur_ref0 = float(st.session_state[ref_key])
+            except (TypeError, ValueError):
+                _cur_ref0 = 0.0
+            if _cur_ref0 <= 0 or abs(_cur_ref0 / spot - 1.0) > 0.10:
+                st.session_state[ref_key] = float(spot)
         spx_ref_input = st.number_input(
             f"{ticker} reference (today's open or live spot)",
             min_value=10.0, max_value=20000.0,

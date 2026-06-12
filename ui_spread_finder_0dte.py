@@ -81,7 +81,13 @@ _LIVE_VIX1D_TTL_SECONDS = 60
 
 
 def _today_iso(ref_dt: datetime = None) -> str:
-    return (ref_dt or datetime.now()).strftime("%Y-%m-%d")
+    """Trading-day 'today' in New York time. A naive datetime.now() on a
+    UTC-hosted Streamlit instance rolls to tomorrow at 8 PM ET, which made
+    _build_chain_quotes_for_0dte reject the perfectly valid same-day chain
+    ('No 0DTE listed today — nearest expiration in the cache is <today>')
+    and keyed the spread_log_daily row to the wrong session date."""
+    from phase1.market_clock import now_ny
+    return (ref_dt or now_ny()).strftime("%Y-%m-%d")
 
 
 @st.cache_data(ttl=300, show_spinner=False)

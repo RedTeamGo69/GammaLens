@@ -721,12 +721,19 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
     if not should_refit:
         try:
             from range_finder.model_persistence import load_model
-            try:
-                load_model("M2_daily_vix", conn=conn, ticker="SPX")
-            except Exception:
-                # No daily fit saved yet → bootstrap-style first fit
-                should_refit = True
-                _logger.info("  [0DTE] No daily model in saved_models — forcing first fit")
+            # Require EVERY daily spec, not just M2 — the UI dropdown
+            # offers all of MODEL_SPECS_DAILY, so a deployment that only
+            # has M2 persisted (the old save-preferred-only behavior)
+            # self-heals on the next cron run instead of erroring until
+            # someone remembers to run the bootstrap manually.
+            for _spec in MODEL_SPECS_DAILY:
+                try:
+                    load_model(_spec, conn=conn, ticker="SPX")
+                except Exception:
+                    should_refit = True
+                    _logger.info(f"  [0DTE] Daily spec {_spec} missing from "
+                                 "saved_models — forcing a refit of all specs")
+                    break
         except Exception:
             should_refit = True
 

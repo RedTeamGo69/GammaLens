@@ -268,147 +268,422 @@ def _build_chain_quotes_for_spreads(
     return quotes, target_exp
 
 
-def _build_spread_finder_excel(
-    *,
-    forecast: dict,
-    plan,
-    spread_tiers: list,
-    gex_ctx,
-    gex_adj: dict,
-    metrics: dict,
-    spx_ref: float,
-    vix: float,
-    ticker: str,
-    week_start: str,
-    chain_exp: str | None,
-    model_spec: str | None = None,
-    prev_close: float | None = None,
-) -> bytes:
-    """Build the weekly forward-test tracking workbook for this instrument.
+# ─────────────────────────────────────────────────────────────────────────────
+# Weekly forward-test workbook — ALL tickers, one week-named tab
+# ─────────────────────────────────────────────────────────────────────────────
+# One export now carries every supported instrument (SPX, XSP, QQQ, AMZN,
+# AMD) as exactly five fixed rows, on a sheet named after the planning
+# week's Monday. The intended workflow:
+#
+#   • First download = your MASTER workbook. It ships with a Scoreboard
+#     and two bookend tabs ("WeeksStart" / "WeeksEnd").
+#   • Every following week: download the new export, right-click its week
+#     tab → Move or Copy → into the master, anywhere BETWEEN the bookends.
+#   • The Scoreboard uses 3D references (=SUM(WeeksStart:WeeksEnd!…)), so
+#     every sheet between the bookends is aggregated automatically — no
+#     formula edits, ever.
+#
+# Per-week sheet layout (data rows are FIXED so 3D sums line up):
+#   A Week(Mon) · B Instrument · C Class · D Ref/Open · E Weekly Close
+#   (user fills after Friday) · F Prev Close · G..N four tier bands
+#   (Low/High) · O..R CLOSE INSIDE? per tier (formulas) · S Scored?
+#   (formula) · T Notes
 
-    Emits the user's *exact* tracking template (the bundled
-    ``assets/weekly_tracking_template.xlsx`` — two sheets: ``Scoreboard`` and
-    ``Weekly Model Ranges``) with the current week's predicted strikes written
-    into the row for ``ticker``. The four model columns are the Spread Finder's
-    risk tiers, in the tab's order:
+_FT_TICKERS = ["SPX", "XSP", "QQQ", "AMZN", "AMD"]
+_FT_CLASS = {"SPX": "Index", "XSP": "Index", "QQQ": "ETF", "AMZN": "Stock", "AMD": "Stock"}
+_FT_FIRST_DATA_ROW = 6          # rows 6..10 = the five instruments
+_FT_BOOKEND_START = "WeeksStart"
+_FT_BOOKEND_END = "WeeksEnd"
 
-      • LOWER PI       (G/H) — tightest tier (richest credit)
-      • POINT ESTIMATE (I/J) — HAR base
-      • 80% PI UPPER   (K/L) — 80% prediction interval
-      • EFFECTIVE      (M/N) — PI + event/GEX buffer (your condor)
 
-    Low/High for each are that tier's put-short / call-short strikes — the same
-    rounded, EM-floored levels the tab shows as "Puts below" / "Calls above" —
-    so the workbook matches the Spread Finder one-for-one.
+def _tier_bands_from_tiers(spread_tiers) -> dict:
+    """Map a SpreadTier list to {slot: (put_short, call_short) | None}.
 
-    ``Weekly Close`` (col E) is deliberately left blank — the user fills it in
-    after the week closes, at which point the template's own CLOSE-INSIDE
-    formulas (cols O–R) + conditional formatting flip each band green (hit) or
-    red (miss) and the Scoreboard rolls up the per-model hit rate. Every other
-    aspect of the template (fonts, fills, the per-band comments, the formulas
-    and the Scoreboard) is carried through untouched because we populate a copy
-    of the real file rather than rebuilding it.
-
-    Only call this after the forecast/plan have actually been generated (the
-    render function gates on that via an early return when no model is loaded),
-    so the band fields referenced here are always populated.
+    Slots follow the tab's Risk Tier order: lower_pi / point / pi_upper /
+    effective. Low = put short ("Puts below"), High = call short ("Calls
+    above") — the same rounded / EM-floored strikes the UI shows.
     """
-    from io import BytesIO
-    from pathlib import Path
-
-    import openpyxl
-
-    # ── Load the user's tracking template (bundled in the repo) ──
-    template_path = Path(__file__).resolve().parent / "assets" / "weekly_tracking_template.xlsx"
-    wb = openpyxl.load_workbook(template_path)
-    ws = wb["Weekly Model Ranges"]
-
-    DATA_START, DATA_END = 6, 53          # data rows in the template
-    COL_INSTRUMENT       = 2              # column B
-
-    # The template pre-labels SPX/QQQ/AMZN/AMD down column B (repeating). Drop
-    # this week's row into the first block-row matching the instrument so the
-    # label and class already line up. For anything the template doesn't
-    # pre-list (e.g. XSP) fall back to the first data row and stamp it.
-    _CLASS = {"SPX": "Index", "XSP": "Index", "QQQ": "ETF", "AMZN": "Stock", "AMD": "Stock"}
-    row = None
-    for r in range(DATA_START, DATA_END + 1):
-        if str(ws.cell(r, COL_INSTRUMENT).value or "").strip().upper() == ticker.upper():
-            row = r
-            break
-    if row is None:
-        row = DATA_START
-        ws.cell(row, COL_INSTRUMENT).value = ticker
-        ws.cell(row, 3).value = _CLASS.get(ticker.upper(), "Stock")
-
-    # Reference close the tier strikes were derived from (also written to
-    # Ref/Open and Prev Close).
-    ref = float(forecast.get("spx_ref_close") or spx_ref)
-
-    def _put(col: int, value) -> None:
-        """Write a rounded price; leave the cell (and its template format) be when value is missing."""
-        if value is not None:
-            ws.cell(row, col).value = round(float(value), 2)
-
-    # A — Week (Mon): write a real date so the template's yyyy-mm-dd format applies.
-    try:
-        ws.cell(row, 1).value = datetime.strptime(week_start, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        ws.cell(row, 1).value = week_start
-
-    _put(4, ref)                                          # D  Ref/Open (Monday-open reference)
-    # E (col 5) Weekly Close — LEFT BLANK on purpose (filled in after the week closes).
-    _put(6, prev_close)                                   # F  Prev Close (prior week's close; blank if unavailable)
-
-    # Each model column = one Spread Finder risk tier, in the same order as the
-    # tab's "Risk Tier" selector. Low = the tier's put short ("Puts below"),
-    # High = its call short ("Calls above") — the exact rounded / EM-floored
-    # strikes the UI shows, so the workbook matches the Spread Finder one-for-one.
-    def _find_tier(predicate):
-        for _t in (spread_tiers or []):
-            if predicate(str(getattr(_t, "label", "") or "").strip().lower()):
-                return _t
+    def _find(pred):
+        for t in (spread_tiers or []):
+            if pred(str(getattr(t, "label", "") or "").strip().lower()):
+                return t
         return None
 
-    _model_cols = (
-        ( 7,  8, _find_tier(lambda l: l == "lower pi")),            # G/H  LOWER PI
-        ( 9, 10, _find_tier(lambda l: l.startswith("point"))),     # I/J  POINT ESTIMATE
-        (11, 12, _find_tier(lambda l: "pi upper" in l)),           # K/L  80% PI UPPER
-        (13, 14, _find_tier(lambda l: l.startswith("effective"))), # M/N  EFFECTIVE (+buffer)
+    slots = {
+        "lower_pi":  _find(lambda l: l == "lower pi"),
+        "point":     _find(lambda l: l.startswith("point")),
+        "pi_upper":  _find(lambda l: "pi upper" in l),
+        "effective": _find(lambda l: l.startswith("effective")),
+    }
+    return {
+        k: ((round(float(t.put_short), 2), round(float(t.call_short), 2)) if t is not None else None)
+        for k, t in slots.items()
+    }
+
+
+def _prior_week_close(conn, ticker: str, week_start: str):
+    """Last weekly close strictly before week_start (XSP scaled to /10).
+
+    Reads weekly_spx (SPX/XSP) or weekly_underlying (own-HAR tickers).
+    The old exporter read a `spx_close` column off model_features — which
+    doesn't exist in that table — so Prev Close was silently blank on
+    every export.
+    """
+    from phase1.ticker_config import uses_own_har, get_config
+    try:
+        if uses_own_har(ticker):
+            from range_finder.data_collector import get_weekly_underlying
+            wk = get_weekly_underlying(conn, ticker=ticker)
+            col = "close"
+        else:
+            wk = rf_get_weekly_spx(conn)
+            col = "spx_close"
+        if wk.empty or col not in wk.columns:
+            return None
+        prior = wk.loc[wk.index < pd.Timestamp(week_start), col].dropna()
+        if prior.empty:
+            return None
+        val = float(prior.iloc[-1])
+        if get_config(ticker).get("xsp_scale_to_spx", False):
+            val /= 10.0
+        return round(val, 2)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_prior_week_close(week_start: str, ticker: str):
+    """Cross-session cache so the export build (which runs on every rerun
+    because st.download_button materializes its payload eagerly) doesn't
+    re-SELECT weekly history each interaction."""
+    return _prior_week_close(_get_rf_conn(), ticker, week_start)
+
+
+def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: str) -> dict:
+    """Forecast + tier strikes for one NON-ACTIVE ticker from persisted
+    state only: the saved HAR fit, the cron's Monday-open capture
+    (weekly_setup), and the DB weekly-EM snapshot. Returns a plain dict
+    so st.cache_data can pickle it; failures degrade to an error note on
+    that ticker's row instead of sinking the whole export.
+    """
+    from phase1.ticker_config import uses_own_har
+    from phase1.gex_history import get_em_snapshot
+
+    out = {"ticker": ticker, "ref": None, "prev_close": None,
+           "bands": {}, "notes": [], "error": None}
+    try:
+        conn = _get_rf_conn()
+
+        feat_ticker = ticker if uses_own_har(ticker) else "SPX"
+        df_feat = _cached_rf_get_features(conn, ticker=feat_ticker)
+        if df_feat.empty:
+            out["error"] = "no feature data — run Weekly Setup on this ticker"
+            return out
+
+        # Saved fit for the active spec. XSP normally has its own row
+        # (the Monday cron saves SPX+XSP together); fall back to the SPX
+        # fit if missing — they're identical by construction.
+        try:
+            payload = _cached_rf_load_model(model_choice, ticker)
+        except Exception:
+            if ticker == "XSP":
+                try:
+                    payload = _cached_rf_load_model(model_choice, "SPX")
+                    out["notes"].append("XSP via SPX fit")
+                except Exception:
+                    out["error"] = f"no saved {model_choice} fit"
+                    return out
+            else:
+                out["error"] = f"no saved {model_choice} fit — run Weekly Setup on {ticker}"
+                return out
+
+        wk_ts = pd.Timestamp(week_start)
+        if wk_ts in df_feat.index:
+            feature_row = df_feat.loc[wk_ts]
+        else:
+            feature_row = df_feat.iloc[-1]
+            out["notes"].append("stale features")
+
+        # Reference price: Monday-open capture, else prior weekly close.
+        ref = None
+        vix = None
+        setup = _cached_weekly_setup(conn, week_start, ticker)
+        if setup:
+            ref = float(setup[0]) if setup[0] else None
+            vix = float(setup[1]) if setup[1] else None
+        prev_close = _cached_prior_week_close(week_start, ticker)
+        if ref is None:
+            ref = prev_close
+            if ref is not None:
+                out["notes"].append("ref = prior close (no Mon-open capture)")
+        if ref is None:
+            out["error"] = "no reference price (weekly_setup empty)"
+            return out
+        if vix is None:
+            try:
+                _v = feature_row.get("vix_close")
+                vix = float(_v) if _v is not None and _v == _v else 18.0
+            except (TypeError, ValueError):
+                vix = 18.0
+
+        try:
+            wem = get_em_snapshot(week_start, ticker=ticker, em_type="weekly")
+        except Exception:
+            wem = None
+
+        forecast = rf_forecast_next_week(
+            payload["result"], feature_row, payload["feature_cols"],
+            ref, alpha=RF_PI_ALPHA,
+        )
+        plan = rf_build_spread_plan(
+            forecast=forecast, feature_row=feature_row, week_start=week_start,
+            vix_level=vix, ticker=ticker, chain_quotes=None,
+        )
+        tiers = rf_build_spread_tiers(
+            forecast=forecast, plan=plan, spx_ref=ref, vix_level=vix,
+            chain_quotes=None, ticker=ticker, weekly_em=wem,
+        )
+
+        out["ref"] = round(float(ref), 2)
+        out["prev_close"] = prev_close
+        out["bands"] = _tier_bands_from_tiers(tiers)
+
+        bits = [model_choice]
+        _events = [n for n, f in (("FOMC", plan.has_fomc), ("CPI", plan.has_cpi),
+                                  ("NFP", plan.has_nfp), ("OPEX", plan.has_opex)) if f]
+        if _events:
+            bits.append("/".join(_events))
+        if plan.buffer_pct:
+            bits.append(f"buf {plan.buffer_pct * 100:.2f}%")
+        if plan.recommended_width:
+            bits.append(f"wing {plan.recommended_width:g}")
+        out["notes"] = bits + out["notes"]
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_nonactive_week_bands(week_start: str, model_choice: str, tickers: tuple) -> list[dict]:
+    return [_collect_week_bands_for_ticker(t, model_choice, week_start) for t in tickers]
+
+
+def _build_forward_test_workbook(*, week_start: str, model_choice: str, rows: list[dict]) -> bytes:
+    """Assemble the multi-ticker forward-test workbook.
+
+    Sheets, in order: Scoreboard · WeeksStart · <week_start> · WeeksEnd.
+    `rows` must be the per-ticker dicts in _FT_TICKERS order (see
+    _collect_week_bands_for_ticker for the shape).
+    """
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    NAVY, MUTED = "1F3864", "595959"
+    HDR_FILL = PatternFill("solid", start_color="1F3864")
+    TIER_FILLS = [PatternFill("solid", start_color=c)
+                  for c in ("FCE4D6", "FFF2CC", "E2EFDA", "DDEBF7")]
+    GREY_FILL = PatternFill("solid", start_color="D9D9D9")
+    GREEN_FILL = PatternFill("solid", start_color="C6EFCE")
+    RED_FILL = PatternFill("solid", start_color="FFC7CE")
+    thin = Side(style="thin", color="BFBFBF")
+    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+    CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    wb = openpyxl.Workbook()
+    FIRST, LAST = _FT_FIRST_DATA_ROW, _FT_FIRST_DATA_ROW + len(_FT_TICKERS) - 1
+
+    # ── Scoreboard (sheet 1) ─────────────────────────────────────────
+    sb = wb.active
+    sb.title = "Scoreboard"
+    sb["A1"] = "HAR FORWARD TEST — SCOREBOARD"
+    sb["A1"].font = Font(bold=True, size=13, color=NAVY)
+    sb["A2"] = (
+        "Aggregates EVERY week tab between 'WeeksStart' and 'WeeksEnd' via 3D sums. "
+        "Each week: download the new export, right-click its week tab → Move or Copy → "
+        "into this workbook, anywhere between the two bookends. No formula edits needed."
     )
-    for _lo_col, _hi_col, _tier in _model_cols:
-        if _tier is not None:
-            _put(_lo_col, getattr(_tier, "put_short", None))   # Low  = put short  (Puts below)
-            _put(_hi_col, getattr(_tier, "call_short", None))  # High = call short (Calls above)
+    sb["A2"].font = Font(italic=True, size=9, color=MUTED)
+    sb.merge_cells("A2:J2")
 
-    # O–R (CLOSE INSIDE? per model) keep the template's formulas — untouched.
+    _sb_groups = [("C", "D", "LOWER PI"), ("E", "F", "POINT EST"),
+                  ("G", "H", "80% PI UPPER"), ("I", "J", "EFFECTIVE")]
+    for (lo, hi, label), fill in zip(_sb_groups, TIER_FILLS):
+        sb.merge_cells(f"{lo}4:{hi}4")
+        c = sb[f"{lo}4"]
+        c.value = label
+        c.fill = fill
+        c.font = Font(bold=True, size=9)
+        c.alignment = CENTER
+    for col, label in [("A", "Instrument"), ("B", "Weeks Scored")] + [
+        (c, lbl) for grp in _sb_groups for c, lbl in ((grp[0], "Wins"), (grp[1], "Hit %"))
+    ]:
+        cell = sb[f"{col}5"]
+        cell.value = label
+        cell.fill = HDR_FILL
+        cell.font = Font(bold=True, size=9, color="FFFFFF")
+        cell.alignment = CENTER
+        cell.border = BOX
 
-    # S — Notes: a compact, editable record of the context this row fired in.
-    note_bits: list[str] = []
-    if model_spec:
-        note_bits.append(str(model_spec))
-    _regime = getattr(gex_ctx, "gamma_regime", None)
-    _flag   = (gex_adj or {}).get("gex_regime_flag")
-    if _regime:
-        note_bits.append(f"GEX {_regime}" + (f" ({_flag:+d})" if isinstance(_flag, int) else ""))
-    _events = [name for name, fired in (
-        ("FOMC", getattr(plan, "has_fomc", 0)),
-        ("CPI",  getattr(plan, "has_cpi", 0)),
-        ("NFP",  getattr(plan, "has_nfp", 0)),
-        ("OPEX", getattr(plan, "has_opex", 0)),
-    ) if fired]
-    if _events:
-        note_bits.append("/".join(_events))
-    _buf = getattr(plan, "buffer_pct", None)
-    if _buf:
-        note_bits.append(f"buf {_buf * 100:.2f}%")
-    _wing = getattr(plan, "recommended_width", None)
-    if _wing:
-        note_bits.append(f"wing {_wing}")
-    if note_bits:
-        ws.cell(row, 19).value = " · ".join(note_bits)   # S  Notes
+    _bookends = f"{_FT_BOOKEND_START}:{_FT_BOOKEND_END}"
+    for i, t in enumerate(_FT_TICKERS):
+        r = 6 + i           # scoreboard row
+        wr = FIRST + i      # matching data row on every week sheet
+        sb[f"A{r}"] = t
+        sb[f"A{r}"].font = Font(bold=True)
+        sb[f"B{r}"] = f"=SUM({_bookends}!$S{wr})"
+        for j, (lo, hi, _label) in enumerate(_sb_groups):
+            win_col = ["O", "P", "Q", "R"][j]
+            sb[f"{lo}{r}"] = f"=SUM({_bookends}!{win_col}{wr})"
+            sb[f"{hi}{r}"] = f'=IF($B{r}=0,"—",{lo}{r}/$B{r})'
+            sb[f"{hi}{r}"].number_format = "0%"
+        for col in "ABCDEFGHIJ":
+            sb[f"{col}{r}"].border = BOX
+            if col != "A":
+                sb[f"{col}{r}"].alignment = Alignment(horizontal="center")
+    sb.column_dimensions["A"].width = 12
+    sb.column_dimensions["B"].width = 13
+    for col in "CDEFGHIJ":
+        sb.column_dimensions[col].width = 9
 
-    # ── Serialize (preserves styling, comments, formulas, conditional formatting) ──
+    # ── Bookends (sheets 2 and 4) ────────────────────────────────────
+    for name in (_FT_BOOKEND_START, _FT_BOOKEND_END):
+        bk = wb.create_sheet(name)
+        bk["A1"] = (
+            f"Keep this tab — the Scoreboard sums every sheet between "
+            f"'{_FT_BOOKEND_START}' and '{_FT_BOOKEND_END}'. "
+            "Paste each new week's tab anywhere between the bookends."
+        )
+        bk["A1"].font = Font(italic=True, size=9, color=MUTED)
+        bk.sheet_view.showGridLines = False
+
+    # ── Week sheet (between the bookends) ────────────────────────────
+    ws = wb.create_sheet(week_start, index=2)
+
+    ws["A1"] = f"HAR MODELS — WEEKLY RANGE FORWARD TEST — week of {week_start}"
+    ws["A1"].font = Font(bold=True, size=13, color=NAVY)
+    ws["A2"] = (
+        "One row per instrument. Each model tier gives its own Low/High band. "
+        "Win = weekly CLOSE inside that tier's band (intraday wicks ignored — set-and-forget). "
+        "Fill 'Weekly Close' (column E) after Friday's close; CLOSE INSIDE, Scored? and the "
+        "Scoreboard update automatically."
+    )
+    ws["A2"].font = Font(italic=True, size=9, color=MUTED)
+    ws.merge_cells("A2:T2")
+
+    _tier_groups = [
+        ("G", "H", "LOWER PI (tightest — richest credit)"),
+        ("I", "J", "POINT ESTIMATE (HAR base)"),
+        ("K", "L", "80% PI UPPER (80% interval)"),
+        ("M", "N", "EFFECTIVE (PI + buffer — your condor)"),
+    ]
+    for (lo, hi, label), fill in zip(_tier_groups, TIER_FILLS):
+        ws.merge_cells(f"{lo}4:{hi}4")
+        c = ws[f"{lo}4"]
+        c.value = label
+        c.fill = fill
+        c.font = Font(bold=True, size=8)
+        c.alignment = CENTER
+    ws.merge_cells("O4:R4")
+    ws["O4"] = "CLOSE INSIDE? (per model)"
+    ws["O4"].fill = PatternFill("solid", start_color="B4C6E7")
+    ws["O4"].font = Font(bold=True, size=8)
+    ws["O4"].alignment = CENTER
+
+    _headers = [
+        ("A", "Week (Mon)"), ("B", "Instrument"), ("C", "Class"),
+        ("D", "Ref/Open ($)"), ("E", "Weekly Close ($)"), ("F", "Prev Close ($)"),
+        ("G", "Low"), ("H", "High"), ("I", "Low"), ("J", "High"),
+        ("K", "Low"), ("L", "High"), ("M", "Low"), ("N", "High"),
+        ("O", "Lower PI"), ("P", "Point"), ("Q", "80% PI"), ("R", "Eff"),
+        ("S", "Scored?"), ("T", "Notes"),
+    ]
+    for col, label in _headers:
+        cell = ws[f"{col}5"]
+        cell.value = label
+        cell.fill = HDR_FILL
+        cell.font = Font(bold=True, size=9, color="FFFFFF")
+        cell.alignment = CENTER
+        cell.border = BOX
+
+    _slot_cols = [("lower_pi", "G", "H"), ("point", "I", "J"),
+                  ("pi_upper", "K", "L"), ("effective", "M", "N")]
+    _week_date = None
+    try:
+        _week_date = datetime.strptime(week_start, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        pass
+
+    for i, t in enumerate(_FT_TICKERS):
+        r = FIRST + i
+        row = rows[i] if i < len(rows) else {"ticker": t, "error": "no data"}
+
+        ws[f"A{r}"] = _week_date or week_start
+        ws[f"A{r}"].number_format = "yyyy-mm-dd"
+        ws[f"B{r}"] = t
+        ws[f"B{r}"].font = Font(bold=True)
+        ws[f"C{r}"] = _FT_CLASS.get(t, "Stock")
+        if row.get("ref") is not None:
+            ws[f"D{r}"] = row["ref"]
+        # E — Weekly Close: left blank for the user, shaded as fill-me.
+        ws[f"E{r}"].fill = GREY_FILL
+        if row.get("prev_close") is not None:
+            ws[f"F{r}"] = row["prev_close"]
+
+        bands = row.get("bands") or {}
+        for (slot, lo_col, hi_col), fill in zip(_slot_cols, TIER_FILLS):
+            band = bands.get(slot)
+            if band is not None:
+                ws[f"{lo_col}{r}"] = band[0]
+                ws[f"{hi_col}{r}"] = band[1]
+            ws[f"{lo_col}{r}"].fill = fill
+            ws[f"{hi_col}{r}"].fill = fill
+
+        # CLOSE INSIDE? formulas — blank until E is filled, then 1/0.
+        for (slot, lo_col, hi_col), flag_col in zip(_slot_cols, "OPQR"):
+            ws[f"{flag_col}{r}"] = (
+                f'=IF($E{r}="","",IF(AND($E{r}>={lo_col}{r},$E{r}<={hi_col}{r}),1,0))'
+            )
+            ws[f"{flag_col}{r}"].alignment = Alignment(horizontal="center")
+        ws[f"S{r}"] = f'=IF($E{r}="","",1)'
+        ws[f"S{r}"].alignment = Alignment(horizontal="center")
+
+        note = " · ".join(row.get("notes") or [])
+        if row.get("error"):
+            note = (f"⚠ {row['error']}" + (f" · {note}" if note else ""))
+        ws[f"T{r}"] = note
+        ws[f"T{r}"].font = Font(size=8, color=MUTED)
+        ws[f"T{r}"].alignment = Alignment(wrap_text=True, vertical="center")
+
+        for col_idx in range(1, 21):
+            cell = ws.cell(row=r, column=col_idx)
+            cell.border = BOX
+            if 4 <= col_idx <= 14 and cell.value is not None and not isinstance(cell.value, str):
+                cell.number_format = "#,##0.00"
+
+    # Green/red the CLOSE INSIDE cells once scored.
+    ws.conditional_formatting.add(
+        f"O{FIRST}:R{LAST}",
+        CellIsRule(operator="equal", formula=["1"], fill=GREEN_FILL),
+    )
+    ws.conditional_formatting.add(
+        f"O{FIRST}:R{LAST}",
+        CellIsRule(operator="equal", formula=["0"], fill=RED_FILL),
+    )
+
+    _widths = {"A": 11, "B": 11, "C": 7, "D": 10, "E": 11, "F": 10,
+               "S": 8, "T": 46}
+    for col_idx in range(7, 15):
+        _widths[get_column_letter(col_idx)] = 9
+    for col_idx in range(15, 19):
+        _widths[get_column_letter(col_idx)] = 8
+    for col, w in _widths.items():
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A6"
+
     buffer = BytesIO()
     wb.save(buffer)
     buffer.seek(0)
@@ -1150,55 +1425,80 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         f"MAE: {metrics['mae_pct']*100:.2f}%",
     )
 
-    # ── Excel export ──
-    # Reaching this point guarantees the forecast/plan have been generated
-    # (the no-model branch above returns early), so the tracking workbook is
-    # always populated with this week's real bands — never a blank template.
-
-    # Previous week's close (prior Friday) for the "Prev Close" column — the
-    # spx_close of the most recent completed week before week_start, taken from
-    # the weekly feature frame the model is built on (no extra data fetch).
-    _prev_close = None
-    try:
-        if not df_feat.empty and "spx_close" in df_feat.columns:
-            _prior_close = df_feat.loc[df_feat.index < pd.Timestamp(week_start), "spx_close"].dropna()
-            if not _prior_close.empty:
-                _prev_close = float(_prior_close.iloc[-1])
-    except Exception:
-        _prev_close = None
-
+    # ── Excel export — ALL tickers, one week-named tab ──
+    # The active ticker's row reuses the exact tiers rendered above (chain-
+    # snapped strikes, live weekly-EM floor); the other four instruments are
+    # rebuilt from persisted state (saved fits, Monday-open captures, DB EM
+    # snapshots) via a 10-min cross-session cache so the eager download-button
+    # payload build doesn't hammer Neon on every rerun.
     _xlsx_col, _ = st.columns([1, 3])
     with _xlsx_col:
         try:
-            _xlsx_bytes = _build_spread_finder_excel(
-                forecast    = forecast,
-                plan        = plan,
-                spread_tiers= spread_tiers,
-                gex_ctx     = gex_ctx,
-                gex_adj     = gex_adj,
-                metrics     = metrics,
-                spx_ref     = spx_close_input,
-                vix         = vix_input,
-                ticker      = ticker,
-                week_start  = week_start,
-                chain_exp   = chain_exp,
-                model_spec  = active_model,
-                prev_close  = _prev_close,
+            _active_notes = [active_model]
+            if gex_ctx.gamma_regime:
+                _gflag = gex_adj.get("gex_regime_flag")
+                _active_notes.append(
+                    f"GEX {gex_ctx.gamma_regime}"
+                    + (f" ({_gflag:+d})" if isinstance(_gflag, int) else "")
+                )
+            _active_events = [n for n, f in (("FOMC", plan.has_fomc), ("CPI", plan.has_cpi),
+                                             ("NFP", plan.has_nfp), ("OPEX", plan.has_opex)) if f]
+            if _active_events:
+                _active_notes.append("/".join(_active_events))
+            if plan.buffer_pct:
+                _active_notes.append(f"buf {plan.buffer_pct * 100:.2f}%")
+            if plan.recommended_width:
+                _active_notes.append(f"wing {plan.recommended_width:g}")
+            if chain_exp:
+                _active_notes.append(f"chain {chain_exp}")
+
+            _active_row = {
+                "ticker": ticker,
+                "ref": round(float(spx_close_input), 2),
+                "prev_close": _cached_prior_week_close(week_start, ticker),
+                "bands": _tier_bands_from_tiers(spread_tiers),
+                "notes": _active_notes,
+                "error": None,
+            }
+            _other_tickers = tuple(t for t in _FT_TICKERS if t != ticker)
+            _other_rows = {
+                r["ticker"]: r
+                for r in _cached_nonactive_week_bands(week_start, active_model, _other_tickers)
+            }
+            _ft_rows = [
+                _active_row if t == ticker else _other_rows.get(
+                    t, {"ticker": t, "error": "data collection failed",
+                        "bands": {}, "notes": [], "ref": None, "prev_close": None},
+                )
+                for t in _FT_TICKERS
+            ]
+
+            _xlsx_bytes = _build_forward_test_workbook(
+                week_start=week_start, model_choice=active_model, rows=_ft_rows,
             )
             st.download_button(
-                label       = "Export to Excel",
+                label       = "Export weekly workbook (all tickers)",
                 data        = _xlsx_bytes,
-                file_name   = f"har_forward_test_{ticker}_{week_start}_{active_model}.xlsx",
+                file_name   = f"har_forward_test_{week_start}_{active_model}.xlsx",
                 mime        = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-                key         = f"_sf_xlsx_{ticker}_{week_start}_{active_model}",
+                key         = f"_sf_xlsx_{week_start}_{active_model}",
                 help        = (
-                    "Your forward-test template, prefilled with this week's "
-                    "predicted POINT / PI / EFFECTIVE / VIX bands for this "
-                    "instrument. Leave 'Weekly Close' blank until Friday — fill it "
-                    "in and the sheet auto-scores hit/miss and updates the Scoreboard."
+                    "One tab named for this week with all five instruments' "
+                    "POINT / PI / EFFECTIVE bands, plus a Scoreboard that 3D-sums "
+                    "every week tab between the WeeksStart/WeeksEnd bookends. "
+                    "First download = your master workbook; each later week, copy "
+                    "the new week tab into the master between the bookends. Fill "
+                    "'Weekly Close' after Friday and everything scores itself."
                 ),
             )
+            _missing = [r["ticker"] for r in _ft_rows if r.get("error")]
+            if _missing:
+                st.caption(
+                    f"⚠ No bands for {', '.join(_missing)} — see the Notes column "
+                    "in the export. Usually fixed by Weekly Setup on that ticker "
+                    "(needs a saved fit + Monday-open capture)."
+                )
         except Exception as _xlsx_err:
             st.caption(f"Excel export unavailable: {_xlsx_err}")
 

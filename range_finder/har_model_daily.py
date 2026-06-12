@@ -162,16 +162,21 @@ def run_daily_pipeline(conn, preferred_model: str = "M2_daily_vix",
                     f"falling back to {fallback}.")
         preferred_model = fallback
 
-    best_result, best_features = all_results[preferred_model]
-
-    save_model(
-        best_result,
-        best_features,
-        preferred_model,
-        all_metrics.get(preferred_model, {}),
-        conn=conn,
-        ticker="SPX",
-    )
+    # Save EVERY spec that fit, not just the preferred one. The 0DTE
+    # finder's model dropdown offers all of MODEL_SPECS_DAILY, but only
+    # the preferred spec used to be persisted — selecting M1/M3 in the
+    # UI then failed with "No saved model found for SPX/<spec>" until a
+    # manual bootstrap. Mirrors the weekly cron, which saves all specs.
+    for spec_name, (result, features) in all_results.items():
+        save_model(
+            result,
+            features,
+            spec_name,
+            all_metrics.get(spec_name, {}),
+            conn=conn,
+            ticker="SPX",
+        )
+    log.info(f"Saved {len(all_results)} daily specs: {sorted(all_results.keys())}")
 
     return {
         "preferred": preferred_model,

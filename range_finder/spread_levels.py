@@ -274,23 +274,42 @@ def estimate_credit(
 # SPREAD SIDE BUILDER
 # =============================================================================
 
+def _snap_long_strike(short_strike: float, width: float, chain_quotes: dict, side: str):
+    """Resolve the actual listed long strike for a target wing width.
+
+    Far-OTM chains coarsen to wider strike increments (SPX goes 25/50-pt,
+    QQQ 5-pt), so `short ± width` frequently isn't listed exactly where
+    wide wings land. Snap OUTWARD (more OTM — never narrower than asked)
+    to the nearest listed strike with quote data. Returns None only when
+    no listed strike exists at or beyond the target (true chain edge).
+    """
+    target = short_strike + width if side == "call" else short_strike - width
+    side_key = f"{side}_ask"  # long leg needs an ask price
+    row = chain_quotes.get(target)
+    if row and side_key in row:
+        return target
+    listed = sorted(k for k, v in chain_quotes.items() if side_key in v)
+    if side == "call":
+        cands = [k for k in listed if k >= target]
+        return cands[0] if cands else None
+    cands = [k for k in listed if k <= target]
+    return cands[-1] if cands else None
+
+
 def _available_wing_widths(
     short_strike: float,
     chain_quotes: dict,
     side: str,
     target_widths: list,
 ) -> list:
-    """Return wing widths where the long strike actually exists in the chain.
-
-    For each target width, checks if the resulting long strike has quote data.
-    Keeps the original target list order but filters to real strikes only.
-    """
-    side_key = f"{side}_ask"  # long leg needs an ask price
-    available = []
-    for w in target_widths:
-        long_strike = short_strike + w if side == "call" else short_strike - w
-        if long_strike in chain_quotes and side_key in chain_quotes[long_strike]:
-            available.append(w)
+    """Return wing widths whose long leg can be resolved to a real chain
+    strike (exactly, or snapped outward — see _snap_long_strike). Keeps
+    the original target-list order; falls back to all targets when the
+    chain has nothing on this side."""
+    available = [
+        w for w in target_widths
+        if _snap_long_strike(short_strike, w, chain_quotes, side) is not None
+    ]
     return available if available else target_widths  # fallback to all if chain has nothing
 
 
@@ -348,6 +367,7 @@ def build_spread_side(
     when chain data is missing.
     """
     results = []
+    used_longs: set = set()  # dedupe targets that snap to the same listed strike
 
     for width in wing_widths:
         if side == "call":
@@ -355,12 +375,26 @@ def build_spread_side(
         else:
             long_strike = short_strike - width
 
-        # Skip widths where either strike doesn't exist in the chain
         if chain_quotes:
+            # Short must exist in the chain (it's snapped upstream, so a
+            # miss here means the side genuinely isn't listed).
             short_in_chain = short_strike in chain_quotes and f"{side}_bid" in chain_quotes[short_strike]
-            long_in_chain = long_strike in chain_quotes and f"{side}_ask" in chain_quotes[long_strike]
-            if not short_in_chain or not long_in_chain:
-                continue  # strike doesn't exist for this expiration
+            if not short_in_chain:
+                continue
+            # Long leg: resolve to a REAL listed strike, snapping outward
+            # when short±width lands between far-OTM strike increments.
+            # Previously these widths were silently dropped, which made
+            # the wider rungs of the ladder vanish from the tables at
+            # exactly the tiers (far-OTM shorts) where the chain coarsens.
+            long_strike = _snap_long_strike(short_strike, width, chain_quotes, side)
+            if long_strike is None:
+                continue  # true chain edge — nothing listed at/beyond target
+            if long_strike in used_longs:
+                continue  # two targets snapped to the same strike — keep the narrower
+            used_longs.add(long_strike)
+
+        # The economics must use the ACTUAL wing distance, not the target.
+        actual_width = abs(long_strike - short_strike)
 
         # Use actual market prices
         market_credit = None
@@ -375,19 +409,19 @@ def build_spread_side(
             source = "market"
         else:
             est_credit = estimate_credit(
-                short_strike, spx_ref, width, vix, dte, side
+                short_strike, spx_ref, actual_width, vix, dte, side
             )
             source = "bsm"
 
         max_profit  = round(est_credit * 100, 2)
-        max_loss    = round((width - est_credit) * 100, 2)
+        max_loss    = round((actual_width - est_credit) * 100, 2)
 
         if side == "call":
             breakeven = round(short_strike + est_credit, 2)
         else:
             breakeven = round(short_strike - est_credit, 2)
 
-        credit_ratio  = est_credit / width if width > 0 else 0
+        credit_ratio  = est_credit / actual_width if actual_width > 0 else 0
         meets_minimum = credit_ratio >= MIN_CREDIT_RATIO
 
         short_pct = abs(short_strike - spx_ref) / spx_ref
@@ -396,7 +430,7 @@ def build_spread_side(
             side            = side,
             short_strike    = short_strike,
             long_strike     = long_strike,
-            wing_width      = width,
+            wing_width      = actual_width,
             short_pct       = round(short_pct, 4),
             max_profit      = max_profit,
             max_loss        = max_loss,

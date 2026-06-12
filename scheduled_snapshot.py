@@ -797,7 +797,9 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
                  or _finite_or_none(feature_row.get("vix_close"))
                  or 18.0)
 
-        wing_widths = [5, 10, 15, 20, 25] if ticker == "SPX" else [1, 2, 3, 5]
+        # Same per-ticker ladders as the UI (ticker_config is the single
+        # source of truth): SPX 100..500, XSP 5..20.
+        wing_widths = ticker_cfg["wing_widths"]
 
         plan = build_spread_plan(
             forecast=forecast,

@@ -45,7 +45,7 @@ from range_finder.spread_levels import (
     build_spread_plan as rf_build_spread_plan,
     build_spread_tiers as rf_build_spread_tiers,
     update_outcome as rf_update_outcome,
-    STANDARD_WING_WIDTHS as RF_WING_WIDTHS,
+    MIN_CREDIT_RATIO,
     TICKER_CONFIG as RF_TICKER_CONFIG,
     SpreadPlan,
     SpreadTier,
@@ -1605,11 +1605,11 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
         with col_call:
             st.markdown(f"Call Spreads — short above `{selected_tier.call_short:,.0f}`")
-            _render_sf_spread_table(selected_tier.call_spreads, _plan.recommended_width)
+            _render_sf_spread_table(selected_tier.call_spreads)
 
         with col_put:
             st.markdown(f"Put Spreads — short below `{selected_tier.put_short:,.0f}`")
-            _render_sf_spread_table(selected_tier.put_spreads, _plan.recommended_width)
+            _render_sf_spread_table(selected_tier.put_spreads)
 
         # Show credit source note with chain expiration
         all_tier_spreads = selected_tier.call_spreads + selected_tier.put_spreads
@@ -1640,13 +1640,13 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             with col_mc:
                 if _has_model_call:
                     st.markdown(f"Call Spreads — short above `{selected_tier.model_call_short:,.0f}`")
-                    _render_sf_spread_table(selected_tier.model_call_spreads, _plan.recommended_width)
+                    _render_sf_spread_table(selected_tier.model_call_spreads)
                 else:
                     st.caption("Call short not adjusted by EM floor")
             with col_mp:
                 if _has_model_put:
                     st.markdown(f"Put Spreads — short below `{selected_tier.model_put_short:,.0f}`")
-                    _render_sf_spread_table(selected_tier.model_put_spreads, _plan.recommended_width)
+                    _render_sf_spread_table(selected_tier.model_put_spreads)
                 else:
                     st.caption("Put short not adjusted by EM floor")
 
@@ -2022,13 +2022,22 @@ def _render_sf_strike_map_tier(
     call_long = tier.call_spreads[0].long_strike if tier.call_spreads else call_short + 25
     put_long  = tier.put_spreads[0].long_strike  if tier.put_spreads  else put_short - 25
 
-    # Use recommended wing width if available
-    for s in tier.call_spreads:
-        if s.wing_width == selected_width:
-            call_long = s.long_strike
-    for s in tier.put_spreads:
-        if s.wing_width == selected_width:
-            put_long = s.long_strike
+    # Draw the same spread the table stars (best qualifying per side);
+    # fall back to the model-recommended width when nothing qualifies.
+    _best_c = _best_spread_idx(tier.call_spreads)
+    if _best_c is not None:
+        call_long = tier.call_spreads[_best_c].long_strike
+    else:
+        for s in tier.call_spreads:
+            if s.wing_width == selected_width:
+                call_long = s.long_strike
+    _best_p = _best_spread_idx(tier.put_spreads)
+    if _best_p is not None:
+        put_long = tier.put_spreads[_best_p].long_strike
+    else:
+        for s in tier.put_spreads:
+            if s.wing_width == selected_width:
+                put_long = s.long_strike
 
     # Weekly expected move from Friday straddle (already computed by GEX engine)
     em_upper = (weekly_em or {}).get("upper_level", 0)
@@ -2170,19 +2179,47 @@ def _render_sf_strike_map_tier(
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
 
 
-def _render_sf_spread_table(spreads, recommended_width: int):
-    """Render spread parameters as a styled dataframe."""
+def _best_spread_idx(spreads) -> "int | None":
+    """Index of the 'best' spread in a width ladder, or None.
+
+    With the short strike fixed across the ladder, credit RATIO is always
+    highest on the narrowest width (the marginal credit per extra point of
+    wing decays), so 'max ratio' would just re-create an arbitrary
+    always-first-row highlight. Instead: the WIDEST spread whose credit
+    still clears MIN_CREDIT_RATIO and the event minimum width — i.e. the
+    most absolute premium and breach headroom you can take while still
+    being paid at least the floor per point of risk. In high-IV tape more
+    rungs qualify and the highlight walks wider; on dead/thin chains
+    (0.00 credits) nothing qualifies and nothing is highlighted.
+    """
+    best = None
+    for i, s in enumerate(spreads):
+        if not getattr(s, "meets_min_credit", False):
+            continue
+        if getattr(s, "below_min_width", False):
+            continue
+        if best is None or s.wing_width > spreads[best].wing_width:
+            best = i
+    return best
+
+
+def _render_sf_spread_table(spreads):
+    """Render spread parameters as a styled dataframe, highlighting the
+    best qualifying spread (see _best_spread_idx) instead of a preset
+    'recommended' width."""
     if not spreads:
         st.info("No spreads available.")
         return
 
+    best_idx = _best_spread_idx(spreads)
+
     rows = []
-    for s in spreads:
+    for i, s in enumerate(spreads):
         width_label = f"{int(s.wing_width)}pt" if s.wing_width == int(s.wing_width) else f"{s.wing_width}pt"
         if getattr(s, "below_min_width", False):
             width_label += "*"
         rows.append({
-            "Width": width_label,
+            "Width": ("★ " if i == best_idx else "") + width_label,
             "Short": f"{s.short_strike:,.0f}",
             "Long": f"{s.long_strike:,.0f}",
             "Est Credit": f"{s.estimated_credit:.2f}" + (" *" if getattr(s, "credit_source", "bsm") == "bsm" else ""),
@@ -2190,25 +2227,15 @@ def _render_sf_spread_table(spreads, recommended_width: int):
             "Breakeven": f"{s.breakeven:,.0f}",
             "Ratio": f"{s.credit_ratio:.1%}",
             "OK": "Y" if s.meets_min_credit else "N",
-            "Rec": s.wing_width == recommended_width,
         })
 
-    df = pd.DataFrame(rows)
+    display_df = pd.DataFrame(rows)
 
-    # BUG FIX: apply styling before dropping the helper column
-    def highlight_rec(row):
-        if row["Rec"]:
-            return ["background-color: #1a3a2a"] * len(row)
-        return [""] * len(row)
-
-    display_df = df.drop(columns=["Rec"])
-    # Apply row highlighting using the original df's Rec column
-    styles = []
-    for _, row in df.iterrows():
-        if row["Rec"]:
-            styles.append(["background-color: #1a3a2a"] * len(display_df.columns))
-        else:
-            styles.append([""] * len(display_df.columns))
+    styles = [
+        ["background-color: #1a3a2a"] * len(display_df.columns)
+        if i == best_idx else [""] * len(display_df.columns)
+        for i in range(len(display_df))
+    ]
 
     styled = display_df.style.apply(lambda x: styles[x.name], axis=1)
     styled = styled.map(
@@ -2217,4 +2244,14 @@ def _render_sf_spread_table(spreads, recommended_width: int):
     )
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
+    if best_idx is not None:
+        st.caption(
+            f"★ Best = widest wing still paying ≥{MIN_CREDIT_RATIO:.0%} of width "
+            "(max premium + breach headroom at an acceptable credit-per-risk floor)."
+        )
+    else:
+        st.caption(
+            f"No spread clears the {MIN_CREDIT_RATIO:.0%} credit-to-width floor — "
+            "credit is too thin at these strikes/widths to be worth the risk."
+        )
 

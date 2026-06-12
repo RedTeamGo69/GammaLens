@@ -65,9 +65,8 @@ log = logging.getLogger(__name__)
 # QQQ has 0DTE listings but the daily HAR isn't fit on QQQ data here.
 SUPPORTED_0DTE_TICKERS = {"SPX", "XSP"}
 
-# Wing widths suitable for 0DTE chains (which thin out beyond ±25 pts on SPX).
-WING_WIDTHS_0DTE_SPX = [5, 10, 15, 20, 25]
-WING_WIDTHS_0DTE_XSP = [1, 2, 3, 5]  # XSP strikes are 1-pt increments
+# Wing widths come from phase1.ticker_config (single source of truth shared
+# with the weekly finder): SPX 100..500 by 100s, XSP 5/10/15/20.
 
 # VRP banner thresholds — daily-range fractions (unitless).
 # These will be re-tuned once we have historical vrp_daily data in the
@@ -411,7 +410,7 @@ def _render_0dte_spread_finder_tab(
     gex_ctx = extract_gex_context(levels, spot, regime)
     chain_quotes, chain_exp = _build_chain_quotes_for_0dte(data, ticker)
 
-    wing_widths = WING_WIDTHS_0DTE_SPX if ticker == "SPX" else WING_WIDTHS_0DTE_XSP
+    wing_widths = ticker_cfg["wing_widths"]
 
     try:
         plan = rf_build_spread_plan(
@@ -475,10 +474,10 @@ def _render_0dte_spread_finder_tab(
 
     # ── Spread tables ───────────────────────────────────────────────
     st.markdown("#### Call spreads")
-    _render_sf_spread_table(plan.call_spreads, plan.recommended_width)
+    _render_sf_spread_table(plan.call_spreads)
 
     st.markdown("#### Put spreads")
-    _render_sf_spread_table(plan.put_spreads, plan.recommended_width)
+    _render_sf_spread_table(plan.put_spreads)
 
     # ── Warnings / Context ──────────────────────────────────────────
     if plan.warnings:

@@ -50,13 +50,13 @@ GEX_CONTINUOUS_SCALE = 0.002  # buffer adjustment per unit of gex_normalized
 # phase1.ticker_config (wing_widths / min_spread_width) — keep these in
 # sync with the SPX entry there.
 MIN_SPREAD_WIDTH = {
-    "normal":     100,
-    "event_1":    100,
-    "event_2":    200,
-    "fomc_week":  200,
+    "normal":     50,
+    "event_1":    50,
+    "event_2":    100,
+    "fomc_week":  100,
 }
 
-STANDARD_WING_WIDTHS = [100, 200, 300, 400, 500]
+STANDARD_WING_WIDTHS = [50, 100, 150, 200]
 
 MIN_CREDIT_RATIO = 0.05   # 5% — realistic for far-OTM weekly credit spreads
 

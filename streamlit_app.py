@@ -170,6 +170,15 @@ def get_expirations_cached(tradier_token: str, ticker: str) -> list[str]:
     return TradierDataClient(token=tradier_token).get_expirations(ticker)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def validate_ticker_cached(tradier_token: str, symbol: str):
+    """Validate a typed symbol against Tradier (must be optionable).
+
+    Returns the instrument dict ({symbol, type, name, has_options}) or None.
+    Cached 10 minutes so re-typing a symbol doesn't re-hit the API."""
+    return TradierDataClient(token=tradier_token).validate_ticker(symbol)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_risk_free_rate_cached(fred_key: str) -> dict:
     """FRED publishes these series once per business day; cache for an hour
@@ -349,21 +358,72 @@ def main():
 
         st.divider()
 
-        # Ticker selector — grouped by category (index / etf / stock)
+        # ── Ticker search — type ANY optionable symbol, plus quick-picks ──
+        # The curated five (SPX/XSP/QQQ/AMZN/AMD) keep their hand-tuned configs;
+        # any other symbol is validated against Tradier and gets a chain-derived
+        # config (real strike increment / wing widths) registered after fetch.
         from phase1.ticker_config import all_tickers, get_config
-        _ticker_options = all_tickers()
 
-        def _format_ticker(sym: str) -> str:
-            cat = get_config(sym).get("category", "")
-            label_map = {"index": "Index", "etf": "ETF", "stock": "Stock"}
-            return f"{sym}  ({label_map.get(cat, cat)})"
+        _curated = all_tickers()
+        st.session_state.setdefault("active_ticker", "SPX")
+        st.session_state.setdefault("recent_tickers", [])
+        st.session_state.setdefault("ticker_meta", {})
 
-        ticker = st.selectbox(
+        def _activate_ticker(sym: str, meta: dict | None = None) -> None:
+            sym = (sym or "").strip().upper()
+            if not sym:
+                return
+            st.session_state["active_ticker"] = sym
+            if meta:
+                st.session_state["ticker_meta"][sym] = meta
+            if sym not in _curated:
+                recents = [t for t in st.session_state["recent_tickers"] if t != sym]
+                recents.insert(0, sym)
+                st.session_state["recent_tickers"] = recents[:6]
+
+        _typed = st.text_input(
             "Ticker",
-            _ticker_options,
-            index=0,
-            key="ticker_select",
-            format_func=_format_ticker,
+            value="",
+            placeholder="Type any symbol — e.g. AAPL, NVDA, IWM",
+            key="ticker_search_box",
+            help="Any optionable symbol in Tradier. SPX/XSP keep the 0DTE Finder; "
+                 "every other ticker gets GEX + the weekly Spread Finder.",
+        ).strip().upper()
+
+        # Only process a typed symbol once (the sentinel stops a quick-pick
+        # click from being overridden by the value still sitting in the box).
+        if _typed and _typed != st.session_state.get("_ticker_search_last", ""):
+            st.session_state["_ticker_search_last"] = _typed
+            with st.spinner(f"Validating {_typed}…"):
+                _meta = validate_ticker_cached(tradier_token, _typed)
+            if _meta:
+                _activate_ticker(_typed, _meta)
+            else:
+                st.error(
+                    f"'{_typed}' isn't a recognized optionable symbol on Tradier. "
+                    "Check the spelling or try another."
+                )
+
+        st.caption("Quick picks")
+        _qp_cols = st.columns(len(_curated))
+        for _i, _sym in enumerate(_curated):
+            if _qp_cols[_i].button(_sym, key=f"qp_{_sym}", use_container_width=True):
+                _activate_ticker(_sym)
+
+        _recents = [t for t in st.session_state["recent_tickers"] if t not in _curated]
+        if _recents:
+            st.caption("Recent")
+            _rc_cols = st.columns(len(_recents))
+            for _i, _sym in enumerate(_recents):
+                if _rc_cols[_i].button(_sym, key=f"rc_{_sym}", use_container_width=True):
+                    _activate_ticker(_sym)
+
+        ticker = st.session_state["active_ticker"]
+        _meta_active = st.session_state["ticker_meta"].get(ticker)
+        _cat = (_meta_active or {}).get("type") or get_config(ticker).get("category", "")
+        _label_map = {"index": "Index", "etf": "ETF", "stock": "Stock"}
+        st.markdown(
+            f"**Active ticker:** `{ticker}`  ·  {_label_map.get(_cat, _cat or '—')}"
         )
 
         # Expiration picker
@@ -533,6 +593,21 @@ def main():
     regime = data.regime_info
     prev_close = data.prev_close
     is_market_open = data.market_open
+
+    # Register the per-ticker config derived from the live chain so the Spread
+    # Finder uses real strike increments / wing widths for arbitrary tickers.
+    # No-op for the curated five (their hand-tuned configs are never clobbered).
+    try:
+        from phase1.ticker_config import register_dynamic_config
+        _meta_t = st.session_state.get("ticker_meta", {}).get(ticker)
+        register_dynamic_config(
+            ticker,
+            strikes=data.gex_df["strike"].tolist(),
+            spot=float(spot or 0.0),
+            instrument_type=(_meta_t or {}).get("type"),
+        )
+    except Exception as _cfg_err:
+        _logger.warning(f"dynamic config registration failed for {ticker}: {_cfg_err}")
 
     # ── Build EM analysis (fresh each render, not cached) ──
     em_analysis = build_expected_move_analysis(

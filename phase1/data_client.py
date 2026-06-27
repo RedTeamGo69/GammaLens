@@ -135,8 +135,71 @@ class TradierDataClient:
             timeout=10,
         )
         r.raise_for_status()
-        e = r.json()["expirations"]["date"]
+        exp = r.json().get("expirations")
+        # Tradier returns {"expirations": null} for a symbol that has no
+        # listed options (or doesn't exist). Treat that as "no options"
+        # rather than letting a None subscript blow up the caller.
+        if not exp:
+            return []
+        e = exp.get("date")
+        if not e:
+            return []
         return sorted([e] if isinstance(e, str) else e)
+
+    def validate_ticker(self, symbol):
+        """Validate that `symbol` is a real, optionable Tradier instrument.
+
+        Returns a dict describing the instrument when it has a listed option
+        chain (the only kind that yields GEX), or ``None`` when the symbol
+        is unknown / has no options. Kept free of any UI framework so it can
+        be cached at the Streamlit layer.
+
+        Return shape::
+
+            {"symbol": "AAPL", "type": "stock",
+             "name": "Apple Inc", "has_options": True}
+        """
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+
+        # A non-empty expiration list is the authoritative "this symbol has
+        # options" signal — no chain means no GEX, so we reject it here.
+        try:
+            exps = self.get_expirations(sym)
+        except Exception:
+            return None
+        if not exps:
+            return None
+
+        # Enrich with instrument type / display name from the raw quote.
+        # get_full_quotes() drops `type`/`description`, so read the quote
+        # directly here. Failures degrade to sensible defaults rather than
+        # rejecting an otherwise-valid optionable symbol.
+        inst_type, name = "stock", sym
+        try:
+            r = requests.get(
+                f"{self.base_url}/markets/quotes",
+                headers=self.tradier_headers(),
+                params={"symbols": sym},
+                timeout=10,
+            )
+            r.raise_for_status()
+            q = r.json().get("quotes", {}).get("quote")
+            if isinstance(q, list):
+                q = q[0] if q else {}
+            if isinstance(q, dict):
+                inst_type = (q.get("type") or "stock").lower()
+                name = q.get("description") or sym
+        except Exception:
+            pass
+
+        return {
+            "symbol": sym,
+            "type": inst_type,
+            "name": name,
+            "has_options": True,
+        }
 
     @staticmethod
     def _parse_iv_from_greeks(greeks):

@@ -690,6 +690,81 @@ def _build_forward_test_workbook(*, week_start: str, model_choice: str, rows: li
     return buffer.getvalue()
 
 
+def _auto_warm_up_spread_model(conn, ticker: str, ticker_cfg: dict) -> bool:
+    """Cold-start the weekly Spread Finder for a freshly-looked-up ticker.
+
+    Mirrors the Refresh → Rebuild → Forecast button chain but runs
+    automatically the first time an own-HAR ticker has no feature matrix and
+    no fitted model. Pulls ~6yr of weekly OHLC from yfinance, builds the
+    feature matrix, then fits + saves every model spec to Postgres so later
+    loads are instant.
+
+    Returns True when a usable feature matrix now exists; False (caller shows a
+    graceful "unavailable" note) when yfinance has no history for the symbol.
+    """
+    from phase1.ticker_config import uses_own_har as _uses_own_har
+
+    feat_ticker = ticker if _uses_own_har(ticker) else "SPX"
+
+    # 1) Per-ticker weekly OHLC (own-HAR only; SPX/XSP ride SPX's rows).
+    if _uses_own_har(ticker):
+        try:
+            from range_finder.data_collector import (
+                fetch_underlying_weekly, save_underlying_weekly,
+            )
+            df_t = fetch_underlying_weekly(
+                ticker=ticker,
+                yf_symbol=ticker_cfg["yf_symbol"],
+                vol_proxy_yf=ticker_cfg.get("vol_proxy_yf", "^VIX"),
+                years=6,
+            )
+            if df_t is None or len(df_t) == 0:
+                return False
+            save_underlying_weekly(conn, ticker, df_t)
+        except Exception as e:
+            st.caption(f"⚠ Could not load price history for {ticker}: {e}")
+            return False
+
+    # 2) Build the feature matrix.
+    try:
+        rf_build_features(conn, ticker=feat_ticker)
+        _cached_rf_get_features.clear()
+    except Exception as e:
+        st.caption(f"⚠ Feature build failed for {ticker}: {e}")
+        return False
+
+    # 3) Fit + save every spec (same logic as the Weekly Setup path).
+    try:
+        df_feat = _cached_rf_get_features(conn, ticker=feat_ticker)
+    except Exception:
+        df_feat = pd.DataFrame()
+    if df_feat is None or df_feat.empty:
+        return False
+
+    fitted_any = False
+    for _spec in RF_MODEL_SPECS.keys():
+        feat_cols = list(RF_MODEL_SPECS[_spec])
+        if _spec == "M4_full":
+            gex_col = "gex_normalized"
+            if rf_feature_has_enough_data(df_feat, gex_col) and gex_col not in feat_cols:
+                feat_cols.append(gex_col)
+        avail_cols = [c for c in feat_cols if rf_feature_has_enough_data(df_feat, c)]
+        if len(avail_cols) < 2:
+            continue
+        try:
+            X_train, X_test, y_train, y_test = rf_time_series_split(
+                df_feat, feature_cols=avail_cols
+            )
+            _result = rf_fit_model(X_train, y_train, model_name=_spec)
+            _metrics = rf_evaluate_oos(_result, X_test, y_test, model_name=_spec)
+            rf_save_model(_result, avail_cols, _spec, _metrics, conn=conn, ticker=ticker)
+            fitted_any = True
+        except Exception:
+            continue
+    _cached_rf_load_model.clear()
+    return fitted_any
+
+
 @st.fragment
 def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, ticker: str = "SPX", weekly_em: dict = None):
     """Render the Spread Finder tab — HAR model forecast + GEX-enhanced spread placement.
@@ -701,7 +776,11 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     import yfinance as yf
     from phase1.market_clock import now_ny
 
-    ticker_cfg = RF_TICKER_CONFIG.get(ticker, RF_TICKER_CONFIG["SPX"])
+    # resolve_config returns the chain-derived config registered by the main
+    # app for an arbitrary ticker (or the curated entry for the known five) —
+    # never SPX's 5-point grid as a silent fallback for an unknown symbol.
+    from phase1.ticker_config import resolve_config as _resolve_config
+    ticker_cfg = _resolve_config(ticker)
 
     # ── Earnings-week warning (single-stock tickers only) ──
     # AMZN/AMD set has_single_name_earnings=True in ticker_config; QQQ/SPX/XSP
@@ -1155,13 +1234,42 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         df_feat = pd.DataFrame()
 
     if df_feat.empty:
-        st.info(
-            "No feature data found. Click **Refresh Market Data** then **Rebuild Features** "
-            "to initialize the range prediction model (requires FRED API key in environment)."
-        )
-        # Still show GEX context even without model data
-        _render_gex_context_panel(gex_ctx, spot)
-        return
+        # Arbitrary / own-HAR tickers cold-start automatically the first time
+        # they're looked up: pull history → build features → fit every spec.
+        # SPX/XSP (spx_shared) keep the manual nudge — an empty SPX matrix means
+        # the whole app is uninitialized, which is a deploy-time bootstrap step,
+        # not a per-ticker warm-up.
+        _warm_attempted = st.session_state.setdefault("_sf_warmup_attempted", set())
+        if uses_own_har(ticker) and ticker not in _warm_attempted:
+            _warm_attempted.add(ticker)
+            with st.spinner(
+                f"Preparing spread model for {ticker} (one-time, ~10s) — "
+                "pulling history and fitting all specs…"
+            ):
+                _ok = _auto_warm_up_spread_model(conn, ticker, ticker_cfg)
+            if _ok:
+                try:
+                    df_feat = _cached_rf_get_features(conn, ticker=_features_ticker)
+                except Exception:
+                    df_feat = pd.DataFrame()
+
+        if df_feat.empty:
+            if uses_own_har(ticker) and ticker not in ("SPX", "XSP"):
+                st.warning(
+                    f"📉 Spread Finder isn't available for **{ticker}** — no usable "
+                    "multi-year price history was found for it (the GEX view above "
+                    "still works). This typically means Yahoo Finance has no history "
+                    "under the same symbol. Try **Refresh Market Data → Rebuild "
+                    "Features → Forecast** to retry."
+                )
+            else:
+                st.info(
+                    "No feature data found. Click **Refresh Market Data** then **Rebuild Features** "
+                    "to initialize the range prediction model (requires FRED API key in environment)."
+                )
+            # Still show GEX context even without model data
+            _render_gex_context_panel(gex_ctx, spot)
+            return
 
     # ── Fit model or load from cache ──
     # ── Step 4: Fit model and forecast ──

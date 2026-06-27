@@ -362,9 +362,14 @@ def main():
         # The curated five (SPX/XSP/QQQ/AMZN/AMD) keep their hand-tuned configs;
         # any other symbol is validated against Tradier and gets a chain-derived
         # config (real strike increment / wing widths) registered after fetch.
-        from phase1.ticker_config import all_tickers, get_config
+        from phase1.ticker_config import curated_tickers, get_config
 
-        _curated = all_tickers()
+        # The fixed curated set only — NOT all_tickers(), which grows as users
+        # search arbitrary symbols (register_dynamic_config injects them into
+        # the process-global TICKER_CONFIG). Using the frozen curated list keeps
+        # Quick picks to SPX/XSP/QQQ/AMZN/AMD and lets searched symbols fall
+        # through to the per-session Recent row.
+        _curated = curated_tickers()
         st.session_state.setdefault("active_ticker", "SPX")
         st.session_state.setdefault("recent_tickers", [])
         st.session_state.setdefault("ticker_meta", {})

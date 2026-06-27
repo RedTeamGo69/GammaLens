@@ -120,6 +120,14 @@ TICKER_CONFIG: dict[str, dict] = {
 }
 
 
+# Frozen snapshot of the hand-tuned curated symbols, captured at import time
+# before ``register_dynamic_config`` can inject anything into ``TICKER_CONFIG``.
+# The Quick-picks UI renders exactly these chips; unlike ``all_tickers()`` this
+# never grows as users search arbitrary symbols, so the curated row stays the
+# fixed SPX/XSP/QQQ/AMZN/AMD set instead of accumulating searched tickers.
+CURATED_TICKERS: tuple[str, ...] = tuple(TICKER_CONFIG)
+
+
 # -----------------------------------------------------------------------------
 # Dynamic config for arbitrary (non-curated) tickers
 # -----------------------------------------------------------------------------
@@ -281,8 +289,23 @@ def get_config(ticker: str) -> dict:
 
 
 def all_tickers() -> list[str]:
-    """All supported tickers in insertion order."""
+    """All supported tickers in insertion order.
+
+    NOTE: this includes any symbols registered at runtime via
+    ``register_dynamic_config``. For the fixed curated set the Quick-picks UI
+    should display, use ``curated_tickers()`` instead.
+    """
     return list(TICKER_CONFIG.keys())
+
+
+def curated_tickers() -> list[str]:
+    """The hand-tuned curated tickers (SPX/XSP/QQQ/AMZN/AMD), in order.
+
+    Unlike ``all_tickers()`` this excludes any symbols registered at runtime via
+    ``register_dynamic_config``, so callers (e.g. the Quick-picks UI) always see
+    the fixed curated set rather than an unbounded list of searched symbols.
+    """
+    return list(CURATED_TICKERS)
 
 
 def tickers_by_category() -> dict[str, list[str]]:

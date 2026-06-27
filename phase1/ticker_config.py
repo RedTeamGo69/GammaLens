@@ -121,12 +121,163 @@ TICKER_CONFIG: dict[str, dict] = {
 
 
 # -----------------------------------------------------------------------------
+# Dynamic config for arbitrary (non-curated) tickers
+# -----------------------------------------------------------------------------
+#
+# The five entries above are hand-tuned. Any other optionable symbol the user
+# types gets a config DERIVED from its live Tradier chain instead — most
+# importantly a real ``strike_increment`` and spot-scaled ``wing_widths``, so a
+# $50 stock no longer inherits SPX's 5-point grid / 50–200-point wings (the old
+# silent ``get_config`` SPX fallback). ``resolve_config`` is the entry point;
+# ``get_config`` keeps a safe generic default for the rare call sites that have
+# no chain context.
+
+# Wing widths target these fractions of spot (mirrors SPX's 1/2/3/4 %), each
+# snapped to a whole number of strike increments.
+_WING_TARGET_PCTS = (0.01, 0.02, 0.03, 0.04)
+
+
+def derive_strike_increment(strikes) -> float:
+    """Infer the listed strike spacing from a chain's strikes.
+
+    Uses the modal (most common) positive gap between adjacent sorted strikes,
+    which is robust to the wider gaps that appear in the far wings of a chain.
+    Falls back to 1.0 when there isn't enough to measure.
+    """
+    try:
+        uniq = sorted({round(float(s), 4) for s in strikes if s is not None})
+    except (TypeError, ValueError):
+        return 1.0
+    if len(uniq) < 2:
+        return 1.0
+
+    from collections import Counter
+    gaps = Counter()
+    for a, b in zip(uniq, uniq[1:]):
+        gap = round(b - a, 4)
+        if gap > 0:
+            gaps[gap] += 1
+    if not gaps:
+        return 1.0
+    # Most common gap; tie-break toward the smaller increment.
+    top = max(gaps.values())
+    return min(g for g, c in gaps.items() if c == top)
+
+
+def _derive_wing_widths(increment: float, spot: float) -> list[float]:
+    """Spot-scaled wing widths snapped to whole strike increments."""
+    if not spot or spot <= 0:
+        # No spot context — offer a few plain increment multiples.
+        base = [increment * m for m in (10, 20, 30, 40)]
+        return sorted({round(w, 4) for w in base})
+    widths = set()
+    for pct in _WING_TARGET_PCTS:
+        steps = max(1, round((spot * pct) / increment))
+        widths.add(round(steps * increment, 4))
+    return sorted(widths)
+
+
+def _category_from_type(instrument_type: str | None) -> str:
+    t = (instrument_type or "").lower()
+    if t in ("index", "indexopt"):
+        return "index"
+    if t in ("etf", "etn"):
+        return "etf"
+    return "stock"
+
+
+def build_dynamic_config(symbol: str, strikes=None, spot: float = 0.0,
+                         instrument_type: str | None = None) -> dict:
+    """Build a TICKER_CONFIG-shaped dict for an arbitrary optionable symbol.
+
+    ``strike_increment`` and ``wing_widths`` come from the live chain (when
+    ``strikes``/``spot`` are supplied); everything else uses sensible
+    single-name defaults. Tradier symbol == yfinance symbol for ordinary
+    stocks/ETFs, so ``yf_symbol`` mirrors the symbol (indices are the only
+    exception, and those are all curated above).
+    """
+    sym = (symbol or "").upper()
+    increment = derive_strike_increment(strikes) if strikes else 1.0
+    wings = _derive_wing_widths(increment, spot)
+    cat = _category_from_type(instrument_type)
+    # min_spread_width floors keyed off the smallest offered wing, doubling
+    # for the two-event / FOMC regimes (mirrors the curated entries' shape).
+    w0 = wings[0] if wings else increment
+    w1 = wings[1] if len(wings) > 1 else w0
+    return {
+        "display_name": sym,
+        "tradier_symbol": sym,
+        "yf_symbol": sym,
+        "vol_proxy_yf": "^VIX",
+        "strike_increment": increment,
+        "wing_widths": wings,
+        "min_spread_width": {"normal": w0, "event_1": w0, "event_2": w1, "fomc_week": w1},
+        "multiplier": 100,
+        "dividend_yield": 0.0,
+        "category": cat,
+        "xsp_scale_to_spx": False,
+        "has_single_name_earnings": cat == "stock",
+        "spread_finder_mode": "own_har",
+        "is_dynamic": True,
+    }
+
+
+def resolve_config(symbol: str, *, strikes=None, spot: float = 0.0,
+                   instrument_type: str | None = None) -> dict:
+    """Return the curated config for a known ticker, otherwise derive one.
+
+    This is the primary entry point for the GEX + Spread Finder flow. Curated
+    tickers (SPX/XSP/QQQ/AMZN/AMD) are returned verbatim so their hand-tuned
+    behavior is unchanged; any other symbol gets a chain-derived config.
+    """
+    sym = (symbol or "").upper()
+    if sym in TICKER_CONFIG:
+        return TICKER_CONFIG[sym]
+    return build_dynamic_config(sym, strikes=strikes, spot=spot,
+                                instrument_type=instrument_type)
+
+
+def register_dynamic_config(symbol: str, *, strikes=None, spot: float = 0.0,
+                            instrument_type: str | None = None) -> dict:
+    """Resolve a symbol's config and register it into ``TICKER_CONFIG``.
+
+    Curated tickers are returned untouched (never overwritten). For any other
+    optionable symbol the chain-derived config is stored under its key so the
+    entire existing codebase — ``get_config`` / ``get_ticker_config`` in
+    spread_levels, the feature-builder's ``uses_own_har`` / ``yf_symbol`` /
+    ``vol_proxy_yf`` routing, and the Spread Finder's ``RF_TICKER_CONFIG``
+    lookups — sees the right increment / wing widths without any per-call-site
+    plumbing. The derived config is deterministic from the chain, so storing it
+    in the process-global dict is safe across Streamlit reruns and sessions.
+    """
+    sym = (symbol or "").upper()
+    if not sym:
+        return TICKER_CONFIG["SPX"]
+    if sym in TICKER_CONFIG and not TICKER_CONFIG[sym].get("is_dynamic"):
+        # Curated entry — never clobber the hand-tuned config.
+        return TICKER_CONFIG[sym]
+    cfg = build_dynamic_config(sym, strikes=strikes, spot=spot,
+                               instrument_type=instrument_type)
+    TICKER_CONFIG[sym] = cfg
+    return cfg
+
+
+# -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
 
 def get_config(ticker: str) -> dict:
-    """Return the config dict for a ticker, falling back to SPX on miss."""
-    return TICKER_CONFIG.get((ticker or "SPX").upper(), TICKER_CONFIG["SPX"])
+    """Return the config dict for a ticker.
+
+    Curated tickers return their hand-tuned entry. Unknown tickers get a
+    generic single-name default (placeholder 1.0 strike increment) rather than
+    silently inheriting SPX's 5-point grid — call ``resolve_config`` with chain
+    context to get the real increment / wing widths.
+    """
+    sym = (ticker or "SPX").upper()
+    if sym in TICKER_CONFIG:
+        return TICKER_CONFIG[sym]
+    return build_dynamic_config(sym)
 
 
 def all_tickers() -> list[str]:

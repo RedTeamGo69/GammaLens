@@ -32,6 +32,7 @@ from ui_theme import (
 from ui_controls import (
     render_settings_controls, render_tab_control, render_refresh_button,
 )
+from ui_pwa import inject_pwa_head
 
 # ── Phase1 engine imports ──
 from phase1.market_clock import now_ny, get_calendar_snapshot
@@ -331,6 +332,7 @@ def main():
     from ui_spread_finder import _render_spread_finder_tab
 
     inject_global_css()
+    inject_pwa_head()
 
     tradier_token, fred_key = get_credentials()
 

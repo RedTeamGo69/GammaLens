@@ -198,6 +198,15 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
 }}
 .hdr-refresh:hover {{ background:#3df59a; box-shadow:0 0 12px rgba(43,232,138,.5); }}
 
+/* header type → classes (same desktop sizes as the old inline styles) so the
+   mobile media query can shrink the spot price without touching render_header */
+.hdr-ticker {{ font-family:var(--mono); font-size:13px; font-weight:600; color:var(--text-muted); }}
+.hdr-spot {{ font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:-.01em; }}
+.hdr-chg {{ font-family:var(--mono); font-size:13px; font-weight:600; }}
+
+/* collapse the 0-height PWA head-injector component (ui_pwa) so it adds no gap */
+[data-testid="stElementContainer"]:has(iframe[height="0"]) {{ display:none !important; }}
+
 /* ── Body layout (aside + main) ── */
 .term-body {{ display:flex; flex-wrap:wrap; align-items:stretch; gap:16px; }}
 .term-aside {{ flex:1 1 300px; min-width:280px; display:flex; flex-direction:column; gap:14px; }}
@@ -563,6 +572,87 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
 
 /* generic banners */
 .term-banner {{ border-radius:0 8px 8px 0; padding:10px 14px; font-size:11.5px; line-height:1.5; margin-bottom:8px; }}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Responsive / mobile (≤768px) — purely additive. Everything above is the
+   desktop design; these rules only fire below the breakpoint, so the desktop
+   layout is unchanged. Stacks the aside|main split (the overlap fix), makes
+   every column full-width, enforces ≥44px touch targets + 16px inputs (so iOS
+   doesn't auto-zoom on focus), and contains wide tables to in-card scroll.
+   Pairs with viewport-fit=cover injected by ui_pwa for safe-area insets.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {{
+  /* a. core fix: stack the aside | main split into a single vertical column.
+     Default DOM order = settings card → summary cards (aside) then EM strip →
+     tabs → chart (main), i.e. Controls → summary cards → chart. */
+  [data-testid="stHorizontalBlock"]:has(.st-key-settings_card) {{
+    flex-direction:column !important; gap:12px !important;
+  }}
+  [data-testid="stHorizontalBlock"]:has(.st-key-settings_card) > [data-testid="stColumn"]:first-child,
+  [data-testid="stHorizontalBlock"]:has(.st-key-settings_card) > [data-testid="stColumn"]:last-child {{
+    flex:1 1 100% !important; width:100% !important; min-width:0 !important;
+  }}
+
+  /* b. stack every other column group too (finder controls, 0DTE call/put
+     tables side-by-side, etc.) so nothing is crammed on a phone */
+  [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; }}
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {{
+    flex:1 1 100% !important; min-width:0 !important;
+  }}
+  /* let the 4-up risk-tier buttons wrap 2-up instead of shrinking to slivers */
+  [class*="st-key-sf_risk_tier_"] [data-testid="stButtonGroup"] {{ flex-wrap:wrap !important; }}
+  [class*="st-key-sf_risk_tier_"] [data-testid^="stBaseButton-segmented_control"] {{ flex:1 1 45% !important; }}
+
+  /* c. tighten page chrome + honour safe-area insets (notch / home indicator) */
+  [data-testid="stAppViewBlockContainer"], .block-container {{
+    padding-left:max(10px, env(safe-area-inset-left)) !important;
+    padding-right:max(10px, env(safe-area-inset-right)) !important;
+    padding-bottom:max(12px, env(safe-area-inset-bottom)) !important;
+  }}
+  .term-header {{
+    padding:10px 12px; padding-top:max(10px, env(safe-area-inset-top));
+    gap:10px; margin-bottom:10px;
+  }}
+  .hdr-spot {{ font-size:20px; }}
+  .hdr-ticker, .hdr-chg {{ font-size:12px; }}
+
+  /* d. touch targets ≥44px (Apple HIG) */
+  [data-testid^="stBaseButton-pills"],
+  [data-testid^="stBaseButton-segmented_control"] {{
+    min-height:40px !important; padding:9px 14px !important; font-size:13px !important;
+  }}
+  section[data-testid="stMain"] [data-testid="stBaseButton-secondary"],
+  section[data-testid="stMain"] [data-testid="stBaseButton-primary"],
+  section[data-testid="stMain"] [data-testid="stDownloadButton"] button,
+  .st-key-refresh_now_btn button {{
+    min-height:44px !important; font-size:14px !important;
+  }}
+
+  /* e. 16px inputs → iOS Safari won't zoom the whole page on focus */
+  .st-key-settings_card [data-testid="stTextInput"] input,
+  .st-key-settings_card [data-testid="stDateInput"] input,
+  section[data-testid="stMain"] [data-testid="stNumberInput"] input,
+  section[data-testid="stMain"] [data-testid="stTextInput"] input {{
+    font-size:16px !important;
+  }}
+
+  /* f. wide spread tables scroll inside their card instead of the whole page */
+  .sf-table-wrap {{ overflow-x:auto !important; -webkit-overflow-scrolling:touch; }}
+
+  /* g. keep the 3 main tabs as a single segmented bar (override the segmented
+     control's base flex-wrap so they don't stack vertically) */
+  .st-key-tab_seg [data-testid="stButtonGroup"] {{ flex-wrap:nowrap !important; }}
+  .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"] {{
+    flex:1 1 0 !important; justify-content:center !important;
+    padding:9px 3px !important; font-size:11px !important;
+  }}
+}}
+
+/* small phones */
+@media (max-width: 480px) {{
+  .em-strip .cell {{ flex:1 1 calc(50% - 1px); }}
+  .hdr-spot {{ font-size:18px; }}
+}}
 </style>
 """
     st.markdown(css, unsafe_allow_html=True)
@@ -622,9 +712,9 @@ def render_header(
   </div>
   <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
     <div style="display:flex;align-items:baseline;gap:8px;">
-      <span style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text-muted);">{esc(ticker)}</span>
-      <span style="font-family:var(--mono);font-size:26px;font-weight:600;letter-spacing:-.01em;">${fmt_commas(spot, 2)}</span>
-      <span style="font-family:var(--mono);font-size:13px;font-weight:600;color:{chg_color};">{esc(chg_txt)}</span>
+      <span class="hdr-ticker">{esc(ticker)}</span>
+      <span class="hdr-spot">${fmt_commas(spot, 2)}</span>
+      <span class="hdr-chg" style="color:{chg_color};">{esc(chg_txt)}</span>
     </div>
     <div style="display:flex;align-items:center;gap:9px;">
       <span style="font-size:11px;font-weight:700;letter-spacing:.05em;color:{regime_color};background:{badge_bg};border:1px solid {badge_bd};padding:5px 10px;border-radius:6px;">{esc(regime_label)}</span>

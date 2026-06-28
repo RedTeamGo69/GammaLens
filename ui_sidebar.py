@@ -127,7 +127,7 @@ def render_gex_stream(stats, levels, spot) -> str:
     put_iv = stats.get("put_iv", 0)
     g = COLORS["positive"]; r = COLORS["negative"]
     cw = COLORS["call_wall"]; pw = COLORS["put_wall"]; zg = COLORS["zero_gamma"]
-    tw = COLORS["text_white"]; amber = COLORS["charm_line"]
+    tw = COLORS["text_white"]
 
     if gex_ratio is None:
         gr_display = "∞" if net_gex > 0 else ("0.00" if net_gex < 0 else "—")
@@ -139,10 +139,6 @@ def render_gex_stream(stats, levels, spot) -> str:
         gr_color = g if gex_ratio > 1 else r
     ng_color = g if net_gex > 0 else r
     ng_fmt = stats.get("net_gex_fmt", f"{net_gex:.0f}")
-
-    nc = stats.get("net_charm_per_hour", 0.0)
-    nc_fmt = stats.get("net_charm_per_hour_fmt", f"{nc:,.0f}")
-    nc_color = r if nc > 0 else g if nc < 0 else COLORS["text_muted"]
 
     def cell(label, value, val_color, sub="", lbl_color="var(--text-dim)", span=False):
         sub_html = f' <span class="stream-sub">{esc(sub)}</span>' if sub else ""
@@ -166,11 +162,10 @@ def render_gex_stream(stats, levels, spot) -> str:
         + cell("PUT OI", f'{stats.get("put_oi", "0")}', pw, f'@{stats.get("put_oi_strike", 0):.0f}')
         + cell("POS GEX", f'{stats.get("pos_gex", "0")}', cw, f'@{stats.get("pos_gex_strike", 0):.0f}')
         + cell("NEG GEX", f'{stats.get("neg_gex", "0")}', pw, f'@{stats.get("neg_gex_strike", 0):.0f}')
-        + cell("ZERO GAMMA", fmt_commas(levels.get("zero_gamma", 0), 2), zg, span=True)
         + cell("CALL IV", f"{call_iv:.1f}%", tw)
         + cell("PUT IV", f"{put_iv:.1f}%", tw)
         + cell("P/C OI", f"{pc_ratio:.2f}", tw)
-        + cell("NET CHARM/HR", nc_fmt, nc_color, lbl_color=amber)
+        + cell("ZERO GAMMA", fmt_commas(levels.get("zero_gamma", 0), 2), zg)
     )
     return f"""
 <section class="term-card">

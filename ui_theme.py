@@ -347,7 +347,6 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
 .gex-overlay {{ position:absolute; inset:0; pointer-events:none; }}
 .gex-refline {{ position:absolute; left:0; right:0; }}
 .gex-reflabel {{ position:absolute; transform:translateY(-50%); font-family:var(--mono); font-size:9px; font-weight:600; padding:1px 5px; border-radius:3px; white-space:nowrap; }}
-.gex-note {{ margin-top:12px; padding:9px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px; display:flex; flex-wrap:wrap; gap:14px; align-items:center; font-size:10.5px; color:var(--text-muted); }}
 
 /* ─────────────────────────────────────────────────────────────────────────
    Native widget skins — make st.pills / st.segmented_control / st.text_input /

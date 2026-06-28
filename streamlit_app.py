@@ -20,7 +20,7 @@ import streamlit as st
 
 from theme import COLORS
 from models import GEXData
-from ui_charts import build_gex_bar_chart, render_gex_html
+from ui_charts import render_gex_html
 from ui_sidebar import (
     render_expected_move_panel, render_key_levels,
     render_gex_stream, render_quality_card,

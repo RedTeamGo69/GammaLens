@@ -28,7 +28,6 @@ COLORS = {
     "em_weekly": "#f5c542",      # weekly EM (yellow)
     "em_monthly": "#6ea8ff",     # OpEx EM (blue)
     "profile_line": "#a98bff",
-    "charm_line": "#ffb454",     # accent-amber
     "warning": "#ffb454",
     # text
     "text_white": "#e7edf5",     # text-primary

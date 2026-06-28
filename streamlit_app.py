@@ -23,7 +23,7 @@ from models import GEXData
 from ui_charts import build_gex_bar_chart, render_gex_html
 from ui_sidebar import (
     render_expected_move_panel, render_key_levels,
-    render_wall_credibility, render_gex_stream, render_data_quality,
+    render_gex_stream, render_quality_card,
 )
 from ui_theme import (
     inject_global_css, map_exp_mode, map_refresh,
@@ -33,6 +33,7 @@ from ui_controls import (
     render_settings_controls, render_tab_control, render_refresh_button,
 )
 from ui_pwa import inject_pwa_head
+from ui_mobile import inject_mobile_shell
 
 # ── Phase1 engine imports ──
 from phase1.market_clock import now_ny, get_calendar_snapshot
@@ -333,6 +334,7 @@ def main():
 
     inject_global_css()
     inject_pwa_head()
+    inject_mobile_shell()
 
     tradier_token, fred_key = get_credentials()
 
@@ -394,6 +396,7 @@ def main():
     # fill their reserved slots. ──
     header_box = st.container()
     banner_box = st.container()
+    em_box = st.container()  # full-width EM strip row, above the aside|main columns
     aside_col, main_col = st.columns([1, 3], gap="small")
 
     # ── Aside controls (native widgets → websocket rerun, no page reload/flash) ──
@@ -621,29 +624,45 @@ def main():
         with banner_box:
             st.html("".join(banners))
 
-    # ── Aside display cards → appended into the aside column, below the controls. ──
-    aside = (
-        render_key_levels(levels, spot, regime, data.confidence_info, ticker, mode_short)
-        + render_gex_stream(data.stats, levels, spot)
-        + render_expected_move_panel(em_analysis, spot, ticker=ticker)
-        + render_wall_credibility(data.wall_cred)
-        + render_data_quality(data.stats, data.staleness_info)
+    # ── Aside display cards → a swipeable pager on mobile, a vertical stack on
+    # desktop (same .term-card markup; ui_theme CSS reflows it per viewport, the
+    # dots are wired up by ui_mobile). Drop any card that renders empty (e.g.
+    # wall credibility) so the dot count matches the real slides. ──
+    cards = [
+        render_key_levels(
+            levels, spot, regime, data.confidence_info, ticker, mode_short,
+            daily_em=daily_em,
+            weekly_em=weekly_em_snap or weekly_em_live or {},
+            monthly_em=monthly_em_snap or monthly_em_live or {},
+        ),
+        render_gex_stream(data.stats, levels, spot),
+        render_expected_move_panel(em_analysis, spot, ticker=ticker),
+        render_quality_card(data.wall_cred, data.stats, data.staleness_info),
+    ]
+    cards = [c for c in cards if c and c.strip()]
+    slides = "".join(f'<div class="gl-slide">{c}</div>' for c in cards)
+    dots = "".join(
+        f'<button class="gl-dot" data-i="{i}" aria-label="Card {i + 1}"></button>'
+        for i in range(len(cards))
     )
+    pager = f'<div class="gl-pager"><div class="gl-track">{slides}</div><div class="gl-dots">{dots}</div></div>'
     with aside_col:
-        st.html(aside)
+        st.html(pager)
 
-    # ── Main column: EM strip + tab control + tab content ──
-    with main_col:
-        overnight = em_analysis.get("overnight_move", {}) or {}
-        classification = em_analysis.get("classification", {}) or {}
-        on_label = "Today's Move" if market_ctx == "live" else "Session Move"
-        em_strip = _build_em_strip(
-            display_em or {}, display_em_label, on_label,
-            overnight.get("overnight_move_pts"), overnight.get("overnight_move_pct"),
-            classification.get("move_ratio"), classification,
-        )
+    # ── EM strip → full-width row above the columns (top of page on mobile). ──
+    overnight = em_analysis.get("overnight_move", {}) or {}
+    classification = em_analysis.get("classification", {}) or {}
+    on_label = "Today's Move" if market_ctx == "live" else "Session Move"
+    em_strip = _build_em_strip(
+        display_em or {}, display_em_label, on_label,
+        overnight.get("overnight_move_pts"), overnight.get("overnight_move_pct"),
+        classification.get("move_ratio"), classification,
+    )
+    with em_box:
         st.html(em_strip)
 
+    # ── Main column: tab control + tab content ──
+    with main_col:
         # Tabs (native segmented control → websocket rerun, no reload) + content
         tab = render_tab_control()
         if tab == "gex":

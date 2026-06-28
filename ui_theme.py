@@ -78,7 +78,7 @@ EXP_MODES = [
     ("custom", "Custom"),
 ]
 REFRESH_MODES = [("off", "Off"), ("5min", "5 min"), ("30min", "30 min")]
-TABS = [("gex", "📊 Strike GEX"), ("spread", "🎯 Spread Finder"), ("0dte", "⚡ 0DTE Finder")]
+TABS = [("gex", "Strike GEX"), ("spread", "Spread Finder"), ("0dte", "0DTE Finder")]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,6 +264,19 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
 .lvl-pillrow {{ display:flex; gap:8px; margin-top:8px; }}
 .lvl-pill {{ background:var(--bg-input); border:1px solid var(--border); border-radius:9px; padding:9px 12px; display:flex; align-items:center; justify-content:space-between; }}
 
+/* ── Key levels: expected-move quick-glance rows (daily / weekly / opex) ── */
+.lvl-emwrap {{ margin-top:11px; border-top:1px solid var(--border); padding-top:9px; }}
+.lvl-emhead {{ font-size:10px; letter-spacing:.14em; color:var(--text-dim); font-weight:700; text-transform:uppercase; margin-bottom:6px; }}
+.lvl-emrow {{ display:flex; align-items:center; justify-content:space-between; padding:4px 0; }}
+.lvl-emrow .k {{ font-size:11px; color:var(--text-muted); font-weight:600; }}
+.lvl-emrow .v {{ font-family:var(--mono); font-size:12px; font-weight:600; display:inline-flex; gap:6px; align-items:baseline; }}
+.lvl-emrow .v .lo {{ color:var(--red); }}
+.lvl-emrow .v .hi {{ color:var(--green); }}
+.lvl-emrow .v .dash {{ color:var(--text-dim); }}
+
+/* merged Wall-Credibility + Data-Quality card: divider between the subsections */
+.qc-divider {{ border-top:1px solid var(--border); margin-top:12px; padding-top:12px; }}
+
 /* ── GEX stream grid ── */
 .stream-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border); border:1px solid var(--border); border-radius:8px; overflow:hidden; }}
 .stream-cell {{ background:var(--bg-input); padding:9px 11px; }}
@@ -412,13 +425,27 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
   font-family:var(--mono) !important; font-size:11px !important;
 }}
 
-/* main tab selector → underline tab-bar look (overrides the chip skin above) */
-.st-key-tab_seg [data-testid="stButtonGroup"] {{ gap:2px !important; border-bottom:1px solid var(--border); }}
+/* main tab selector → full-width underline tab-bar (overrides the chip skin
+   above). The element container + segmented control are content-sized by
+   default, so force them full-width; buttons then share the row equally
+   (flex:1) on every breakpoint, leaving no blank space to the right. */
+.st-key-tab_seg, .st-key-tab_seg [data-testid="stSegmentedControl"] {{ width:100% !important; }}
+.st-key-tab_seg [data-testid="stButtonGroup"] {{
+  display:flex !important; width:100% !important; gap:2px !important;
+  border-bottom:1px solid var(--border);
+}}
+/* Streamlit nests the buttons in an inner flex div capped at max-width:fit-content
+   — release that cap and let it fill the group so the buttons' flex:1 actually
+   spans the full width (no blank space at right) */
+.st-key-tab_seg [data-testid="stButtonGroup"] > div {{
+  flex:1 1 0 !important; min-width:0; width:100% !important; max-width:none !important;
+}}
 .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"] {{
+  flex:1 1 0 !important; justify-content:center !important;
   background:transparent !important; border:none !important;
   border-bottom:2px solid transparent !important; border-radius:0 !important;
   color:var(--text-dim) !important; font-family:var(--sans) !important;
-  font-size:12.5px !important; font-weight:600 !important; padding:9px 16px !important;
+  font-size:14px !important; font-weight:600 !important; padding:12px 8px !important;
   margin-bottom:-1px;
 }}
 .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"]:hover {{
@@ -573,6 +600,20 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
 /* generic banners */
 .term-banner {{ border-radius:0 8px 8px 0; padding:10px 14px; font-size:11.5px; line-height:1.5; margin-bottom:8px; }}
 
+/* ── Mobile app-shell primitives (Part 2): card pager + settings gear ──
+   On desktop the pager wrappers are display:contents, so the .term-card slides
+   render exactly as the previous vertical stack (byte-identical layout); the
+   dots and gear button are hidden. The mobile @media block below turns the
+   pager into a swipe carousel and the settings card into a drop-down sheet. */
+.gl-pager, .gl-track, .gl-slide {{ display:contents; }}
+.gl-dots {{ display:none; }}
+.gl-settings-toggle {{
+  display:none; background:var(--bg-row); color:var(--text-secondary);
+  border:1px solid var(--border-mid); border-radius:8px; cursor:pointer;
+  font-size:15px; line-height:1; align-items:center; justify-content:center;
+}}
+.gl-settings-toggle:hover {{ border-color:var(--green); color:var(--green); }}
+
 /* ─────────────────────────────────────────────────────────────────────────
    Responsive / mobile (≤768px) — purely additive. Everything above is the
    desktop design; these rules only fire below the breakpoint, so the desktop
@@ -609,10 +650,19 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
     padding-right:max(10px, env(safe-area-inset-right)) !important;
     padding-bottom:max(12px, env(safe-area-inset-bottom)) !important;
   }}
+  /* fixed top app-bar: sticky doesn't persist (its parent container scrolls
+     off), so pin it to the viewport and pad the scroll content below it by the
+     JS-measured --gl-header-h. Decluttered to keep the bar compact. */
   .term-header {{
-    padding:10px 12px; padding-top:max(10px, env(safe-area-inset-top));
-    gap:10px; margin-bottom:10px;
+    position:fixed !important; top:0; left:0; right:0;
+    padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top));
+    gap:6px 12px; margin-bottom:0;
   }}
+  [data-testid="stMainBlockContainer"] {{ padding-top:var(--gl-header-h, 96px) !important; }}
+  .hdr-tagline, .hdr-note, .hdr-clock, .hdr-live {{ display:none !important; }}
+  /* 2-row app-bar: brand + gear on row 1, ticker/price/regime on row 2 */
+  .term-header > div:nth-child(3) {{ order:2; }}
+  .term-header > div:nth-child(2) {{ order:3; flex-basis:100%; gap:6px 10px; }}
   .hdr-spot {{ font-size:20px; }}
   .hdr-ticker, .hdr-chg {{ font-size:12px; }}
 
@@ -639,12 +689,44 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
   /* f. wide spread tables scroll inside their card instead of the whole page */
   .sf-table-wrap {{ overflow-x:auto !important; -webkit-overflow-scrolling:touch; }}
 
-  /* g. keep the 3 main tabs as a single segmented bar (override the segmented
-     control's base flex-wrap so they don't stack vertically) */
+  /* g. keep the 3 main tabs on one row (base already makes them full-width +
+     flex:1); just stop them wrapping and trim padding slightly for phone width */
   .st-key-tab_seg [data-testid="stButtonGroup"] {{ flex-wrap:nowrap !important; }}
   .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"] {{
-    flex:1 1 0 !important; justify-content:center !important;
-    padding:9px 3px !important; font-size:11px !important;
+    padding:11px 4px !important; font-size:13px !important;
+  }}
+
+  /* h. (Part 2) swipe card pager — turn the display:contents wrappers into a
+     horizontal scroll-snap carousel, one .term-card per panel, with dots */
+  .gl-pager {{ display:block; }}
+  .gl-track {{
+    display:flex; flex-direction:row; gap:10px; overflow-x:auto;
+    scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;
+    scrollbar-width:none; padding-bottom:2px;
+  }}
+  .gl-track::-webkit-scrollbar {{ display:none; }}
+  .gl-slide {{ display:block; flex:0 0 100%; min-width:0; scroll-snap-align:center; }}
+  .gl-dots {{ display:flex; justify-content:center; gap:6px; margin-top:10px; }}
+  .gl-dot {{
+    width:7px; height:7px; padding:0; border:none; border-radius:50%;
+    background:var(--border-mid); cursor:pointer; transition:all .2s;
+  }}
+  .gl-dot.active {{ background:var(--green); width:18px; border-radius:4px; }}
+
+  /* i. (Part 2) settings drop-down sheet — the gear in the header toggles
+     body.gl-settings-open; the card is fixed under the header and collapsed
+     (max-height:0) by default, so it takes no flow space when closed */
+  .gl-settings-toggle {{ display:inline-flex; min-width:40px; min-height:40px; }}
+  .st-key-settings_card {{
+    position:fixed !important; top:var(--gl-header-h, 56px); left:0; right:0; z-index:45;
+    margin:0 !important; border-radius:0 0 14px 14px !important;
+    max-height:0; overflow:hidden; transition:max-height .28s ease;
+    box-shadow:0 12px 30px rgba(0,0,0,.55);
+  }}
+  body.gl-settings-open .st-key-settings_card {{ max-height:82vh; overflow-y:auto; }}
+  body.gl-settings-open .term-header {{ z-index:46; }}
+  body.gl-settings-open::after {{
+    content:""; position:fixed; inset:0; z-index:44; background:rgba(0,0,0,.45);
   }}
 }}
 
@@ -686,7 +768,7 @@ def render_header(
     else:
         badge_bg, badge_bd = "rgba(43,232,138,.12)", "rgba(43,232,138,.32)"
     live_html = (
-        f'<span style="display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;'
+        f'<span class="hdr-live" style="display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;'
         f'letter-spacing:.12em;color:var(--text-dim);"><span class="term-live-dot"></span>LIVE</span>'
         if live else ""
     )
@@ -707,7 +789,7 @@ def render_header(
     {logo_html}
     <div style="display:flex;flex-direction:column;line-height:1.15;">
       <span style="font-size:13px;font-weight:700;letter-spacing:.02em;">GAMMA LENS</span>
-      <span style="font-size:9.5px;letter-spacing:.26em;color:var(--text-dim);font-weight:600;">TERMINAL · v5</span>
+      <span class="hdr-tagline" style="font-size:9.5px;letter-spacing:.26em;color:var(--text-dim);font-weight:600;">TERMINAL · v5</span>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
@@ -718,13 +800,14 @@ def render_header(
     </div>
     <div style="display:flex;align-items:center;gap:9px;">
       <span style="font-size:11px;font-weight:700;letter-spacing:.05em;color:{regime_color};background:{badge_bg};border:1px solid {badge_bd};padding:5px 10px;border-radius:6px;">{esc(regime_label)}</span>
-      <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">{esc(regime_note)}</span>
+      <span class="hdr-note" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">{esc(regime_note)}</span>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:14px;">
     {live_html}
-    <span style="font-family:var(--mono);font-size:10.5px;color:var(--text-dim);">{esc(clock)}</span>
+    <span class="hdr-clock" style="font-family:var(--mono);font-size:10.5px;color:var(--text-dim);">{esc(clock)}</span>
     {refresh_html}
+    <button class="gl-settings-toggle" type="button" aria-label="Settings">⚙</button>
   </div>
 </div>
 """

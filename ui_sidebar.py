@@ -43,7 +43,8 @@ def _bar_color_for_score(score: float) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Key Levels (hero)
 # ─────────────────────────────────────────────────────────────────────────────
-def render_key_levels(levels, spot, regime_info, confidence_info, ticker, mode_short) -> str:
+def render_key_levels(levels, spot, regime_info, confidence_info, ticker, mode_short,
+                      daily_em=None, weekly_em=None, monthly_em=None) -> str:
     conf_score = confidence_info.get("score", 0)
     conf_label = confidence_info.get("label", "?")
     conf_color = _score_color(conf_label)
@@ -69,6 +70,30 @@ def render_key_levels(levels, spot, regime_info, confidence_info, ticker, mode_s
     )
 
     reg_short = (regime_info.get("regime", "") or "").replace("Gamma", "Γ").strip() or "—"
+
+    # ── Expected-move levels (quick glance: low–high for daily / weekly / OpEx).
+    # Just the level numbers — the detailed range lives in the Expected Move card.
+    def _emrow(label, em):
+        lo = (em or {}).get("lower_level")
+        hi = (em or {}).get("upper_level")
+        lo_txt = fmt_commas(lo, 0) if lo is not None else "—"
+        hi_txt = fmt_commas(hi, 0) if hi is not None else "—"
+        return (
+            '<div class="lvl-emrow">'
+            f'<span class="k">{esc(label)}</span>'
+            f'<span class="v"><span class="lo">{lo_txt}</span>'
+            '<span class="dash">–</span>'
+            f'<span class="hi">{hi_txt}</span></span></div>'
+        )
+
+    em_block = (
+        '<div class="lvl-emwrap">'
+        '<div class="lvl-emhead">Expected Move</div>'
+        + _emrow("Daily", daily_em)
+        + _emrow("Weekly", weekly_em)
+        + _emrow("OpEx", monthly_em)
+        + '</div>'
+    )
     return f"""
 <section class="term-card hero">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
@@ -86,6 +111,7 @@ def render_key_levels(levels, spot, regime_info, confidence_info, ticker, mode_s
       <span style="font-family:var(--mono);font-size:13px;font-weight:600;color:{conf_color};">{conf_score:.0f}</span>
     </div>
   </div>
+  {em_block}
 </section>
 """
 
@@ -278,7 +304,9 @@ def render_expected_move_panel(em_analysis, spot, ticker="SPX") -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Wall Credibility
 # ─────────────────────────────────────────────────────────────────────────────
-def render_wall_credibility(wall_cred) -> str:
+def _wall_credibility_body(wall_cred) -> str:
+    """Inner markup for the wall-credibility section (no card wrapper). Empty
+    string when there's no data — callers omit the subsection."""
     if not wall_cred:
         return ""
     rows = ""
@@ -298,18 +326,24 @@ def render_wall_credibility(wall_cred) -> str:
             '<span style="color:var(--text-dim);">/100</span></span></div>'
             f'<div class="wc-track"><span style="width:{min(max(score,0),100):.0f}%;background:{color};"></span></div></div>'
         )
-    return f"""
-<section class="term-card">
-  <div class="card-eyebrow">Wall Credibility</div>
-  <div style="display:flex;flex-direction:column;gap:11px;">{rows}</div>
-</section>
-"""
+    if not rows:
+        return ""
+    return (
+        '<div class="card-eyebrow">Wall Credibility</div>'
+        f'<div style="display:flex;flex-direction:column;gap:11px;">{rows}</div>'
+    )
+
+
+def render_wall_credibility(wall_cred) -> str:
+    body = _wall_credibility_body(wall_cred)
+    return f'<section class="term-card">{body}</section>' if body else ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Quality
 # ─────────────────────────────────────────────────────────────────────────────
-def render_data_quality(stats, staleness_info) -> str:
+def _data_quality_body(stats, staleness_info) -> str:
+    """Inner markup for the data-quality section (no card wrapper)."""
     fresh = staleness_info.get("freshness_score", 0)
     fresh_lbl = staleness_info.get("freshness_label", "?")
     fresh_color = _score_color(fresh_lbl)
@@ -352,9 +386,22 @@ def render_data_quality(stats, staleness_info) -> str:
         )
 
     return f"""
-<section class="term-card">
   <div class="card-eyebrow">Data Quality</div>
   <div class="dq-grid">{grid}</div>
   {note}
-</section>
 """
+
+
+def render_data_quality(stats, staleness_info) -> str:
+    return f'<section class="term-card">{_data_quality_body(stats, staleness_info)}</section>'
+
+
+def render_quality_card(wall_cred, stats, staleness_info) -> str:
+    """Wall Credibility + Data Quality merged into one card (both are short and
+    both speak to data quality). Wall-credibility subsection is omitted when it
+    has no data; a divider separates the two when both are present."""
+    wall = _wall_credibility_body(wall_cred)
+    dq = _data_quality_body(stats, staleness_info)
+    if wall:
+        dq = f'<div class="qc-divider">{dq}</div>'
+    return f'<section class="term-card">{wall}{dq}</section>'

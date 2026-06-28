@@ -1,0 +1,235 @@
+from phase1.expected_move import (
+    find_atm_straddle,
+    compute_expected_move,
+    compute_overnight_move,
+    classify_session,
+    build_expected_move_analysis,
+)
+
+
+def _make_option(strike, bid, ask):
+    return {"strike": strike, "bid": bid, "ask": ask, "openInterest": 100}
+
+
+def test_find_atm_straddle_picks_nearest_strike():
+    calls = [_make_option(5640, 12.0, 14.0), _make_option(5650, 8.0, 10.0), _make_option(5660, 5.0, 7.0)]
+    puts = [_make_option(5640, 4.0, 6.0), _make_option(5650, 7.0, 9.0), _make_option(5660, 11.0, 13.0)]
+    spot = 5651.0
+
+    result = find_atm_straddle(calls, puts, spot)
+    assert result is not None
+    assert result["strike"] == 5650
+    assert result["call_mid"] == 9.0   # (8+10)/2
+    assert result["put_mid"] == 8.0    # (7+9)/2
+    assert result["straddle_price"] == 17.0
+
+
+def test_find_atm_straddle_skips_crossed_quotes():
+    calls = [_make_option(5650, 10.0, 8.0)]  # crossed: bid > ask
+    puts = [_make_option(5650, 7.0, 9.0)]
+    spot = 5650.0
+
+    result = find_atm_straddle(calls, puts, spot)
+    assert result is None
+
+
+def test_find_atm_straddle_returns_none_when_no_common_strikes():
+    calls = [_make_option(5650, 8.0, 10.0)]
+    puts = [_make_option(5660, 7.0, 9.0)]
+    spot = 5655.0
+
+    result = find_atm_straddle(calls, puts, spot)
+    assert result is None
+
+
+def test_compute_expected_move_levels():
+    straddle = {"straddle_price": 46.0, "strike": 5650}
+    spot = 5650.0
+
+    em = compute_expected_move(straddle, spot)
+    assert em["expected_move_pts"] == 46.0
+    assert em["upper_level"] == 5696.0
+    assert em["lower_level"] == 5604.0
+    assert em["expected_move_pct"] > 0
+
+
+def test_compute_expected_move_none_on_no_straddle():
+    em = compute_expected_move(None, 5650.0)
+    assert em["expected_move_pts"] is None
+    assert em["upper_level"] is None
+
+
+def test_compute_overnight_move_up():
+    result = compute_overnight_move(5660.0, 5650.0, source="spx")
+    assert result["overnight_move_pts"] == 10.0
+    assert result["direction"] == "up"
+
+
+def test_compute_overnight_move_down():
+    result = compute_overnight_move(5640.0, 5650.0, source="spx")
+    assert result["overnight_move_pts"] == -10.0
+    assert result["direction"] == "down"
+
+
+def test_compute_overnight_move_handles_zero_prevclose():
+    result = compute_overnight_move(5650.0, 0.0)
+    assert result["overnight_move_pts"] is None
+
+
+def test_classify_session_pin_day():
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=5.0,   # 5/46 ≈ 11%, well below 40%
+        gamma_regime="Positive Gamma",
+    )
+    assert result["classification"] == "Pin Day"
+    assert result["move_ratio_label"] == "low"
+    assert result["bias"] == "range-bound"
+
+
+def test_classify_session_trend_day():
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=10.0,  # 10/46 ≈ 22%, below 40%
+        gamma_regime="Negative Gamma",
+    )
+    assert result["classification"] == "Trend Day"
+    assert result["bias"] == "directional"
+
+
+def test_classify_session_exhaustion_day():
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=42.0,  # 42/46 ≈ 91%, above 85%
+        gamma_regime="Positive Gamma",
+    )
+    assert result["classification"] == "Exhaustion Day"
+    assert result["bias"] == "mean-revert"
+
+
+def test_classify_session_extension_day():
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=-42.0,  # abs(42)/46 ≈ 91%, above 85%
+        gamma_regime="Negative Gamma",
+    )
+    assert result["classification"] == "Extension Day"
+    assert result["bias"] == "continued-trend"
+
+
+def test_classify_session_moderate_ratio():
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=25.0,  # 25/46 ≈ 54%, between 30-85%
+        gamma_regime="Positive Gamma",
+    )
+    assert result["move_ratio_label"] == "moderate"
+    assert "Mixed" in result["classification"]
+
+
+def test_classify_session_handles_none():
+    result = classify_session(None, 10.0, "Positive Gamma")
+    assert result["classification"] is None
+    assert result["bucket_accuracy"] is None
+    assert result["signal_strength"] is None
+
+
+def test_classify_session_low_bucket_marked_weak():
+    """Low-bucket classifications should report weak signal strength
+    (55% bucket accuracy is below the 58% "moderate" threshold)."""
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=5.0,
+        gamma_regime="Positive Gamma",
+    )
+    assert result["classification"] == "Pin Day"
+    assert result["bucket_accuracy"] == 0.55
+    assert result["signal_strength"] == "weak"
+
+
+def test_classify_session_high_bucket_marked_strong():
+    """High-bucket classifications (73%) clear the 65% strong-signal
+    threshold, so they should be rendered with full visual weight."""
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=42.0,
+        gamma_regime="Positive Gamma",
+    )
+    assert result["classification"] == "Exhaustion Day"
+    assert result["bucket_accuracy"] == 0.73
+    assert result["signal_strength"] == "strong"
+
+
+def test_classify_session_moderate_bucket_reports_coin_flip():
+    """Moderate move ratios have no measured edge — bucket_accuracy
+    should reflect the coin-flip baseline, not the low-bucket value."""
+    result = classify_session(
+        expected_move_pts=46.0,
+        overnight_move_pts=25.0,
+        gamma_regime="Positive Gamma",
+    )
+    assert result["move_ratio_label"] == "moderate"
+    assert result["bucket_accuracy"] == 0.50
+    assert result["signal_strength"] == "weak"
+
+
+def test_build_expected_move_analysis_full():
+    calls = [_make_option(5650, 20.0, 26.0)]
+    puts = [_make_option(5650, 18.0, 22.0)]
+    spot = 5650.0
+    prev_close = 5640.0
+
+    result = build_expected_move_analysis(
+        spot=spot,
+        prev_close=prev_close,
+        zero_gamma=5645.0,
+        gamma_regime="Positive Gamma",
+        calls_0dte=calls,
+        puts_0dte=puts,
+    )
+
+    assert result["expected_move"]["expected_move_pts"] == 43.0  # 23 + 20
+    assert result["overnight_move"]["overnight_move_pts"] == 10.0
+    assert result["classification"]["classification"] is not None
+    assert result["level_context"]["zero_gamma_within_em"] is True
+
+
+def test_market_closed_marks_afterhours():
+    """Any time the cash market is closed we label the context 'afterhours'
+    and emit a retrospective context note."""
+    calls = [_make_option(5650, 20.0, 26.0)]
+    puts = [_make_option(5650, 18.0, 22.0)]
+
+    result = build_expected_move_analysis(
+        spot=5620.0,
+        prev_close=5650.0,
+        zero_gamma=5645.0,
+        gamma_regime="Negative Gamma",
+        calls_0dte=calls,
+        puts_0dte=puts,
+        market_open=False,
+    )
+
+    assert result["market_context"] == "afterhours"
+    assert result["context_note"] is not None
+    assert result["classification"]["move_source"] == "spx"
+
+
+def test_live_market_no_context_note():
+    """During market hours, no warning banner needed."""
+    calls = [_make_option(5650, 20.0, 26.0)]
+    puts = [_make_option(5650, 18.0, 22.0)]
+
+    result = build_expected_move_analysis(
+        spot=5660.0,
+        prev_close=5650.0,
+        zero_gamma=5645.0,
+        gamma_regime="Positive Gamma",
+        calls_0dte=calls,
+        puts_0dte=puts,
+        market_open=True,
+    )
+
+    assert result["market_context"] == "live"
+    assert result["context_note"] is None
+    assert result["classification"]["move_source"] == "spx"

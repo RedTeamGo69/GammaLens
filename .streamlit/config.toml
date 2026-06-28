@@ -1,0 +1,10 @@
+# Pro-terminal theme foundation. The full component styling lives in
+# ui_theme.inject_global_css(); this just makes Streamlit's own chrome
+# (spinners, any fallback native widgets, base colors) match the dark palette.
+[theme]
+base = "dark"
+primaryColor = "#2be88a"
+backgroundColor = "#0a0d13"
+secondaryBackgroundColor = "#11151c"
+textColor = "#e7edf5"
+font = "sans serif"

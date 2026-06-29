@@ -274,6 +274,20 @@ def _banner(text: str, accent: str, bg: str) -> str:
             f'color:var(--text-secondary);">{text}</div>')
 
 
+def _ms_until_clock_boundary(period_seconds: int, now: datetime) -> int:
+    """Milliseconds from ``now`` until the next wall-clock multiple of ``period_seconds``.
+
+    Aligns refreshes to the clock instead of to page-load time, e.g. a 300s
+    period fires on :00/:05/:10…:35/:40 and an 1800s period on :00/:30. Both
+    300 and 1800 divide an hour evenly, so anchoring to the top of the hour
+    keeps the cadence on round marks. Floored at 1s so a tick landing a hair
+    before a boundary doesn't trigger a near-instant double refresh.
+    """
+    secs_into_hour = now.minute * 60 + now.second + now.microsecond / 1e6
+    remaining = period_seconds - (secs_into_hour % period_seconds)
+    return max(int(remaining * 1000), 1000)
+
+
 def _build_em_strip(display_em, display_em_label, on_label, on_pts, on_pct,
                     ratio, classification) -> str:
     """5-cell EM strip across the top of the main column."""
@@ -709,11 +723,13 @@ def main():
                 from ui_spread_finder_0dte import _render_0dte_spread_finder_tab
                 _render_0dte_spread_finder_tab(spot, levels, regime, data, ticker=ticker)
 
-    # ── Auto-refresh ──
+    # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:
         from streamlit_autorefresh import st_autorefresh
+        # Recomputed every rerun: time to the next clock boundary in market
+        # time, so 5-min ticks land on :35/:40/:45 and 30-min on :00/:30.
         st_autorefresh(
-            interval=refresh_seconds * 1000,
+            interval=_ms_until_clock_boundary(refresh_seconds, now_ny()),
             key=f"auto_refresh_{refresh_seconds}",
         )
 

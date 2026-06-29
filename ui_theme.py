@@ -70,7 +70,7 @@ TOKENS = {
 # single-name defaults the Monday cron fits (NVDA/JPM/CAT). Also the
 # always-present Excel-export defaults, so the featured row and the workbook
 # track each other (keep in sync with _FT_DEFAULT_TICKERS in ui_spread_finder).
-QUICK_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "XND", "NVDA", "JPM", "CAT"]
+QUICK_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "NVDA", "JPM", "CAT"]
 
 EXP_MODES = [
     ("0dte", "0DTE"),

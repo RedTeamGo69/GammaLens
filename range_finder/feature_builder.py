@@ -278,7 +278,7 @@ def _load_weekly_for_ticker(conn, ticker: str) -> pd.DataFrame:
     across SPX and the own-HAR tickers (QQQ / AMZN / AMD).
 
     SPX/XSP read ``weekly_spx`` (the existing table). Own-HAR tickers read
-    ``weekly_underlying`` (per-ticker schema). A scaled mini (XSP→SPX, XND→NDX)
+    ``weekly_underlying`` (per-ticker schema). A scaled mini (XSP→SPX)
     reads its parent's rows — returns/log-ranges are identical across the /10
     scale, so the parent's features serve the mini directly. The vol-proxy
     column is VIX for SPX/stocks and VXN for QQQ/NDX — see

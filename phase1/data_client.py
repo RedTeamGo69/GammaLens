@@ -58,9 +58,16 @@ class TradierDataClient:
             timeout=10,
         )
         r.raise_for_status()
-        q = r.json()["quotes"]["quote"]
+        # Tradier returns {"quotes": {"unmatched_symbols": {...}}} (no "quote"
+        # key) for any symbol it can't price (e.g. an unrecognized or illiquid
+        # symbol the user searched). A bare ["quote"] subscript raised
+        # KeyError('quote') and surfaced as "Engine error: 'quote'"; degrade to
+        # 0.0 so the engine reports "no data" cleanly instead of crashing.
+        q = (r.json().get("quotes") or {}).get("quote")
         if isinstance(q, list):
-            q = q[0]
+            q = q[0] if q else None
+        if not isinstance(q, dict):
+            return 0.0
         # Tradier can return "last": null outside regular hours (the key
         # exists, so dict.get(key, default) never falls back). Walk the
         # candidates explicitly so a null last degrades to close, then
@@ -101,7 +108,12 @@ class TradierDataClient:
             timeout=10,
         )
         r.raise_for_status()
-        q = r.json()["quotes"]["quote"]
+        # See get_spot_price: unmatched symbols come back without a "quote" key.
+        # Return an empty map so get_full_quote() degrades to its zeroed-quote
+        # fallback instead of raising KeyError('quote').
+        q = (r.json().get("quotes") or {}).get("quote")
+        if q is None:
+            return {}
         if isinstance(q, dict):
             q = [q]
         out = {}

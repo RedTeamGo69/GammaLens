@@ -1,4 +1,48 @@
+import phase1.data_client as data_client_mod
 from phase1.data_client import TradierDataClient
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def test_get_spot_price_handles_unmatched_symbol(monkeypatch):
+    """Tradier returns unmatched_symbols (no 'quote' key) for any symbol it
+    can't price. The old bare subscript raised KeyError('quote') → the
+    'Engine error: quote' the user saw. It must now degrade to 0.0."""
+    client = TradierDataClient(token="dummy")
+    payload = {"quotes": {"unmatched_symbols": {"symbol": "ZZZZ"}}}
+    monkeypatch.setattr(data_client_mod.requests, "get",
+                        lambda *a, **k: _FakeResponse(payload))
+
+    assert client.get_spot_price("ZZZZ") == 0.0
+
+
+def test_get_full_quotes_handles_unmatched_symbol(monkeypatch):
+    client = TradierDataClient(token="dummy")
+    payload = {"quotes": {"unmatched_symbols": {"symbol": "ZZZZ"}}}
+    monkeypatch.setattr(data_client_mod.requests, "get",
+                        lambda *a, **k: _FakeResponse(payload))
+
+    assert client.get_full_quotes(["ZZZZ"]) == {}
+
+
+def test_get_full_quote_degrades_to_zeroed_quote(monkeypatch):
+    client = TradierDataClient(token="dummy")
+    payload = {"quotes": {"unmatched_symbols": {"symbol": "ZZZZ"}}}
+    monkeypatch.setattr(data_client_mod.requests, "get",
+                        lambda *a, **k: _FakeResponse(payload))
+
+    q = client.get_full_quote("ZZZZ")
+    assert q["symbol"] == "ZZZZ"
+    assert q["last"] == 0.0
 
 
 def test_parse_iv_from_greeks_handles_percent_style():

@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 
 # Tickers supported by the 0DTE finder. SPX, XSP, and SPY all track the
 # S&P 500 and share ^VIX1D (XSP = SPX / 10, SPY ≈ SPX / 10), so a single
-# SPX-trained daily HAR drives all three. The Nasdaq tickers (QQQ/NDX/XND)
+# SPX-trained daily HAR drives all three. The Nasdaq tickers (QQQ/NDX)
 # are intentionally NOT supported here: there is no 1-day Nasdaq vol index
 # (Cboe publishes no "VXN1D"), so the VIX1D-dependent VRP / 0DTE machinery
 # has no clean analog. Single-stock tickers (AMZN, AMD) lack deep 0DTE

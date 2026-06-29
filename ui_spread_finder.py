@@ -296,11 +296,11 @@ def _build_chain_quotes_for_spreads(
 # QUICK_TICKERS in ui_theme — keep the two in sync. The active/searched ticker
 # and any the user has added (session-state list under _FT_XLSX_EXTRA_KEY) are
 # appended.
-_FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "XND", "NVDA", "JPM", "CAT"]
+_FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "NVDA", "JPM", "CAT"]
 # Class-label overrides for the workbook "Class" column; anything else falls
 # back to the ticker_config category (Index/ETF/Stock).
 _FT_CLASS = {"SPX": "Index", "XSP": "Index", "SPY": "ETF",
-             "QQQ": "ETF", "NDX": "Index", "XND": "Index"}
+             "QQQ": "ETF", "NDX": "Index"}
 _FT_FIRST_DATA_ROW = 6          # first instrument row on each week sheet
 _FT_BOOKEND_START = "WeeksStart"
 _FT_BOOKEND_END = "WeeksEnd"
@@ -451,7 +451,7 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
     try:
         conn = _get_rf_conn()
 
-        # A scaled mini (XSP→SPX, XND→NDX) reads its parent's shared features.
+        # A scaled mini (XSP→SPX) reads its parent's shared features.
         _src = feature_source_ticker(ticker)
         df_feat = _cached_rf_get_features(conn, ticker=_src)
         if df_feat.empty:
@@ -979,7 +979,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
             underlying_daily_open = _daily_open_today(_yf_underlying)
             if underlying_daily_open is not None:
-                # A scaled mini (XSP→SPX, XND→NDX) reads its parent's symbol and
+                # A scaled mini (XSP→SPX) reads its parent's symbol and
                 # divides by its scale_divisor; everyone else divides by 1.0.
                 frozen_spot = round(underlying_daily_open / _scale_div, 2)
             else:
@@ -1295,7 +1295,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         with st.spinner("2/4 — Computing feature matrix..."):
             try:
                 # Same per-ticker routing as the Monday cron: a scaled mini
-                # (XSP→SPX, XND→NDX) shares its parent's feature rows; own-HAR
+                # (XSP→SPX) shares its parent's feature rows; own-HAR
                 # tickers build their own. (This used to always build SPX, so
                 # Rebuild on QQQ/AMZN/AMD never touched the rows the fit reads.)
                 rf_build_features(conn, ticker=_feature_source(ticker))
@@ -1324,7 +1324,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     st.markdown("---")
 
     # ── Check data availability (reload after rebuild if needed) ──
-    # A scaled mini (XSP→SPX, XND→NDX) rides its parent's HAR features at
+    # A scaled mini (XSP→SPX) rides its parent's HAR features at
     # 1/divisor scale (see ticker_config shares_har_with). Own-HAR tickers
     # (QQQ / SPY / NDX / AMZN / AMD) read their own per-ticker feature rows.
     from phase1.ticker_config import feature_source_ticker, get_config as _get_cfg
@@ -1335,8 +1335,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         df_feat = pd.DataFrame()
 
     if df_feat.empty:
-        # Own-HAR tickers — and a mini's parent (NDX for XND) — cold-start
-        # automatically the first time they're looked up: pull history → build
+        # Own-HAR tickers cold-start automatically the first time they're
+        # looked up: pull history → build
         # features → fit every spec. SPX (the base) keeps the manual nudge — an
         # empty SPX matrix means the whole app is uninitialized, a deploy-time
         # bootstrap step, not a per-ticker warm-up.
@@ -1395,7 +1395,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         # that's the fast path for iterating on one model.
         _specs_to_fit = list(RF_MODEL_SPECS.keys()) if do_weekly else [model_choice]
 
-        # A shared pair (SPX+XSP, NDX+XND) reuses one scale-invariant fit, so a
+        # A shared pair (SPX+XSP) reuses one scale-invariant fit, so a
         # Weekly Setup click on either member populates the whole group — every
         # curated ticker that resolves to the same feature source. Own-HAR
         # tickers (QQQ / SPY / AMZN / AMD) stand alone. A plain Forecast click
@@ -1522,7 +1522,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             try:
                 payload = _cached_rf_load_model(model_choice, ticker)
             except FileNotFoundError:
-                # A scaled mini (XSP→SPX, XND→NDX) rides its parent's fit
+                # A scaled mini (XSP→SPX) rides its parent's fit
                 # (identical by construction) when it has no row of its own.
                 _parent = _fsrc(ticker)
                 if _parent == ticker:

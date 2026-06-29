@@ -519,7 +519,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # training pipeline to match.
     _logger.info(f"  2/4 Rebuilding feature matrix ({ticker})...")
     try:
-        # A scaled mini (XSP→SPX, XND→NDX) and SPX itself feed off the parent's
+        # A scaled mini (XSP→SPX) and SPX itself feed off the parent's
         # feature rows; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) get their own build.
         build_target = feature_source_ticker(ticker)
         build_features(conn, ticker=build_target)
@@ -546,7 +546,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     _logger.info(f"  4/4 Fitting all {len(MODEL_SPECS)} model specs...")
     try:
         from range_finder.feature_builder import get_features
-        # A scaled mini (XSP→SPX, XND→NDX) loads its parent's shared HAR
+        # A scaled mini (XSP→SPX) loads its parent's shared HAR
         # features; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) load their own rows.
         _features_ticker = feature_source_ticker(ticker)
         df_feat = get_features(conn, ticker=_features_ticker)
@@ -611,10 +611,10 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
             return None
 
         # Per-ticker daily-Open lookup. SPX uses ^GSPC (cash index). A scaled
-        # mini (XSP→SPX, XND→NDX) reads its parent's yfinance symbol and divides
+        # mini (XSP→SPX) reads its parent's yfinance symbol and divides
         # by its scale_divisor. Own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) read their
         # own symbol. The vol-proxy symbol comes from cfg.vol_proxy_yf — ^VIX for
-        # SPX/SPY/stocks, ^VXN for QQQ/NDX/XND.
+        # SPX/SPY/stocks, ^VXN for QQQ/NDX.
         underlying_symbol = cfg["yf_symbol"]
         underlying_open = _daily_open(underlying_symbol)
         if underlying_open is not None:

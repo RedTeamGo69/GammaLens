@@ -30,7 +30,7 @@ jobs:
         # index/ETF run daily (GEX/EM); single names (stock category) run
         # weekly-only on the week's first trading day — see the cadence gate in
         # scheduled_snapshot.py. The weekly HAR fit fires Mondays for all.
-        ticker: [SPX, XSP, SPY, QQQ, NDX, XND, NVDA, JPM, CAT]
+        ticker: [SPX, XSP, SPY, QQQ, NDX, NVDA, JPM, CAT]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

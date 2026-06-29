@@ -36,16 +36,16 @@ from __future__ import annotations
 #                               scale_divisor; kept for back-compat. Readers
 #                               should call price_scale_divisor().
 #   shares_har_with           — parent ticker whose scale-invariant HAR
-#                               features + fit this "mini" reuses. XSP→"SPX",
-#                               XND→"NDX". None for standalone/own-HAR tickers.
+#                               features + fit this "mini" reuses. XSP→"SPX".
+#                               None for standalone/own-HAR tickers.
 #                               Read via feature_source_ticker().
 #   scale_divisor             — price ratio of the parent to this mini
-#                               (XSP=SPX/10 → 10, XND=NDX/10 → 10). 1.0 default.
+#                               (XSP=SPX/10 → 10). 1.0 default.
 #                               Read via price_scale_divisor().
 #   has_single_name_earnings  — single-stock earnings warning gate.
 #                               True for AMZN/AMD; False for indexes/ETFs.
 #   spread_finder_mode        — "spx_shared" : reuses a parent's HAR features
-#                                              (SPX itself, XSP→SPX, XND→NDX —
+#                                              (SPX itself, XSP→SPX —
 #                                              the parent comes from
 #                                              shares_har_with)
 #                               "own_har"    : has its own historical OHLC
@@ -158,23 +158,6 @@ TICKER_CONFIG: dict[str, dict] = {
         "xsp_scale_to_spx": False,
         "has_single_name_earnings": False,
         "spread_finder_mode": "own_har",  # own HAR fit on ^NDX history
-    },
-    "XND": {
-        "display_name": "XND",
-        "tradier_symbol": "XND",
-        "yf_symbol": "^NDX",             # rides on NDX's underlying history (price ≈ NDX/10)
-        "vol_proxy_yf": "^VXN",
-        "strike_increment": 1,
-        "wing_widths": [20, 40, 60, 80],
-        "min_spread_width": {"normal": 20, "event_1": 20, "event_2": 40, "fomc_week": 40},
-        "multiplier": 100,
-        "dividend_yield": 0.008,
-        "category": "index",
-        "xsp_scale_to_spx": False,        # uses scale_divisor instead (generalized)
-        "shares_har_with": "NDX",         # reuses NDX's scale-invariant HAR features + fit
-        "scale_divisor": 10,              # XND price ≈ NDX / 10 (micro index, like XSP→SPX)
-        "has_single_name_earnings": False,
-        "spread_finder_mode": "spx_shared",  # "shared" mode; parent = shares_har_with (NDX)
     },
 }
 
@@ -365,7 +348,7 @@ def uses_own_har(ticker: str) -> bool:
 def feature_source_ticker(ticker: str) -> str:
     """The ticker whose HAR features + saved fit this one should read.
 
-    A scaled "mini" (XSP, XND) reuses its parent's scale-invariant features
+    A scaled "mini" (XSP) reuses its parent's scale-invariant features
     (returns / log-ranges are identical across the /10 scale) — the parent is
     declared in ``shares_har_with``. Everything else sources from itself; the
     legacy ``spx_shared`` mode with no explicit parent means SPX (the base).

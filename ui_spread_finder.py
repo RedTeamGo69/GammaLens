@@ -1960,8 +1960,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             f"<span style='color:{tier_color};font-size:18px;font-weight:bold;'>"
             f"{selected_tier.risk_level.upper()}</span>"
             f" &nbsp;—&nbsp; Range: {selected_tier.range_pct*100:.2f}%"
-            f" &nbsp;|&nbsp; Calls above `{disp_call_short:,.0f}`"
-            f" &nbsp;|&nbsp; Puts below `{disp_put_short:,.0f}`",
+            f" &nbsp;|&nbsp; Calls above `{_fmt_strike(disp_call_short)}`"
+            f" &nbsp;|&nbsp; Puts below `{_fmt_strike(disp_put_short)}`",
             unsafe_allow_html=True,
         )
 
@@ -1995,11 +1995,11 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         col_call, col_put = st.columns(2)
 
         with col_call:
-            st.markdown(f"Call Spreads — short above `{disp_call_short:,.0f}`")
+            st.markdown(f"Call Spreads — short above `{_fmt_strike(disp_call_short)}`")
             _render_sf_spread_table(disp_call_spreads)
 
         with col_put:
-            st.markdown(f"Put Spreads — short below `{disp_put_short:,.0f}`")
+            st.markdown(f"Put Spreads — short below `{_fmt_strike(disp_put_short)}`")
             _render_sf_spread_table(disp_put_spreads)
 
         # Show credit source note with chain expiration
@@ -2041,12 +2041,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             if _em_upper > 0 and _em_lower > 0:
                 if selected_tier.model_call_short is not None:
                     all_warnings.append(
-                        f"Call short {disp_call_short:,.0f} is within the weekly "
+                        f"Call short {_fmt_strike(disp_call_short)} is within the weekly "
                         f"expected move (EM upper {_em_upper:,.0f})."
                     )
                 if selected_tier.model_put_short is not None:
                     all_warnings.append(
-                        f"Put short {disp_put_short:,.0f} is within the weekly "
+                        f"Put short {_fmt_strike(disp_put_short)} is within the weekly "
                         f"expected move (EM lower {_em_lower:,.0f})."
                     )
 
@@ -2370,14 +2370,14 @@ def _render_sf_strike_map_tier(
 
     ticks = [round((axis_min + span * f) / 5) * 5 for f in (0, 0.25, 0.5, 0.75, 1.0)]
 
-    def _lane(markers) -> str:
+    def _lane(markers, fmt=lambda px: f"{px:,.0f}") -> str:
         out = []
         for i, (px, _lbl, color, glyph) in enumerate(sorted(markers, key=lambda m: m[0])):
             lbl_pos = "bottom:15px;" if i % 2 == 0 else "top:15px;"
             out.append(
                 f'<div class="mk" style="left:{_xp(px):.2f}%;color:{color};">{glyph}'
                 f'<span class="lbl" style="position:absolute;left:50%;transform:translateX(-50%);'
-                f'{lbl_pos}color:{color};">{_lbl} {px:,.0f}</span></div>'
+                f'{lbl_pos}color:{color};">{_lbl} {fmt(px)}</span></div>'
             )
         return "".join(out)
 
@@ -2410,7 +2410,7 @@ def _render_sf_strike_map_tier(
         '<div class="lane">TRADE</div><div class="lane">RANGE</div><div class="lane">GEX</div>'
         '</div><div class="area">'
         f'{safe}{em_band}{grid}{refs}'
-        f'<div class="lane-row">{_lane(trade)}</div>'
+        f'<div class="lane-row">{_lane(trade, _fmt_strike)}</div>'
         f'<div class="lane-row">{_lane(rng)}</div>'
         f'<div class="lane-row">{_lane(gex)}</div>'
         '</div></div>'
@@ -2443,6 +2443,21 @@ def _best_spread_idx(spreads) -> "int | None":
     return best
 
 
+def _fmt_strike(x) -> str:
+    """Format a strike / wing width / level, preserving genuine fractional
+    strikes (e.g. NVDA's 207.5 on the $2.5 grid) instead of rounding them to a
+    misleading integer, while keeping whole values clean (208, not 208.0).
+
+    Without this the table formatted strikes with ``:,.0f``, rounding 207.5 → 208
+    so a true 2.5-wide spread looked 2-wide next to its "W = 2.5pt" label."""
+    if x is None:
+        return "—"
+    x = float(x)
+    if x == round(x):
+        return f"{int(round(x)):,}"
+    return f"{x:,.2f}".rstrip("0").rstrip(".")
+
+
 def _render_sf_spread_table(spreads):
     """Render the spread ladder as an 8-column terminal table, highlighting the
     best qualifying spread (see _best_spread_idx). Presentation only — every
@@ -2455,8 +2470,7 @@ def _render_sf_spread_table(spreads):
 
     body = []
     for i, s in enumerate(spreads):
-        w = int(s.wing_width) if s.wing_width == int(s.wing_width) else s.wing_width
-        wlabel = f"{w}pt"
+        wlabel = f"{_fmt_strike(s.wing_width)}pt"
         if getattr(s, "below_min_width", False):
             wlabel += "*"
         if i == best_idx:
@@ -2467,8 +2481,8 @@ def _render_sf_spread_table(spreads):
         body.append(
             f'<tr class="{"best" if i == best_idx else ""}">'
             f'<td>{wlabel}</td>'
-            f'<td class="short">{s.short_strike:,.0f}</td>'
-            f'<td class="long">{s.long_strike:,.0f}</td>'
+            f'<td class="short">{_fmt_strike(s.short_strike)}</td>'
+            f'<td class="long">{_fmt_strike(s.long_strike)}</td>'
             f'<td class="cr">{cr}</td>'
             f'<td>${s.max_loss:,.0f}</td>'
             f'<td>{s.breakeven:,.0f}</td>'

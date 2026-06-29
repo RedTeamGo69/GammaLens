@@ -1,9 +1,16 @@
 """
-Historical GEX snapshot tracking — Postgres only.
+Historical EM snapshot tracking — Postgres only.
 
 DATABASE_URL must be set via Streamlit secrets or as an environment variable.
 psycopg2 must be installed. If either is missing the module raises a clear
 error at import / first-call time rather than silently degrading.
+
+NOTE (2026-06): the `gex_snapshots` table and its read/write helpers
+(save_snapshot / get_history / get_zero_gamma_trend / get_daily_summary) were
+removed. The cron wrote one GEX snapshot row per ticker per day, but the GEX
+history/trend view that consumed them was dropped in the UI redesign, leaving
+the table a dead write. The EM snapshot path below IS still read (the spread
+finder's frozen expected-move band), so it remains.
 """
 from __future__ import annotations
 
@@ -56,236 +63,11 @@ def _pg_get_connection():
     return conn
 
 
-def _pg_ensure_table():
-    conn = _pg_get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS gex_snapshots (
-                id SERIAL PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                date TEXT NOT NULL,
-                minute_key TEXT NOT NULL,
-                ticker TEXT NOT NULL DEFAULT 'SPX',
-                spot REAL NOT NULL,
-                zero_gamma REAL NOT NULL,
-                is_true_crossing BOOLEAN NOT NULL DEFAULT TRUE,
-                call_wall REAL,
-                put_wall REAL,
-                regime TEXT,
-                net_gex REAL,
-                expected_move_pts REAL,
-                confidence_score REAL,
-                freshness_score REAL,
-                coverage_ratio REAL,
-                pc_ratio REAL,
-                gex_ratio REAL,
-                call_iv REAL,
-                put_iv REAL
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_snapshots_date ON gex_snapshots(date)
-        """)
-        # Migration: add ticker column if missing (existing tables)
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE gex_snapshots ADD COLUMN ticker TEXT NOT NULL DEFAULT 'SPX';
-            EXCEPTION WHEN duplicate_column THEN NULL;
-            END $$
-        """)
-        # Migration: drop old unique constraint on minute_key alone, add composite
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE gex_snapshots DROP CONSTRAINT IF EXISTS gex_snapshots_minute_key_key;
-            EXCEPTION WHEN undefined_object THEN NULL;
-            END $$
-        """)
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_ticker_minute
-            ON gex_snapshots(ticker, minute_key)
-        """)
-    finally:
-        conn.close()
-
-
-def _pg_save_snapshot(row):
-    conn = _pg_get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO gex_snapshots
-               (timestamp, date, minute_key, ticker, spot, zero_gamma, is_true_crossing,
-                call_wall, put_wall, regime, net_gex, expected_move_pts,
-                confidence_score, freshness_score, coverage_ratio,
-                pc_ratio, gex_ratio, call_iv, put_iv)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (ticker, minute_key) DO NOTHING""",
-            (
-                row["timestamp"], row["date"], row["minute_key"], row["ticker"],
-                row["spot"], row["zero_gamma"], row["is_true_crossing"],
-                row["call_wall"], row["put_wall"], row["regime"],
-                row["net_gex"], row["expected_move_pts"],
-                row["confidence_score"], row["freshness_score"],
-                row["coverage_ratio"], row["pc_ratio"], row["gex_ratio"],
-                row["call_iv"], row["put_iv"],
-            ),
-        )
-    finally:
-        conn.close()
-
-
-def _pg_get_daily_summary(days, ticker="SPX"):
-    """Return first (open) and last (close) snapshot per day for a given ticker."""
-    conn = _pg_get_connection()
-    try:
-        cutoff = (datetime.now(NY_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
-        cur = conn.cursor()
-        # Get first and last snapshot id per day
-        cur.execute(
-            """SELECT * FROM gex_snapshots
-               WHERE id IN (
-                   SELECT MIN(id) FROM gex_snapshots WHERE date >= %s AND ticker = %s GROUP BY date
-                   UNION
-                   SELECT MAX(id) FROM gex_snapshots WHERE date >= %s AND ticker = %s GROUP BY date
-               )
-               ORDER BY date DESC, id ASC""",
-            (cutoff, ticker, cutoff, ticker),
-        )
-        cols = [desc[0] for desc in cur.description]
-        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-
-        # Tag each row as 'open' or 'close'
-        from itertools import groupby
-        tagged = []
-        for _date, group in groupby(rows, key=lambda r: r["date"]):
-            group_list = list(group)
-            if len(group_list) == 1:
-                group_list[0]["scan_type"] = "open"
-                tagged.append(group_list[0])
-            else:
-                group_list[0]["scan_type"] = "open"
-                for mid in group_list[1:-1]:
-                    mid["scan_type"] = "intraday"
-                group_list[-1]["scan_type"] = "close"
-                tagged.extend(group_list)
-        return tagged
-    finally:
-        conn.close()
-
-
-def _pg_get_zero_gamma_trend(days, ticker="SPX"):
-    conn = _pg_get_connection()
-    try:
-        cutoff = (datetime.now(NY_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
-        cur = conn.cursor()
-        cur.execute(
-            """SELECT date, zero_gamma, spot FROM gex_snapshots
-               WHERE date >= %s AND ticker = %s
-               ORDER BY timestamp ASC""",
-            (cutoff, ticker),
-        )
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-
-def _pg_get_history(days, ticker="SPX"):
-    conn = _pg_get_connection()
-    try:
-        cutoff = (datetime.now(NY_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
-        cur = conn.cursor()
-        cur.execute(
-            """SELECT * FROM gex_snapshots
-               WHERE date >= %s AND ticker = %s
-               ORDER BY timestamp DESC""",
-            (cutoff, ticker),
-        )
-        cols = [desc[0] for desc in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-# ── Initialize Postgres table on import (best-effort; clear error if misconfigured) ──
-
-try:
-    _pg_ensure_table()
-except Exception as e:
-    _logger.warning(f"Failed to initialize Postgres table on import: {e}")
-
-
 # ── Public API ──
 
 def get_backend():
     """Legacy compatibility shim. Always returns 'postgres' now."""
     return "postgres"
-
-
-def _to_float(v):
-    """Convert numpy/pandas numeric types to plain Python float for psycopg2."""
-    if v is None:
-        return None
-    return float(v)
-
-
-def _build_row(spot, levels, regime_info, stats, confidence_info, staleness_info, em_analysis=None, ticker="SPX"):
-    now = datetime.now(NY_TZ)
-    em_pts = None
-    if em_analysis:
-        em_data = em_analysis.get("expected_move", {})
-        em_pts = _to_float(em_data.get("expected_move_pts"))
-
-    return {
-        "timestamp": now.isoformat(),
-        "date": now.strftime("%Y-%m-%d"),
-        "minute_key": now.strftime("%Y-%m-%d %H:%M"),
-        "ticker": ticker,
-        "spot": _to_float(spot),
-        "zero_gamma": _to_float(levels.get("zero_gamma", 0)),
-        "is_true_crossing": bool(levels.get("zero_gamma_is_true_crossing", True)),
-        "call_wall": _to_float(levels.get("call_wall")),
-        "put_wall": _to_float(levels.get("put_wall")),
-        "regime": str(regime_info.get("regime")) if regime_info.get("regime") else None,
-        "net_gex": _to_float(stats.get("net_gex", 0)),
-        "expected_move_pts": em_pts,
-        "confidence_score": _to_float(confidence_info.get("score")),
-        "freshness_score": _to_float(staleness_info.get("freshness_score")),
-        "coverage_ratio": _to_float(stats.get("coverage_ratio")),
-        "pc_ratio": _to_float(stats.get("pc_ratio")),
-        "gex_ratio": _to_float(stats.get("gex_ratio")),
-        "call_iv": _to_float(stats.get("call_iv")),
-        "put_iv": _to_float(stats.get("put_iv")),
-    }
-
-
-def save_snapshot(spot, levels, regime_info, stats, confidence_info, staleness_info, em_analysis=None, ticker="SPX"):
-    """Save a GEX snapshot to Postgres. Deduplicates by (ticker, minute)."""
-    row = _build_row(spot, levels, regime_info, stats, confidence_info, staleness_info, em_analysis, ticker=ticker)
-    _pg_save_snapshot(row)
-
-
-def check_db_connection():
-    """Diagnostic: test the Postgres connection and return status info."""
-    try:
-        conn = _pg_get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM gex_snapshots")
-        count = cur.fetchone()[0]
-        cur.execute("SELECT MIN(date), MAX(date) FROM gex_snapshots")
-        min_date, max_date = cur.fetchone()
-        cur.execute("SELECT timestamp, spot, zero_gamma FROM gex_snapshots ORDER BY id DESC LIMIT 3")
-        recent = cur.fetchall()
-        conn.close()
-        return {
-            "ok": True,
-            "total_rows": count,
-            "date_range": f"{min_date} to {max_date}" if min_date else "empty",
-            "recent": recent,
-            "conn_str_prefix": _pg_conn_str[:40] + "..." if _pg_conn_str else "none",
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # One-time schema init flag — `save_em_snapshot` previously issued a
@@ -383,6 +165,16 @@ def save_em_snapshot(em_data, date_str, ticker="SPX", em_type="daily"):
                 datetime.now(NY_TZ).isoformat(),
             ),
         )
+        # Daily EM snapshots are only ever read on their own day, so keep just
+        # the latest per ticker — prune older daily rows so the table can't grow
+        # unbounded. Weekly/monthly snapshots are retained (they're re-read for
+        # historical reconstruction and the OpEx-cycle display).
+        if em_type == "daily":
+            cur.execute(
+                "DELETE FROM em_snapshots "
+                "WHERE ticker = %s AND em_type = 'daily' AND date < %s",
+                (ticker, date_str),
+            )
     finally:
         conn.close()
 
@@ -497,20 +289,3 @@ def get_monthly_em_date_key(now):
     # 3rd Friday is always a Friday, so Monday-after = +3 days.
     cycle_open_mon = third_fri + _td(days=3)
     return cycle_open_mon.strftime("%Y-%m-%d")
-
-
-def get_history(days=30, ticker="SPX"):
-    """Get historical snapshots, most recent first."""
-    return _pg_get_history(days, ticker=ticker)
-
-
-def get_zero_gamma_trend(days=14, ticker="SPX"):
-    """Get zero gamma values over time."""
-    return _pg_get_zero_gamma_trend(days, ticker=ticker)
-
-
-def get_daily_summary(days=30, ticker="SPX"):
-    """Get first + last snapshot per day. Returns list of dicts."""
-    return _pg_get_daily_summary(days, ticker=ticker)
-
-

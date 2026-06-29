@@ -517,12 +517,14 @@ def init_all_tables(conn) -> None:
         END $$
     """)
 
-    # One-time cleanup: M5_garch was removed from MODEL_SPECS because it
-    # was strictly dominated by M6_regime on live data.  Drop any orphan
-    # saved fit for it so it doesn't sit in the DB as dead state — the
-    # dashboard can't reach it anyway now that it's off the dropdown.
+    # One-time cleanup: specs removed from MODEL_SPECS leave orphan fits in
+    # saved_models that the dashboard can no longer reach (they're off the
+    # dropdown). Drop them so they don't sit in the DB as dead state.
+    #   - M5_garch: HAR + GARCH(1,1), removed earlier (dominated by the VIX specs).
+    #   - M6_regime: removed 2026-06 after walk-forward OOS showed its regime
+    #     interaction terms hurt out-of-sample R² (see har_model.MODEL_SPECS).
     # DELETE is idempotent; safe to run on every init_all_tables call.
-    cur.execute("DELETE FROM saved_models WHERE model_name = 'M5_garch'")
+    cur.execute("DELETE FROM saved_models WHERE model_name IN ('M5_garch', 'M6_regime')")
 
     # --- weekly_setup (Monday open freeze for spread finder) ---
     cur.execute("""
@@ -602,39 +604,6 @@ def init_all_tables(conn) -> None:
             event_count          INTEGER DEFAULT 0,
             gex                  REAL,
             gex_normalized       REAL,
-            updated_at           TEXT,
-            PRIMARY KEY (session_date, ticker)
-        )
-    """)
-
-    # --- spread_log_daily — per-session 0DTE plans + breach outcomes ---
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS spread_log_daily (
-            session_date         TEXT NOT NULL,
-            ticker               TEXT NOT NULL DEFAULT 'SPX',
-            generated_at         TEXT,
-            spx_ref_open         REAL,
-            vix1d_open           REAL,
-            vrp_at_open          REAL,
-            point_pct            REAL,
-            upper_pct            REAL,
-            effective_range_pct  REAL,
-            call_short           REAL,
-            call_long            REAL,
-            put_short            REAL,
-            put_long             REAL,
-            wing_width_used      INTEGER,
-            buffer_pct           REAL,
-            event_count          INTEGER,
-            gex_flag             INTEGER,
-            warnings             TEXT,
-            actual_high          REAL,
-            actual_low           REAL,
-            actual_range_pct     REAL,
-            call_breached        INTEGER,
-            put_breached         INTEGER,
-            outcome              TEXT,
-            pnl_pts              REAL,
             updated_at           TEXT,
             PRIMARY KEY (session_date, ticker)
         )

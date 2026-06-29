@@ -24,7 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ticker: [SPX, XSP, SPY, QQQ, NDX, XND]
+        # Index / ETF defaults + single-name defaults. Single names resolve
+        # through ticker_config's dynamic-config path (own-HAR, VIX vol proxy)
+        # and skip the 0DTE setup (SPX/XSP/SPY only). Cadence differs by type:
+        # index/ETF run daily (GEX/EM); single names (stock category) run
+        # weekly-only on the week's first trading day — see the cadence gate in
+        # scheduled_snapshot.py. The weekly HAR fit fires Mondays for all.
+        ticker: [SPX, XSP, SPY, QQQ, NDX, XND, NVDA, JPM, CAT]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

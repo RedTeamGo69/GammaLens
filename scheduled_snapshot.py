@@ -46,7 +46,7 @@ def capture_snapshot():
     from phase1.confidence import build_run_confidence
     from phase1.staleness import build_staleness_info
     from phase1.expected_move import build_expected_move_analysis
-    from phase1.gex_history import save_snapshot, save_em_snapshot
+    from phase1.gex_history import save_em_snapshot
 
     # FORCE_WEEKLY_SETUP=1 bypasses the market-hours / weekend / holiday gates
     # so the workflow can be triggered manually (e.g. after a DB wipe) on any
@@ -84,6 +84,32 @@ def capture_snapshot():
     session = get_session_state(CASH_CALENDAR, run_now)
     if not force_weekly_setup and session.market_open is None:
         _logger.info(f"Market holiday ({today_str}) — skipping")
+        sys.exit(0)
+
+    # ── Cadence gate: single-name tickers run weekly-only ──
+    # Index/ETF tickers capture every market day (GEX/EM history + 0DTE for
+    # SPX/XSP/SPY). Single stocks (NVDA/JPM/CAT/...) only need the weekly HAR
+    # fit + the weekly/monthly EM capture, which fire on the week's first
+    # trading day — exactly the SPX/XSP weekly-setup cadence. Skipping them on
+    # the other weekdays avoids 4 no-op runs/week (and the Neon compute they'd
+    # wake). FORCE_WEEKLY_SETUP overrides. Computed here (before the 9:30 wait,
+    # the Tradier chain fetch, and GEX compute) so a skip is cheap. is_monday /
+    # is_tuesday_after_holiday are reused by the weekly-setup block below.
+    is_monday = run_now.weekday() == 0
+    is_tuesday_after_holiday = False
+    if run_now.weekday() == 1:
+        monday = run_now - __import__('datetime').timedelta(days=1)
+        mon_session = get_session_state(CASH_CALENDAR, monday)
+        is_tuesday_after_holiday = mon_session.market_open is None
+    is_week_first_trading_day = is_monday or is_tuesday_after_holiday
+
+    from phase1.ticker_config import get_config as _get_cfg
+    if (_get_cfg(ticker).get("category") == "stock"
+            and not force_weekly_setup and not is_week_first_trading_day):
+        _logger.info(
+            f"{ticker}: single-name weekly-only cadence — today is not the week's "
+            f"first trading day. Skipping (no daily GEX/EM run)."
+        )
         sys.exit(0)
 
     # ── Pre-open warm-up ──
@@ -238,13 +264,13 @@ def capture_snapshot():
         as_of=run_now.date(),
     )
 
-    # ── Save GEX snapshot ──
-    try:
-        save_snapshot(spot, levels, regime_info, stats, confidence_info, staleness_info, em_analysis, ticker=ticker)
-        _logger.info(f"{ticker} GEX snapshot saved to Postgres")
-    except Exception as e:
-        _logger.error(f"Failed to save GEX snapshot: {e}")
-        sys.exit(1)
+    # ── GEX snapshot persistence removed ──
+    # The gex_snapshots table was a dead write: the cron wrote one row per
+    # ticker per day, but the GEX history/trend view that read it was removed
+    # in the UI redesign (get_history / get_zero_gamma_trend / get_daily_summary
+    # had no remaining callers). Dropping the write also removes a hard
+    # sys.exit(1) abort path on a save nothing consumed. The EM snapshot below
+    # IS still read (the spread finder's frozen expected-move band), so it stays.
 
     # ── Save EM snapshot (only first of day due to ON CONFLICT DO NOTHING) ──
     em_data = em_analysis.get("expected_move", {})
@@ -264,13 +290,9 @@ def capture_snapshot():
     from phase1.expected_move import find_weekly_expiration, find_monthly_expiration, compute_em_for_expiration
     from phase1.gex_history import get_weekly_em_date_key, get_monthly_em_date_key, get_em_snapshot
 
-    is_monday = run_now.weekday() == 0
-    is_tuesday_after_holiday = False
-    if run_now.weekday() == 1:
-        monday = run_now - __import__('datetime').timedelta(days=1)
-        mon_session = get_session_state(CASH_CALENDAR, monday)
-        is_tuesday_after_holiday = mon_session.market_open is None
-
+    # is_monday / is_tuesday_after_holiday are computed once near the top of
+    # capture_snapshot (the single-name cadence gate needs them before the
+    # market-open wait), so they're reused here rather than recomputed.
     weekly_key = get_weekly_em_date_key(run_now)
     should_capture_weekly = is_monday or is_tuesday_after_holiday
     if not should_capture_weekly:
@@ -363,15 +385,15 @@ def capture_snapshot():
     # =========================================================================
     # Unlike the weekly setup (which only runs Mondays), the 0DTE setup runs
     # on every market-day cron. It refreshes daily_spx incrementally, rebuilds
-    # the last 30 days of daily_model_features, refits the daily HAR weekly
-    # (Monday only), generates today's plan, and computes outcome for the
-    # previous session. XSP and SPY ride the SPX-trained daily HAR (both track
-    # the S&P 500 and share ^VIX1D); the plan-log + outcome are still keyed to
-    # the active ticker so each gets its own backtest rows.
+    # the last 30 days of daily_model_features, and refits the daily HAR weekly
+    # (Monday only). XSP and SPY ride the SPX-trained daily HAR (both track the
+    # S&P 500 and share ^VIX1D). No plan is generated or logged and no outcome
+    # backtest is recorded — the live 0DTE finder computes today's plan on
+    # demand from the refreshed features.
     if ticker in {"SPX", "XSP", "SPY"}:
         try:
             _run_daily_spread_setup(
-                ticker, spot, run_now, client, levels, regime_info,
+                ticker, run_now,
                 refit_today=(is_monday or is_tuesday_after_holiday or force_weekly_setup),
             )
         except Exception as e:
@@ -516,7 +538,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # ── Step 4: Fit every model spec and save them all ──
     # Fitting every spec Monday (not just M3_extended) means a user who
     # switches the Spread Finder's model dropdown mid-week to compare
-    # M6_regime vs M1_baseline etc. gets a clean load-from-Postgres of
+    # M2_vix vs M1_baseline etc. gets a clean load-from-Postgres of
     # a Monday-frozen fit — no "click Forecast to fit it for the first
     # time" prompt, no mid-week refit that reproduces Monday's result
     # unnecessarily. OLS with HC3 on ~few hundred weekly rows is
@@ -642,44 +664,30 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         _logger.warning(f"  Monday open/VIX save failed: {e}")
 
 
-def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
-                              refit_today: bool = False):
-    """Run the 0DTE spread finder daily refresh (SPX/XSP/SPY only).
+def _run_daily_spread_setup(ticker, run_now, refit_today: bool = False):
+    """Refresh the 0DTE daily data + model that feed the live 0DTE finder
+    (SPX/XSP/SPY only).
 
-    Mirror of ``_run_weekly_spread_setup`` but at daily cadence and limited to
-    SPX/XSP/SPY. Refreshes ``daily_spx``, rebuilds the last 30 days of
-    ``daily_model_features``, optionally refits the daily HAR (Mondays /
-    forced), generates today's 0DTE plan and persists it, then computes
-    outcome for yesterday's row. The data/model steps key off SPX (XSP and SPY
-    both ride the SPX fit); the plan-log + outcome are keyed to the active
-    ``ticker`` so each gets its own backtest rows.
+    Mirror of ``_run_weekly_spread_setup`` but at daily cadence: refreshes
+    ``daily_spx``, rebuilds the last 30 days of ``daily_model_features``, and
+    optionally refits the daily HAR (Mondays / forced). Everything keys off SPX
+    (XSP and SPY ride the SPX fit). The 0DTE finder computes today's plan on
+    demand from this data — the cron no longer generates or logs plans, and no
+    outcome backtest is recorded (the write-only spread_log_daily log was removed).
     """
-    from datetime import datetime, timedelta, timezone
-
     from range_finder.db import get_connection, init_all_tables
     from range_finder.data_collector import (
         fetch_daily_spx_vix, save_daily_spx,
     )
     from range_finder.event_calendars import build_event_flags_daily
-    from range_finder.feature_builder_daily import (
-        build_daily_features, get_daily_feature_for_date,
-    )
+    from range_finder.feature_builder_daily import build_daily_features
     from range_finder.har_model_daily import (
-        run_daily_pipeline, forecast_next_session, MODEL_SPECS_DAILY,
+        run_daily_pipeline, MODEL_SPECS_DAILY,
     )
     from range_finder.model_persistence import load_model
-    from range_finder.gex_bridge import (
-        extract_gex_context, adjust_spread_with_gex,
-    )
-    from range_finder.spread_levels import build_spread_plan, TICKER_CONFIG
-    from range_finder.spread_persistence import (
-        log_daily_spread_plan, update_daily_outcome,
-    )
 
     conn = get_connection()
     init_all_tables(conn)
-
-    today_iso = run_now.strftime("%Y-%m-%d")
 
     # ── 1: Refresh daily SPX/VIX/VIX1D (SPX only — XSP and SPY ride on SPX) ──
     # Adaptive backfill: on the first run after deploy (daily_spx empty) we
@@ -697,7 +705,7 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
     fetch_years = 4 if is_first_run else 0.1  # 0.1y ≈ 37 calendar days
 
     _logger.info(
-        f"  [0DTE] 1/5 Refreshing daily SPX/VIX/VIX1D "
+        f"  [0DTE] 1/3 Refreshing daily SPX/VIX/VIX1D "
         f"({'INITIAL BACKFILL' if is_first_run else 'incremental'}, "
         f"fetch_years={fetch_years}, existing daily_spx rows={existing_rows})..."
     )
@@ -709,7 +717,7 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
         _logger.warning(f"  [0DTE] Daily fetch failed: {e} (continuing)")
 
     # ── 2: Rebuild daily event flags + feature matrix ──
-    _logger.info("  [0DTE] 2/5 Rebuilding daily features...")
+    _logger.info("  [0DTE] 2/3 Rebuilding daily features...")
     try:
         build_event_flags_daily(conn)
         build_daily_features(conn, ticker="SPX")
@@ -742,115 +750,21 @@ def _run_daily_spread_setup(ticker, spot, run_now, client, levels, regime_info,
             should_refit = True
 
     if should_refit:
-        _logger.info("  [0DTE] 3/5 Fitting daily HAR specs...")
+        _logger.info("  [0DTE] 3/3 Fitting daily HAR specs...")
         try:
             out = run_daily_pipeline(conn, preferred_model="M2_daily_vix")
             _logger.info(f"  [0DTE] Daily HAR fit done — saved {out['preferred']}")
         except Exception as e:
             _logger.warning(f"  [0DTE] Daily HAR fit failed: {e}")
     else:
-        _logger.info("  [0DTE] 3/5 Skipping daily HAR refit (not Monday / model present)")
+        _logger.info("  [0DTE] 3/3 Skipping daily HAR refit (not Monday / model present)")
 
-    # ── 4: Generate today's 0DTE plan and persist ──
-    _logger.info(f"  [0DTE] 4/5 Generating today's plan for {ticker}...")
-    try:
-        feature_row = get_daily_feature_for_date(conn, today_iso, ticker="SPX")
-        if feature_row is None:
-            # Today's feature row isn't built yet (rare — usually pre-market).
-            # Fall back to the most recent persisted row.
-            from range_finder.feature_builder_daily import get_daily_features
-            df_dfeat = get_daily_features(conn, ticker="SPX")
-            if df_dfeat.empty:
-                _logger.warning("  [0DTE] No daily features available — skipping plan")
-                return
-            feature_row = df_dfeat.iloc[-1]
-
-        # Load the saved daily model (SPX, M2 preferred — fallback to M1).
-        payload = None
-        for spec in ("M2_daily_vix", "M1_daily_baseline", "M3_daily_extended"):
-            try:
-                payload = load_model(spec, conn=conn, ticker="SPX")
-                _logger.info(f"  [0DTE] Loaded daily model {spec}")
-                break
-            except Exception:
-                continue
-        if payload is None:
-            _logger.warning("  [0DTE] No daily model found in saved_models — "
-                            "run bootstrap --daily-only first.")
-            return
-
-        result = payload["result"]
-        feature_cols = payload["feature_cols"]
-        ticker_cfg = TICKER_CONFIG.get(ticker, TICKER_CONFIG["SPX"])
-
-        forecast = forecast_next_session(result, feature_row, feature_cols, spot)
-        gex_ctx  = extract_gex_context(levels, spot, regime_info)
-
-        # NaN-safe VIX1D resolution. feature_row values are numpy floats:
-        # NaN is truthy, so the old `(x or 0) or fallback` chain happily
-        # propagated NaN into the BSM credit math whenever yesterday's
-        # ^VIX1D close was missing.
-        def _finite_or_none(v):
-            try:
-                f = float(v)
-                return f if (f == f and f > 0) else None
-            except (TypeError, ValueError):
-                return None
-
-        vix1d = (_finite_or_none(feature_row.get("vix1d_close"))
-                 or _finite_or_none(feature_row.get("vix_close"))
-                 or 18.0)
-
-        # Same per-ticker ladders as the UI (ticker_config is the single
-        # source of truth): SPX 100..500, XSP 5..20.
-        wing_widths = ticker_cfg["wing_widths"]
-
-        plan = build_spread_plan(
-            forecast=forecast,
-            feature_row=feature_row,
-            week_start=today_iso,
-            wing_widths=wing_widths,
-            vix_level=vix1d,
-            spx_open=spot,
-            dte=0,
-            ticker=ticker,
-            chain_quotes=None,  # cron doesn't pull 0DTE chain quotes — UI does
-        )
-        # adjust_spread_with_gex returns an ANNOTATION DICT, not a modified
-        # SpreadPlan. The previous `plan = adjust_spread_with_gex(...)`
-        # replaced the dataclass with that dict, so log_daily_spread_plan
-        # blew up on `plan.generated_at` inside the broad except below —
-        # meaning the cron never actually persisted a single daily plan.
-        gex_adj = adjust_spread_with_gex(plan, gex_ctx)
-        for note in (gex_adj.get("gex_adjustment_notes") or []):
-            if note not in plan.warnings:
-                plan.warnings.append(note)
-
-        vrp = feature_row.get("vrp_daily")
-        try:
-            vrp_val = float(vrp) if vrp is not None else None
-        except (TypeError, ValueError):
-            vrp_val = None
-
-        log_daily_spread_plan(
-            conn, plan, session_date=today_iso, ticker=ticker,
-            vix1d_open=vix1d, vrp_at_open=vrp_val,
-        )
-        _logger.info(f"  [0DTE] Plan persisted for {today_iso}/{ticker}")
-    except Exception as e:
-        _logger.warning(f"  [0DTE] Plan generation failed: {e}")
-
-    # ── 5: Update yesterday's outcome ──
-    yesterday = run_now - timedelta(days=1)
-    while yesterday.weekday() >= 5:  # skip weekends
-        yesterday -= timedelta(days=1)
-    yesterday_iso = yesterday.strftime("%Y-%m-%d")
-    _logger.info(f"  [0DTE] 5/5 Updating outcome for {yesterday_iso}...")
-    try:
-        outcome = update_daily_outcome(conn, yesterday_iso, ticker=ticker)
-        _logger.info(f"  [0DTE] Yesterday's outcome ({yesterday_iso}/{ticker}): {outcome}")
-    except Exception as e:
-        _logger.warning(f"  [0DTE] Yesterday outcome update failed: {e}")
+    # ── Plan generation, plan logging, and outcome backtesting removed ──
+    # The cron used to generate today's 0DTE plan, persist it to spread_log_daily,
+    # and score the prior session's outcome. That whole log was write-only (the
+    # 0DTE finder computes its plan on demand and never read it back), so it was
+    # removed. Steps 1-3 above keep daily_spx / daily_model_features / the daily
+    # HAR fit fresh, which is all the live 0DTE finder needs.
 
 
 if __name__ == "__main__":

@@ -740,9 +740,8 @@ def print_summary(conn) -> None:
         daily_min, daily_max   = _pair("SELECT MIN(session_date), MAX(session_date) FROM daily_spx")
         daily_feat_count       = _scalar("SELECT COUNT(*) FROM daily_model_features")
         daily_event_count      = _scalar("SELECT SUM(event_count) FROM event_flags_daily")
-        daily_log_count        = _scalar("SELECT COUNT(*) FROM spread_log_daily")
     except Exception:
-        daily_count = daily_feat_count = daily_event_count = daily_log_count = 0
+        daily_count = daily_feat_count = daily_event_count = 0
         daily_min = daily_max = "—"
 
     print("\n" + "=" * 60)
@@ -754,5 +753,4 @@ def print_summary(conn) -> None:
     print(f"  daily_spx            : {daily_count:>5} rows  ({daily_min} → {daily_max})")
     print(f"  daily_model_features : {daily_feat_count:>5} rows")
     print(f"  event_flags_daily    : {daily_event_count:>5} total event-days flagged")
-    print(f"  spread_log_daily     : {daily_log_count:>5} rows")
     print("=" * 60 + "\n")

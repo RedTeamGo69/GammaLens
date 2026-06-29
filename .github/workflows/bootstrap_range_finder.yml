@@ -32,7 +32,6 @@ on:
           - "M2_vix"
           - "M3_extended"
           - "M4_full"
-          - "M6_regime"
       daily_model:
         description: "Daily model spec to fit and save (ignored in weekly-only)."
         required: false

@@ -34,17 +34,6 @@ from range_finder.spread_levels import (
     TICKER_CONFIG as RF_TICKER_CONFIG,
     SpreadPlan,
 )
-# NB: ``log_daily_spread_plan`` is imported lazily inside the render function
-# below, NOT here at module top. Reason: Streamlit Cloud's hot-reload does not
-# re-execute already-loaded Python modules when files change on disk — it just
-# clears st.cache_* and re-runs the script. So if a deploy lands AFTER
-# ``range_finder.spread_persistence`` (or its re-export host ``spread_levels``)
-# was loaded by the weekly tab, the new symbol ``log_daily_spread_plan`` won't
-# be visible in the cached module object even though it exists in the file on
-# disk. Importing it at module top would crash this whole tab with an
-# ``ImportError`` on first click; importing lazily lets the rest of the tab
-# render and degrades the logging step to a logged warning until the user
-# reboots the app (Manage app → Reboot).
 from range_finder.feature_builder_daily import get_daily_features
 from range_finder.har_model_daily import (
     MODEL_SPECS_DAILY,
@@ -87,8 +76,7 @@ def _today_iso(ref_dt: datetime = None) -> str:
     """Trading-day 'today' in New York time. A naive datetime.now() on a
     UTC-hosted Streamlit instance rolls to tomorrow at 8 PM ET, which made
     _build_chain_quotes_for_0dte reject the perfectly valid same-day chain
-    ('No 0DTE listed today — nearest expiration in the cache is <today>')
-    and keyed the spread_log_daily row to the wrong session date."""
+    ('No 0DTE listed today — nearest expiration in the cache is <today>')."""
     from phase1.market_clock import now_ny
     return (ref_dt or now_ny()).strftime("%Y-%m-%d")
 
@@ -538,32 +526,7 @@ def _render_0dte_spread_finder_tab(
             'strikes re-snap.</div>'
         )
 
-    # ── Persist (once per session) ──────────────────────────────────
-    # Log the day's plan to spread_log_daily so historical VRP-vs-outcome
-    # analysis can join against actual high/low later. Guard against
-    # duplicate logging in the same Streamlit session: each render would
-    # otherwise upsert a fresh `generated_at` and clobber the morning's
-    # first row.
-    #
-    # Lazy import (see module-top comment): defers the lookup of
-    # log_daily_spread_plan to call time so a stale module cache from
-    # Streamlit Cloud's hot-reload can't break the entire tab — it just
-    # skips logging until the next reboot.
-    log_key = f"_sf0_logged_{ticker}_{today_iso}"
-    if not st.session_state.get(log_key):
-        try:
-            from range_finder.spread_persistence import log_daily_spread_plan
-            log_daily_spread_plan(
-                conn, plan, session_date=today_iso, ticker=ticker,
-                vix1d_open=vix1d_input,
-                vrp_at_open=vrp_daily_live,
-            )
-            st.session_state[log_key] = True
-        except (ImportError, AttributeError) as e:
-            log.warning(
-                f"Daily spread logging unavailable — likely a stale "
-                f"Streamlit Cloud module cache. Reboot the app via "
-                f"Manage app → Reboot to enable logging. ({e})"
-            )
-        except Exception as e:
-            log.warning(f"Failed to log daily spread plan: {e}")
+    # ── 0DTE plan logging removed ──
+    # The day's plan used to be written to spread_log_daily here for a VRP-vs-
+    # outcome backtest, but that log was write-only (nothing read it back), so
+    # it was removed. The plan above is computed and displayed live on demand.

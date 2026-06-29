@@ -28,7 +28,15 @@ MODEL_DIR = Path(__file__).parent / "models"
 # (2*sqrt(2/pi) ≈ 1.5958). Old fits have a coefficient calibrated to the
 # unscaled 1-SD vol; loading them against the rescaled feature would shift
 # every forecast. Refit required.
-SCHEMA_VERSION = 2
+#
+# v3 (2026-06): feature-set change across the weekly specs. vix_implied_range
+# was dropped from M2_vix/M3_extended/M4_full (it was perfectly collinear with
+# vix_close — see har_model.MODEL_SPECS), and M6_regime was removed entirely.
+# A v2 fit carries the old feature_cols (incl. vix_implied_range / regime
+# interactions), so loading it would predict off a different design than the
+# current spec. Refit required — the Monday cron and the UI "Forecast" button
+# both regenerate fits automatically on the next run.
+SCHEMA_VERSION = 3
 
 
 def save_model(

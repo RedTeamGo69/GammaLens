@@ -291,9 +291,12 @@ def _build_chain_quotes_for_spreads(
 #   (Low/High) · O..R CLOSE INSIDE? per tier (formulas) · S Scored?
 #   (formula) · T Notes
 
-# Always-present defaults, in display order. The active/searched ticker and any
-# the user has added (session-state list under _FT_XLSX_EXTRA_KEY) are appended.
-_FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "XND"]
+# Always-present defaults, in display order: the index/ETF defaults followed by
+# the single-name defaults the Monday cron fits (NVDA/JPM/CAT). Mirrors
+# QUICK_TICKERS in ui_theme — keep the two in sync. The active/searched ticker
+# and any the user has added (session-state list under _FT_XLSX_EXTRA_KEY) are
+# appended.
+_FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "XND", "NVDA", "JPM", "CAT"]
 # Class-label overrides for the workbook "Class" column; anything else falls
 # back to the ticker_config category (Index/ETF/Stock).
 _FT_CLASS = {"SPX": "Index", "XSP": "Index", "SPY": "ETF",
@@ -314,6 +317,19 @@ def _ft_class(ticker: str) -> str:
         return str(get_config(t)["category"]).title()
     except Exception:
         return "Stock"
+
+
+def _default_model_for_ticker(ticker: str) -> str:
+    """Per-ticker default model spec.
+
+    Walk-forward OOS validation showed M3_extended is the strongest forecaster
+    on index products (SPX/XSP/QQQ/NDX/SPY...), while the simpler M2_vix wins on
+    single names (AMZN/AMD/...), whose weekly range isn't well explained by the
+    market-wide event-count / S&P return-lag features that M3 adds. So index/ETF
+    products default to M3_extended and single stocks to M2_vix. The user can
+    still override via the dropdown — the choice is remembered per ticker.
+    """
+    return "M2_vix" if _ft_class(ticker) == "Stock" else "M3_extended"
 
 
 def _xlsx_extra_list() -> list:
@@ -1158,11 +1174,25 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         )
 
     with col_ctrl3:
+        _spec_keys = list(RF_MODEL_SPECS.keys())
+        # Heal a stale per-ticker selection: a session that still has a removed
+        # spec (e.g. M6_regime) stored under this key would otherwise crash
+        # st.selectbox ("default value not in options"). Drop it so the
+        # per-ticker default below applies cleanly.
+        _mc_key = f"sf_model_choice_{ticker}"
+        if _mc_key in st.session_state and st.session_state[_mc_key] not in _spec_keys:
+            del st.session_state[_mc_key]
+        _default_model = _default_model_for_ticker(ticker)
+        _default_idx = _spec_keys.index(_default_model) if _default_model in _spec_keys else 0
         model_choice = st.selectbox(
             "Model Spec",
-            options=list(RF_MODEL_SPECS.keys()),
-            index=2,
-            help="M3_extended recommended; M4_full when GEX data is populated",
+            options=_spec_keys,
+            index=_default_idx,
+            help=(
+                "Default is set per ticker from walk-forward OOS: M3_extended for "
+                "indices/ETFs, M2_vix for single names. M4_full when GEX data is "
+                "populated. Your pick is remembered per ticker."
+            ),
             key=f"sf_model_choice_{ticker}",
         )
 

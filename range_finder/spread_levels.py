@@ -807,7 +807,4 @@ from range_finder.spread_persistence import (  # noqa: F401
     update_expiration_outcome,
     get_spread_log,
     print_spread_plan,
-    log_daily_spread_plan,
-    update_daily_outcome,
-    get_daily_spread_log,
 )

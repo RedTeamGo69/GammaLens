@@ -77,14 +77,20 @@ HAR_CORE = ["har_d1", "har_w", "har_m"]
 MODEL_SPECS = {
     "M1_baseline": HAR_CORE,
 
+    # vix_implied_range was dropped from every spec below (2026-06): it is a
+    # deterministic rescale of vix_close (vix_close / sqrt(52) / 100 * Brownian
+    # range factor), so corr(vix_close, vix_implied_range) = 1.0000 exactly.
+    # Carrying both made the design matrix singular (condition number ~1.4e10)
+    # and every coefficient uninterpretable, with NO predictive benefit — the
+    # columns span the same space, so OLS predictions are identical either way.
+    # vix_implied_range is still computed/stored and used OUTSIDE the regression
+    # (VRP / expected-move display), it is just no longer a model feature.
     "M2_vix": HAR_CORE + [
         "vix_close",
-        "vix_implied_range",
     ],
 
     "M3_extended": HAR_CORE + [
         "vix_close",
-        "vix_implied_range",
         "hv_ratio",
         "event_count",
         "spx_return_lag1",
@@ -93,7 +99,6 @@ MODEL_SPECS = {
 
     "M4_full": HAR_CORE + [
         "vix_close",
-        "vix_implied_range",
         "hv_ratio",
         "event_count",
         "spx_return_lag1",
@@ -104,22 +109,18 @@ MODEL_SPECS = {
         # (continuous feature, replacing the old binary gex_flag)
     ],
 
-    # M5_garch (HAR + VIX + weekly GARCH(1,1) fit) was removed — it was
-    # strictly dominated by M6_regime on both OOS R² and MAE on live data,
-    # and the marginal signal from adding GARCH on top of HAR core was not
-    # worth the extra `arch` dependency or the user-facing clutter.  The
-    # `garch_vol` column and its feature-builder code path were removed
-    # alongside it; old DBs may still have the column but nothing writes
-    # or reads it.
-
-    "M6_regime": HAR_CORE + [
-        "vix_close",
-        "vix_implied_range",
-        "hv_ratio",
-        "high_vol_regime",
-        "har_d1_x_regime",
-        "har_w_x_regime",
-    ],
+    # M5_garch (HAR + VIX + weekly GARCH(1,1) fit) and M6_regime (HAR + VIX +
+    # high-vol-regime interactions) were both removed.
+    #
+    # M6 was dropped (2026-06) after walk-forward OOS validation showed its
+    # regime interaction terms (har_d1_x_regime, har_w_x_regime) were collinear
+    # with their parent HAR lags (VIF 18-48, every term statistically
+    # insignificant) and actually HURT out-of-sample R² versus the simpler
+    # specs on every ticker — it was dominated by M3_extended on index products
+    # and by M2_vix on single names. The `high_vol_regime` column and the two
+    # interaction terms are no longer consumed by any spec (high_vol_regime is
+    # still computed/stored, just unused). Old saved M6 fits are deleted in
+    # db.init_all_tables; all other fits are invalidated via SCHEMA_VERSION.
 }
 
 
@@ -344,32 +345,24 @@ def compare_enhancements(
 ) -> pd.DataFrame:
     """Run walk-forward OOS comparison of model enhancements vs baseline.
 
-    Tests: GARCH feature, WLS weighting, regime interactions, and combinations.
-    Only marks an enhancement as 'keep' if it clears the improvement gate.
-    Returns a DataFrame with metrics and a 'keep' column.
+    Tests WLS recency weighting vs the OLS baseline. (The GARCH and regime-
+    interaction enhancements this once compared were removed after they failed
+    walk-forward OOS validation.) Only marks an enhancement as 'keep' if it
+    clears the improvement gate. Returns a DataFrame with metrics and a 'keep' column.
     """
     df = get_features(conn, exclude_covid=exclude_covid, ticker=ticker)
     if df.empty:
         raise RuntimeError(f"model_features is empty for {ticker} — run feature_builder.py first")
 
-    # Create interaction terms if regime feature exists
-    if feature_has_enough_data(df, "high_vol_regime"):
-        df["har_d1_x_regime"] = df["har_d1"] * df["high_vol_regime"]
-        df["har_w_x_regime"] = df["har_w"] * df["high_vol_regime"]
-    else:
-        df["har_d1_x_regime"] = np.nan
-        df["har_w_x_regime"] = np.nan
-
     local_specs = {k: list(v) for k, v in MODEL_SPECS.items()}
 
-    # Enhancement configurations to test.  "GARCH added" (M5_garch) was
-    # removed along with the spec itself — it was strictly dominated by
-    # M6_regime on live data and wasn't worth carrying in the comparison.
+    # Enhancement configurations to test. The GARCH (M5) and regime-interaction
+    # (M6) enhancements once compared here were removed after failing walk-forward
+    # OOS validation, so this now contrasts OLS vs recency-weighted WLS on the
+    # baseline spec.
     enhancements = {
         "Baseline (OLS)":     {"spec": baseline_spec, "use_wls": False},
         "Baseline (WLS)":     {"spec": baseline_spec, "use_wls": True},
-        "Regime + interact":  {"spec": "M6_regime",   "use_wls": False},
-        "Full enhanced":      {"spec": "M6_regime",   "use_wls": True},
     }
 
     results = {}
@@ -530,14 +523,6 @@ def run_full_pipeline(
         raise RuntimeError(f"model_features is empty for {ticker} — run feature_builder.py first")
 
     log.info(f"Loaded {len(df)} feature rows for modeling ({ticker})")
-
-    # --- Create interaction terms for regime model ---
-    if feature_has_enough_data(df, "high_vol_regime"):
-        df["har_d1_x_regime"] = df["har_d1"] * df["high_vol_regime"]
-        df["har_w_x_regime"] = df["har_w"] * df["high_vol_regime"]
-    else:
-        df["har_d1_x_regime"] = np.nan
-        df["har_w_x_regime"] = np.nan
 
     # --- Determine if GEX is available ---
     # Use continuous gex_normalized for richer signal than the deprecated binary gex_flag

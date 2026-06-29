@@ -274,18 +274,18 @@ def _banner(text: str, accent: str, bg: str) -> str:
             f'color:var(--text-secondary);">{text}</div>')
 
 
-def _ms_until_clock_boundary(period_seconds: int, now: datetime) -> int:
-    """Milliseconds from ``now`` until the next wall-clock multiple of ``period_seconds``.
+def _next_clock_boundary_ms(period_seconds: int, now: datetime) -> int:
+    """Epoch-milliseconds of the next wall-clock multiple of ``period_seconds``.
 
-    Aligns refreshes to the clock instead of to page-load time, e.g. a 300s
-    period fires on :00/:05/:10…:35/:40 and an 1800s period on :00/:30. Both
-    300 and 1800 divide an hour evenly, so anchoring to the top of the hour
-    keeps the cadence on round marks. Floored at 1s so a tick landing a hair
-    before a boundary doesn't trigger a near-instant double refresh.
+    Aligns refreshes to the clock instead of to page-load time: a 300s period
+    lands on :00/:05/…/:35/:40 and an 1800s period on :00/:30. Both divide an
+    hour evenly and NY is a whole-hour UTC offset, so epoch alignment equals
+    wall-clock alignment. Drives both the refresh interval and a per-boundary
+    component key (see the auto-refresh block in ``main``).
     """
-    secs_into_hour = now.minute * 60 + now.second + now.microsecond / 1e6
-    remaining = period_seconds - (secs_into_hour % period_seconds)
-    return max(int(remaining * 1000), 1000)
+    period_ms = period_seconds * 1000
+    now_ms = now.timestamp() * 1000
+    return (int(now_ms // period_ms) + 1) * period_ms
 
 
 def _build_em_strip(display_em, display_em_label, on_label, on_pts, on_pct,
@@ -726,12 +726,19 @@ def main():
     # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:
         from streamlit_autorefresh import st_autorefresh
-        # Recomputed every rerun: time to the next clock boundary in market
-        # time, so 5-min ticks land on :35/:40/:45 and 30-min on :00/:30.
-        st_autorefresh(
-            interval=_ms_until_clock_boundary(refresh_seconds, now_ny()),
-            key=f"auto_refresh_{refresh_seconds}",
-        )
+        _now_ms = now_ny().timestamp() * 1000
+        _period_ms = refresh_seconds * 1000
+        _boundary_ms = _next_clock_boundary_ms(refresh_seconds, now_ny())
+        _interval_ms = max(int(_boundary_ms - _now_ms), 1000)
+        # Encode the TARGET boundary in the key so the component remounts every
+        # tick. st_autorefresh uses a repeating window.setInterval and only
+        # re-arms when the interval *value* changes; in steady state consecutive
+        # ms-to-boundary values are ~equal, so without this the timer free-runs
+        # and drifts off the clock by the render latency each cycle. A
+        # per-boundary key forces a fresh, exactly-timed interval every tick.
+        _bucket = _boundary_ms // _period_ms
+        st_autorefresh(interval=_interval_ms,
+                       key=f"auto_refresh_{refresh_seconds}_{_bucket}")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,18 @@ def _cb_recent() -> None:
         st.session_state[ACTIVE_TICKER] = val
 
 
+def _cb_refresh_no_deselect() -> None:
+    """Keep the auto-refresh control single-select (radio-like).
+
+    ``st.segmented_control`` lets the user click the active pill to clear the
+    selection, which left the control showing nothing while the app silently
+    kept the old cadence. Snap an empty selection back to the previous choice so
+    only the explicit "Off" pill disables refresh.
+    """
+    if st.session_state.get("refresh_seg") is None:
+        st.session_state["refresh_seg"] = st.session_state.get("_refresh_last", "off")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Small HTML label helper (eyebrows match the .card-eyebrow look)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,13 +140,17 @@ def render_settings_controls(ticker: str, ticker_type: str,
 
     # ── Auto-refresh ──
     _eyebrow("Auto-refresh")
-    ref_sel = st.segmented_control(
+    # Seed once via session_state (not ``default=``) so the no-deselect callback
+    # can own the widget's value without fighting a per-run default.
+    if "refresh_seg" not in st.session_state:
+        st.session_state["refresh_seg"] = st.session_state.get("_refresh_last", "off")
+    st.segmented_control(
         "Auto-refresh", _REFRESH_TOKENS, selection_mode="single",
-        default=st.session_state.get("_refresh_last", "off"),
         format_func=lambda t: _REFRESH_LABELS[t],
         key="refresh_seg", label_visibility="collapsed",
+        on_change=_cb_refresh_no_deselect,
     )
-    refresh_token = ref_sel or st.session_state.get("_refresh_last", "off")
+    refresh_token = st.session_state["refresh_seg"] or "off"
     st.session_state["_refresh_last"] = refresh_token
 
     return exp_token, refresh_token, cal_start, cal_end

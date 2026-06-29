@@ -395,15 +395,50 @@ def _render_0dte_spread_finder_tab(
     feature_row = df_dfeat.iloc[-1]
 
     # ── Load daily HAR model ───────────────────────────────────────
+    # A missing or schema-incompatible fit is recoverable in-app: the daily
+    # features are already persisted (df_dfeat above), so run_daily_pipeline
+    # just re-runs the OLS fit and saves the current-schema specs to Postgres.
+    # This mirrors the weekly tab's "click Forecast to refit" and the cron's
+    # self-heal, so a SCHEMA_VERSION bump no longer dead-ends the tab on a
+    # manual shell command.
     try:
         payload = _cached_rf_load_model(model_choice, model_ticker)
     except Exception as e:
-        st.error(
-            f"Couldn't load daily model **{model_choice}** for "
-            f"`ticker={model_ticker}`: {e}. "
-            "Run `python bootstrap_range_finder.py --daily-only` to fit and "
-            "save the daily HAR specs."
+        from range_finder.model_persistence import IncompatibleModelError
+        if isinstance(e, IncompatibleModelError):
+            st.warning(
+                f"Saved daily model **{model_choice}** is from an older feature "
+                f"schema and can't be loaded safely — it needs a refit. ({e})"
+            )
+        else:
+            st.info(
+                f"No saved daily fit for **{model_choice}** yet "
+                f"(`ticker={model_ticker}` — XSP/SPY reuse the SPX fit)."
+            )
+        st.caption(
+            "Daily specs are normally refit by the Monday cron. You can refit "
+            "now from the persisted daily features:"
         )
+        if st.button(
+            "Refit daily models now", key=f"sf0_refit_{ticker}", type="primary",
+            help="Re-runs the daily HAR OLS over the saved feature rows and "
+                 "writes the current-schema fits to Postgres.",
+        ):
+            with st.spinner("Refitting daily HAR specs…"):
+                try:
+                    from range_finder.har_model_daily import run_daily_pipeline
+                    out = run_daily_pipeline(conn, preferred_model=model_choice)
+                    _cached_rf_load_model.clear()
+                    st.success(
+                        "Refit complete — saved "
+                        f"{sorted(out['results'].keys())}. Reloading…"
+                    )
+                    st.rerun(scope="fragment")
+                except Exception as fit_err:
+                    st.error(
+                        f"Refit failed: {fit_err}. As a fallback, run "
+                        "`python bootstrap_range_finder.py --daily-only`."
+                    )
         return
 
     result = payload["result"]

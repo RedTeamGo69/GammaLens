@@ -321,6 +321,31 @@ def _build_em_strip(display_em, display_em_label, on_label, on_pts, on_pct,
     )
 
 
+def _build_em_stamp(display_em_label, ticker, run_time, market_ctx) -> str:
+    """Timestamp caption beneath the EM strip.
+
+    Shows when the displayed EM straddle was frozen (daily / weekly / OpEx
+    horizons each have their own freeze key; Tomorrow / Custom are live
+    recomputes and have none) and always shows the last data-refresh time.
+    """
+    snap_key = {
+        "0DTE EM": f"em_snapshot_time_daily_{ticker}",
+        "Weekly EM": f"em_snapshot_time_weekly_{ticker}",
+        "OpEx-Cycle EM": f"em_snapshot_time_monthly_{ticker}",
+    }.get(display_em_label)
+    snap_time = st.session_state.get(snap_key) if snap_key else None
+
+    parts = []
+    if market_ctx == "live" and snap_time:
+        parts.append(
+            f'<span>📌 {esc(display_em_label)} captured at <b>{esc(snap_time)}</b> '
+            f'— frozen for the horizon; today’s move &amp; vol budget update live</span>'
+        )
+    parts.append(f'<span>⟳ Updated <b>{esc(run_time)}</b></span>')
+    inner = '<span class="sep">·</span>'.join(parts)
+    return f'<div class="em-stamp">{inner}</div>'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main app
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,7 +616,6 @@ def main():
         day_change_pts=change_pts, day_change_pct=change_pct,
         regime_label=(regime.get("regime", "") or "").upper(),
         regime_color=regime_color, regime_note=regime_note,
-        clock=data.run_time,
         live=is_market_open,
     )
     with header_box:
@@ -659,7 +683,7 @@ def main():
         classification.get("move_ratio"), classification,
     )
     with em_box:
-        st.html(em_strip)
+        st.html(em_strip + _build_em_stamp(display_em_label, ticker, data.run_time, market_ctx))
 
     # ── Main column: tab control + tab content ──
     with main_col:

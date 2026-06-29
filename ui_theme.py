@@ -317,6 +317,10 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
 .em-strip .cell {{ flex:1 1 120px; background:var(--bg-surface); padding:11px 15px; }}
 .em-strip .cl {{ font-size:9.5px; color:var(--text-dim); font-weight:700; letter-spacing:.06em; margin-bottom:4px; }}
 .em-strip .cv {{ font-family:var(--mono); font-size:17px; font-weight:600; }}
+/* Timestamps under the EM strip: when the EM straddle was frozen + last data refresh */
+.em-stamp {{ display:flex; flex-wrap:wrap; align-items:center; gap:5px 10px; font-family:var(--mono); font-size:10.5px; color:var(--text-dim); margin-top:7px; padding:0 2px; }}
+.em-stamp b {{ color:var(--text-muted); font-weight:600; }}
+.em-stamp .sep {{ color:var(--border); }}
 
 /* ── GEX html chart ── */
 .gex-wrap {{ background:var(--bg-surface); border:1px solid var(--border); border-radius:11px; padding:16px 16px 12px; flex:1; display:flex; flex-direction:column; }}
@@ -660,7 +664,7 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
     gap:6px 12px; margin-bottom:0;
   }}
   [data-testid="stMainBlockContainer"] {{ padding-top:var(--gl-header-h, 96px) !important; }}
-  .hdr-tagline, .hdr-note, .hdr-clock, .hdr-live {{ display:none !important; }}
+  .hdr-tagline, .hdr-note, .hdr-live {{ display:none !important; }}
   /* 2-row app-bar: brand + gear on row 1, ticker/price/regime on row 2 */
   .term-header > div:nth-child(3) {{ order:2; }}
   .term-header > div:nth-child(2) {{ order:3; flex-basis:100%; gap:6px 10px; }}
@@ -753,11 +757,13 @@ def render_header(
     regime_label: str,
     regime_color: str,
     regime_note: str,
-    clock: str,
     refresh_href: str | None = None,
     live: bool = True,
 ) -> str:
-    """Return the sticky header HTML (left logo, center spot, right status)."""
+    """Return the sticky header HTML (left logo, center spot, right status).
+
+    Note: the data-refresh time is shown in the labeled "⟳ Updated …" stamp
+    beneath the EM strip (see streamlit_app._build_em_stamp), not here."""
     chg_color = TOKENS["green"] if (day_change_pts or 0) >= 0 else TOKENS["red"]
     arrow = "▲" if (day_change_pts or 0) >= 0 else "▼"
     chg_txt = f"{arrow} {day_change_pts:+.1f}" if day_change_pts is not None else "—"
@@ -806,7 +812,6 @@ def render_header(
   </div>
   <div style="display:flex;align-items:center;gap:14px;">
     {live_html}
-    <span class="hdr-clock" style="font-family:var(--mono);font-size:10.5px;color:var(--text-dim);">{esc(clock)}</span>
     {refresh_html}
     <button class="gl-settings-toggle" type="button" aria-label="Settings">⚙</button>
   </div>

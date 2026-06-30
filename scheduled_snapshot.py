@@ -432,7 +432,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     from range_finder.spread_levels import build_spread_plan, log_spread_plan
     from phase1.ticker_config import (
         get_config, uses_own_har, has_single_name_earnings,
-        feature_source_ticker, price_scale_divisor,
+        feature_source_ticker,
     )
 
     cfg = get_config(ticker)
@@ -589,76 +589,35 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # 9:30 ET, so by the time this cron actually runs the daily bar is
     # almost always available. Fall back to `spot` / live VIX only if
     # the bar is still empty (which mostly happens when the workflow
-    # fires before Yahoo's first tick).
+    # fires before Yahoo's first tick). The capture + persist logic is shared
+    # with the UI mid-week self-heal (capture_and_save_monday_anchor) so the
+    # cron and the on-demand path can never drift apart.
     _logger.info("  Saving Monday open + VIX...")
     try:
-        session_date = run_now.date()
+        from range_finder.data_collector import capture_and_save_monday_anchor
 
-        def _daily_open(symbol: str):
-            try:
-                hist = yf.Ticker(symbol).history(period="5d")
-            except Exception as e:
-                _logger.warning(f"    yfinance fetch failed for {symbol}: {e}")
-                return None
-            if hist is None or hist.empty or "Open" not in hist.columns:
-                return None
-            # hist.index is tz-aware; matching on .date() dodges DST edges.
-            for ts, row in hist.iterrows():
-                if hasattr(ts, "date") and ts.date() == session_date:
-                    op = row.get("Open")
-                    if op is not None and not (isinstance(op, float) and op != op):
-                        return float(op)
-            return None
-
-        # Per-ticker daily-Open lookup. SPX uses ^GSPC (cash index). A scaled
-        # mini (XSP→SPX) reads its parent's yfinance symbol and divides
-        # by its scale_divisor. Own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) read their
-        # own symbol. The vol-proxy symbol comes from cfg.vol_proxy_yf — ^VIX for
-        # SPX/SPY/stocks, ^VXN for QQQ/NDX.
-        underlying_symbol = cfg["yf_symbol"]
-        underlying_open = _daily_open(underlying_symbol)
-        if underlying_open is not None:
-            monday_open = round(underlying_open / price_scale_divisor(ticker), 2)
-            open_source = f"{underlying_symbol} daily Open ({session_date})"
-        else:
-            monday_open = round(spot, 2)
-            open_source = "live parity spot (daily bar unavailable)"
-
-        vol_proxy_symbol = cfg["vol_proxy_yf"]
-        vol_proxy_open = _daily_open(vol_proxy_symbol)
-        if vol_proxy_open is not None:
-            monday_vix = round(vol_proxy_open, 2)
-            vix_source = f"{vol_proxy_symbol} daily Open ({session_date})"
-        else:
-            monday_vix = 18.0
-            try:
-                vp_hist = yf.Ticker(vol_proxy_symbol).history(period="5d")
-                if not vp_hist.empty:
-                    monday_vix = round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
-            except Exception:
-                pass
-            vix_source = f"live {vol_proxy_symbol} last close (daily Open unavailable)"
+        # Live vol-proxy last close as the VIX fallback for the rare case where
+        # the daily-Open bar isn't published yet at 9:30 (mirrors the prior
+        # inline behavior; the underlying falls back to `spot`).
+        _vix_fallback = None
+        try:
+            _vp_hist = yf.Ticker(cfg["vol_proxy_yf"]).history(period="5d")
+            if not _vp_hist.empty:
+                _vix_fallback = round(float(_vp_hist["Close"].dropna().iloc[-1]), 2)
+        except Exception:
+            pass
 
         days_since_monday = run_now.weekday()
         monday = run_now - timedelta(days=days_since_monday)
         week_start = monday.strftime("%Y-%m-%d")
 
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        conn.execute("""
-            INSERT INTO weekly_setup (week_start, ticker, monday_open, monday_vix, captured_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (week_start, ticker) DO UPDATE SET
-                monday_open = excluded.monday_open,
-                monday_vix  = excluded.monday_vix,
-                captured_at = excluded.captured_at
-        """, (week_start, ticker, monday_open, monday_vix, now_iso))
-        conn.commit()
-
+        monday_open, monday_vix, open_source = capture_and_save_monday_anchor(
+            conn, ticker, week_start, run_now.date(),
+            spot_fallback=spot, live_vix_fallback=_vix_fallback, cfg=cfg,
+        )
         _logger.info(
             f"  Monday open saved: {ticker}={monday_open:.2f} ({open_source}), "
-            f"VIX={monday_vix:.2f} ({vix_source})"
+            f"VIX={monday_vix:.2f}"
         )
     except Exception as e:
         _logger.warning(f"  Monday open/VIX save failed: {e}")

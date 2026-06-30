@@ -333,6 +333,116 @@ def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
 
 
 # =============================================================================
+# MONDAY ANCHOR  (weekly_setup freeze — shared by the Monday cron and the
+# UI mid-week self-heal)
+# =============================================================================
+# The weekly Spread Finder anchors every strike to Monday's daily-candle Open
+# (and the vol-proxy's Open as the frozen VIX). The Monday 9:30 ET cron captures
+# this for `today`; the UI calls the same code to retroactively capture *this
+# week's Monday* when the cron didn't run, so mid-week views stay locked instead
+# of drifting on live spot.
+
+def _daily_open_on(symbol: str, target_date) -> "float | None":
+    """Daily-candle Open for `symbol` on `target_date`, or None.
+
+    Scans a short recent window (yfinance ``period="5d"``) for the bar whose
+    date matches `target_date` — matching on ``.date()`` dodges tz/DST edges.
+    Returns None when that bar isn't published yet or the fetch fails. On
+    Tue-Thu the week's Monday is 1-3 sessions back, well inside the 5-day window.
+    """
+    try:
+        hist = yf.Ticker(symbol).history(period="5d")
+    except Exception as e:
+        log.warning(f"yfinance daily-open fetch failed for {symbol}: {e}")
+        return None
+    if hist is None or hist.empty or "Open" not in hist.columns:
+        return None
+    for ts, row in hist.iterrows():
+        if hasattr(ts, "date") and ts.date() == target_date:
+            op = row.get("Open")
+            if op is not None and not (isinstance(op, float) and op != op):
+                return float(op)
+    return None
+
+
+def save_weekly_setup(conn, ticker: str, week_start: str,
+                      monday_open: float, monday_vix: float) -> None:
+    """Upsert the frozen Monday open + VIX for (week_start, ticker)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn.execute("""
+        INSERT INTO weekly_setup (week_start, ticker, monday_open, monday_vix, captured_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (week_start, ticker) DO UPDATE SET
+            monday_open = excluded.monday_open,
+            monday_vix  = excluded.monday_vix,
+            captured_at = excluded.captured_at
+    """, (week_start, ticker, monday_open, monday_vix, now_iso))
+    conn.commit()
+
+
+def capture_and_save_monday_anchor(
+    conn,
+    ticker: str,
+    week_start: str,
+    target_date,
+    spot_fallback: "float | None" = None,
+    live_vix_fallback: "float | None" = None,
+    cfg: "dict | None" = None,
+) -> "tuple[float, float, str]":
+    """Capture `ticker`'s Monday daily-candle Open + vol-proxy Open and persist
+    them to ``weekly_setup``. Returns ``(monday_open, monday_vix, open_source)``.
+
+    `target_date` is the session whose daily Open is the weekly anchor — "today"
+    when the Monday cron runs, or "this week's Monday" when the UI self-heals a
+    missing capture mid-week. The underlying's Open is scaled by
+    ``price_scale_divisor(ticker)`` (XSP→SPX rides ^SPX /10); the vol proxy
+    (^VIX for most, ^VXN for QQQ/NDX) supplies the frozen VIX.
+
+    `cfg` lets a caller pass an already-resolved config (the UI's chain-derived
+    ``resolve_config`` for arbitrary tickers); when omitted we resolve via
+    ``get_config``. Falls back to `spot_fallback` / `live_vix_fallback` only when
+    yfinance has no daily bar for `target_date`.
+    """
+    from phase1.ticker_config import get_config, price_scale_divisor
+
+    cfg = cfg or get_config(ticker)
+    underlying_symbol = cfg.get("yf_symbol", "^GSPC")
+    vol_proxy_symbol = cfg.get("vol_proxy_yf", "^VIX")
+    scale = price_scale_divisor(ticker)
+
+    underlying_open = _daily_open_on(underlying_symbol, target_date)
+    if underlying_open is not None:
+        monday_open = round(underlying_open / scale, 2)
+        open_source = f"{underlying_symbol} daily Open ({target_date})"
+    elif spot_fallback is not None:
+        monday_open = round(float(spot_fallback), 2)
+        open_source = "live spot (daily bar unavailable)"
+    else:
+        raise RuntimeError(
+            f"No daily Open for {underlying_symbol} on {target_date} "
+            "and no spot fallback supplied"
+        )
+
+    vol_proxy_open = _daily_open_on(vol_proxy_symbol, target_date)
+    if vol_proxy_open is not None:
+        monday_vix = round(vol_proxy_open, 2)
+        vix_source = f"{vol_proxy_symbol} daily Open ({target_date})"
+    elif live_vix_fallback is not None:
+        monday_vix = round(float(live_vix_fallback), 2)
+        vix_source = f"live {vol_proxy_symbol} (daily Open unavailable)"
+    else:
+        monday_vix = 18.0
+        vix_source = "default 18.0 (no vol-proxy data)"
+
+    save_weekly_setup(conn, ticker, week_start, monday_open, monday_vix)
+    log.info(
+        f"[{ticker}] Monday anchor saved for {week_start}: "
+        f"open={monday_open:.2f} ({open_source}), vix={monday_vix:.2f} ({vix_source})"
+    )
+    return monday_open, monday_vix, open_source
+
+
+# =============================================================================
 # EARNINGS FLAGS (single-stock weekly gate)
 # =============================================================================
 

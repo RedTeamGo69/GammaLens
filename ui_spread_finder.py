@@ -206,6 +206,26 @@ def find_spread_finder_friday_exp(
     return candidates[0]
 
 
+def _chain_entry_to_quotes(entry: dict) -> dict:
+    """Convert a chain entry ({"calls": [...], "puts": [...]}, as returned by
+    TradierDataClient.get_chain_once or held in data.chain_cache) into the
+    strike -> {call_bid, call_ask, put_bid, put_ask} lookup that
+    build_spread_side / _snap_to_chain_strike expect. A $0.00 bid is a valid
+    quote (option worthless), so every listed strike is kept."""
+    quotes: dict = {}
+    for opt in entry.get("calls", []):
+        K = opt["strike"]
+        quotes.setdefault(K, {})
+        quotes[K]["call_bid"] = opt.get("bid", 0.0) or 0.0
+        quotes[K]["call_ask"] = opt.get("ask", 0.0) or 0.0
+    for opt in entry.get("puts", []):
+        K = opt["strike"]
+        quotes.setdefault(K, {})
+        quotes[K]["put_bid"] = opt.get("bid", 0.0) or 0.0
+        quotes[K]["put_ask"] = opt.get("ask", 0.0) or 0.0
+    return quotes
+
+
 def _build_chain_quotes_for_spreads(
     data: GEXData,
     ticker: str,
@@ -250,23 +270,53 @@ def _build_chain_quotes_for_spreads(
         # spreads off today's 0DTE chain).  Let the caller fall back to BSM.
         return {}, None
 
-    quotes: dict = {}  # strike -> {call_bid, call_ask, put_bid, put_ask}
+    return _chain_entry_to_quotes(entry), target_exp
 
-    for opt in entry.get("calls", []):
-        K = opt["strike"]
-        if K not in quotes:
-            quotes[K] = {}
-        quotes[K]["call_bid"] = opt.get("bid", 0.0) or 0.0
-        quotes[K]["call_ask"] = opt.get("ask", 0.0) or 0.0
 
-    for opt in entry.get("puts", []):
-        K = opt["strike"]
-        if K not in quotes:
-            quotes[K] = {}
-        quotes[K]["put_bid"] = opt.get("bid", 0.0) or 0.0
-        quotes[K]["put_ask"] = opt.get("ask", 0.0) or 0.0
+def _tradier_token() -> str:
+    """Tradier API token from secrets/env (mirrors streamlit_app.get_credentials)."""
+    import os
+    try:
+        tok = st.secrets.get("TRADIER_TOKEN", "")
+    except Exception:
+        tok = ""
+    return tok or os.environ.get("TRADIER_TOKEN", "")
 
-    return quotes, target_exp
+
+def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tuple[dict, str | None]:
+    """Fetch the Spread-Finder-planned-Friday chain for ONE ticker and build the
+    strike -> {bid/ask} lookup, so the multi-ticker Excel export snaps to the
+    SAME real listed strikes the live tab does.
+
+    Non-active export rows are built from persisted state and don't have the
+    active ticker's ``data.chain_cache``, so without this they round to the
+    nominal strike_increment — which drifts from the tradeable grid (e.g. AMD
+    557.5 on its $2.5 far-OTM grid vs a nominal 556 that isn't even listed).
+
+    Returns ``({}, None)`` on any failure (no token, no Friday listed, fetch
+    error) so the caller degrades cleanly to nominal/BSM strikes — exactly
+    today's behavior — instead of blocking the export.
+    """
+    token = _tradier_token()
+    if not token:
+        return {}, None
+    try:
+        from streamlit_app import get_expirations_cached
+        avail = get_expirations_cached(token, ticker) or []
+    except Exception:
+        avail = []
+    target_exp = find_spread_finder_friday_exp(avail, ref_date=ref_date)
+    if not target_exp:
+        return {}, None
+    try:
+        from phase1.data_client import TradierDataClient
+        entry = TradierDataClient(token=token).get_chain_once(ticker, target_exp)
+    except Exception:
+        return {}, None
+    if not entry or entry.get("status") != "ok":
+        return {}, None
+    quotes = _chain_entry_to_quotes(entry)
+    return (quotes, target_exp) if quotes else ({}, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -510,6 +560,14 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
         except Exception:
             wem = None
 
+        # Live Friday chain so the export snaps to the SAME real listed strikes
+        # the on-screen tab does — nominal increment rounding otherwise drifts
+        # from the tradeable grid (e.g. AMD 556 nominal vs 557.5 on its $2.5
+        # far-OTM grid). Degrades to nominal strikes on any failure.
+        chain_quotes, chain_exp = _export_chain_quotes(
+            ticker, pd.Timestamp(week_start).date()
+        )
+
         forecast = rf_forecast_next_week(
             payload["result"], feature_row, payload["feature_cols"],
             ref, alpha=RF_PI_ALPHA,
@@ -520,7 +578,7 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
         )
         tiers = rf_build_spread_tiers(
             forecast=forecast, plan=plan, spx_ref=ref, vix_level=vix,
-            chain_quotes=None, ticker=ticker, weekly_em=wem,
+            chain_quotes=chain_quotes or None, ticker=ticker, weekly_em=wem,
         )
 
         out["ref"] = round(float(ref), 2)
@@ -536,6 +594,7 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             bits.append(f"buf {plan.buffer_pct * 100:.2f}%")
         if plan.recommended_width:
             bits.append(f"wing {plan.recommended_width:g}")
+        bits.append(f"chain {chain_exp}" if chain_exp else "nominal strikes")
         out["notes"] = bits + out["notes"]
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"

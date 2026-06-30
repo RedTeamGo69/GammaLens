@@ -184,3 +184,48 @@ def test_tiers_em_floor_moves_only_inside_strikes():
             assert t.model_call_short < 7549.0
         if t.model_put_short is not None:
             assert t.model_put_short > 7251.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nominal increment vs real chain grid — the AMD export-vs-screen mismatch
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _amd_forecast():
+    # ~Effective 12.4% range on AMD; mirrors the reported screenshot.
+    return {
+        "point_pct": 0.0748, "lower_pct": 0.0461, "upper_pct": 0.1213,
+        "vix_implied_pct": 0.0373, "model_vs_vix": 0.0748 - 0.0373,
+        "confidence_level": 80, "spx_ref_close": 522.84,
+    }
+
+
+# AMD lists a $2.5 grid far OTM: 556 is NOT listed, 557.5 is; 490 is on-grid.
+AMD_CHAIN = _chain(round(450 + 2.5 * i, 2) for i in range(int((600 - 450) / 2.5) + 1))
+
+
+def test_amd_export_chain_snaps_call_to_listed_strike():
+    # The reported bug: with no chain, AMD's nominal strike_increment=1 rounds
+    # the Effective call short to 556 (not a listed AMD strike); the live chain
+    # snaps it to the tradeable 557.5 — exactly the screen vs export gap. Now
+    # the export passes a chain, so both land on 557.5. The put side (490) is
+    # already on the grid, so it agrees either way.
+    ref = 522.84
+    fc = _amd_forecast()
+    plan = build_spread_plan(
+        forecast=fc, feature_row=None, week_start="2026-06-29",
+        vix_level=40.0, ticker="AMD", chain_quotes=None,
+    )
+    nochain = build_spread_tiers(
+        forecast=fc, plan=plan, spx_ref=ref, vix_level=40.0,
+        chain_quotes=None, ticker="AMD",
+    )
+    chained = build_spread_tiers(
+        forecast=fc, plan=plan, spx_ref=ref, vix_level=40.0,
+        chain_quotes=AMD_CHAIN, ticker="AMD",
+    )
+    eff_nc = next(t for t in nochain if t.label.startswith("Effective"))
+    eff_c = next(t for t in chained if t.label.startswith("Effective"))
+
+    assert eff_nc.call_short == 556.0      # nominal increment rounding
+    assert eff_c.call_short == 557.5       # snapped to the real listed strike
+    assert eff_nc.put_short == eff_c.put_short == 490.0  # already on the grid

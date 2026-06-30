@@ -33,3 +33,7 @@ env/
 
 # Range finder generated files
 range_finder/models/*.pkl
+
+# Runtime caches (rate-limit state, etc.) — churn on every run, not source
+*.rate_cache.json
+phase1/.rate_cache.json

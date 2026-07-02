@@ -158,6 +158,39 @@ class TradierDataClient:
             return []
         return sorted([e] if isinstance(e, str) else e)
 
+    def get_history(self, symbol, interval="daily", start=None, end=None):
+        """Historical OHLCV bars from /markets/history.
+
+        ``interval`` is one of daily / weekly / monthly. ``start`` / ``end``
+        are YYYY-MM-DD strings. Returns a list of day dicts
+        (``{"date", "open", "high", "low", "close", "volume"}``) sorted the
+        way Tradier returns them (ascending). Weekly bars are labeled with
+        the week's Monday (verified against live data, incl. holiday
+        Mondays). ``{"history": null}`` (unknown symbol / no entitlement /
+        empty window) degrades to ``[]`` rather than raising, mirroring
+        get_expirations.
+        """
+        params = {"symbol": symbol, "interval": interval,
+                  "session_filter": "all"}
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        r = requests.get(
+            f"{self.base_url}/markets/history",
+            headers=self.tradier_headers(),
+            params=params,
+            timeout=30,
+        )
+        r.raise_for_status()
+        hist = r.json().get("history")
+        if not hist or not isinstance(hist, dict):
+            return []
+        days = hist.get("day")
+        if not days:
+            return []
+        return days if isinstance(days, list) else [days]
+
     def validate_ticker(self, symbol):
         """Validate that `symbol` is a real, optionable Tradier instrument.
 

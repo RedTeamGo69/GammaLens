@@ -118,6 +118,15 @@ class PGCursor:
     def description(self):
         return self._cur.description
 
+    @property
+    def rowcount(self):
+        """Rows affected by the last execute (UPDATE/DELETE/INSERT).
+
+        psycopg2 and sqlite3 agree on the semantics cboe_data.backfill_vix1d
+        relies on: an UPDATE whose WHERE matches nothing reports 0.
+        """
+        return self._cur.rowcount
+
     def close(self):
         return self._cur.close()
 
@@ -448,12 +457,19 @@ def init_all_tables(conn) -> None:
     """)
 
     # --- spread_log ---
+    # The forecast-vs-realized record behind the PI-coverage calibration
+    # audit (range_finder/calibration.py): the Monday cron logs the plan
+    # (model_name + point/lower/upper forecast bounds + strikes), then the
+    # next Monday's run scores the expired week's actual high/low/range.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS spread_log (
-            week_start          TEXT PRIMARY KEY,
+            week_start          TEXT NOT NULL,
+            ticker              TEXT NOT NULL DEFAULT 'SPX',
+            model_name          TEXT,
             generated_at        TEXT,
             spx_ref_close       REAL,
             point_pct           REAL,
+            lower_pct           REAL,
             upper_pct           REAL,
             effective_range_pct REAL,
             call_short          REAL,
@@ -472,8 +488,42 @@ def init_all_tables(conn) -> None:
             put_breached        INTEGER,
             outcome             TEXT,
             pnl_pts             REAL,
-            updated_at          TEXT
+            updated_at          TEXT,
+            PRIMARY KEY (week_start, ticker)
         )
+    """)
+
+    # Migration: calibration columns for deploys that pre-date them.
+    for col, ctype in [
+        ("model_name", "TEXT"),
+        ("lower_pct", "REAL"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE spread_log ADD COLUMN IF NOT EXISTS {col} {ctype}")
+        except Exception:
+            pass
+
+    # Migration: add ticker on legacy single-PK deploys and rebuild the PK
+    # (same pattern as model_features/gex_inputs above). Legacy rows become
+    # ticker='SPX' — accurate, every pre-migration plan was SPX.
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE spread_log ADD COLUMN ticker TEXT NOT NULL DEFAULT 'SPX';
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$
+    """)
+    cur.execute("""
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'spread_log_pkey'
+                  AND conrelid = 'spread_log'::regclass
+                  AND COALESCE(array_length(conkey, 1), 0) = 1
+            ) THEN
+                ALTER TABLE spread_log DROP CONSTRAINT spread_log_pkey;
+                ALTER TABLE spread_log ADD PRIMARY KEY (week_start, ticker);
+            END IF;
+        END $$
     """)
 
     # --- saved_models (Postgres BYTEA — replaces pickle files) ---
@@ -538,6 +588,22 @@ def init_all_tables(conn) -> None:
         )
     """)
 
+    # --- interval_calibration (conformal λ per ticker/spec) ---
+    # Written ONLY by the offline adoption gate (walkforward --conformal
+    # --persist); read by conformal.maybe_apply_conformal, which is a no-op
+    # unless conformal.CONFORMAL_ENABLED is flipped on. See conformal.py.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS interval_calibration (
+            ticker          TEXT NOT NULL,
+            model_name      TEXT NOT NULL,
+            lambda          REAL NOT NULL,
+            n_obs           INTEGER,
+            method          TEXT,
+            updated_at      TEXT,
+            PRIMARY KEY (ticker, model_name)
+        )
+    """)
+
     # =========================================================================
     # 0DTE / daily-cadence tables (separate from the weekly stack above so the
     # weekly path stays byte-for-byte unchanged). Only SPX rows are populated
@@ -547,9 +613,12 @@ def init_all_tables(conn) -> None:
     # =========================================================================
 
     # --- daily_spx — daily SPX OHLC + VIX + VIX1D ---
-    # VIX1D only exists on yfinance from ~2022-04-25, so pre-2022 rows have
-    # NULL vix1d_close. Models that require it (M2_daily_vix / M3_daily_extended)
-    # auto-skip those rows via feature_has_enough_data.
+    # vix1d_close is Cboe-primary (official history back to 2022-05-13 via
+    # cboe_data.py; yfinance's ^VIX1D only starts at the 2023-04-24 launch
+    # and remains the seam-filler/fallback). Rows before 2022-05-13 have
+    # NULL vix1d_close — no VIX1D existed. Models that require it
+    # (M2_daily_vix / M3_daily_extended) train on the non-null subset via
+    # time_series_split's dropna.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS daily_spx (
             session_date    TEXT NOT NULL,
@@ -606,6 +675,30 @@ def init_all_tables(conn) -> None:
             gex_normalized       REAL,
             updated_at           TEXT,
             PRIMARY KEY (session_date, ticker)
+        )
+    """)
+
+    # --- forecast_log_daily — 0DTE forecast-vs-realized calibration log ---
+    # The lean successor to the removed spread_log_daily: forecast BOUNDS
+    # only (no strikes — that bloat made the old table write-only), written
+    # once per market day by the daily cron, scored the next morning from
+    # daily_spx.range_pct already in the DB (zero network), and READ by
+    # calibration.daily_pi_coverage. PK includes model_name so a spec change
+    # keeps series separable.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS forecast_log_daily (
+            session_date     TEXT NOT NULL,
+            ticker           TEXT NOT NULL DEFAULT 'SPX',
+            model_name       TEXT NOT NULL,
+            point_pct        REAL,
+            lower_pct        REAL,
+            upper_pct        REAL,
+            spx_ref          REAL,
+            vix1d_close      REAL,
+            generated_at     TEXT,
+            actual_range_pct REAL,
+            scored_at        TEXT,
+            PRIMARY KEY (session_date, ticker, model_name)
         )
     """)
 

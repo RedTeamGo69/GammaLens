@@ -101,32 +101,48 @@ def fetch_spx_vix(years: int = HISTORY_YEARS) -> pd.DataFrame:
     end   = datetime.today()
     start = end - timedelta(weeks=years * 52 + 4)   # small buffer for alignment
 
+    # SPX weekly bars: Tradier primary (authenticated broker API), yfinance
+    # fallback — see bar_sources for the validation + fallback logic.
     log.info(f"Fetching SPX weekly OHLC from {start.date()} to {end.date()}")
-    spx_raw = yf.download("^GSPC", start=start, end=end, interval="1wk", progress=False, timeout=60)
+    from range_finder.bar_sources import fetch_weekly_bars
+    spx_bars = fetch_weekly_bars("^GSPC", "SPX", years, "SPX")
+    if spx_bars.empty:
+        raise RuntimeError("no weekly SPX bars from any source — "
+                           "market may be closed or network issue")
+    spx = spx_bars[["open", "high", "low", "close", "volume"]].copy()
+    spx.columns = ["spx_open", "spx_high", "spx_low", "spx_close", "spx_volume"]
 
-    if spx_raw.empty:
-        raise RuntimeError("yfinance returned empty SPX data — market may be closed or network issue")
-
+    # VIX weekly bars: yfinance seeds the frame; the Cboe overlay below is
+    # the primary source. An empty yfinance response degrades to all-NaN
+    # columns for Cboe to fill rather than killing the whole fetch.
     log.info(f"Fetching VIX weekly OHLC from {start.date()} to {end.date()}")
     vix_raw = yf.download("^VIX", start=start, end=end, interval="1wk", progress=False, timeout=60)
-
-    # yfinance sometimes returns a MultiIndex — flatten it
-    if isinstance(spx_raw.columns, pd.MultiIndex):
-        spx_raw.columns = spx_raw.columns.get_level_values(0)
     if isinstance(vix_raw.columns, pd.MultiIndex):
         vix_raw.columns = vix_raw.columns.get_level_values(0)
 
-    # Rename and prefix
-    spx = spx_raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-    spx.columns = ["spx_open", "spx_high", "spx_low", "spx_close", "spx_volume"]
+    vix_cols = ["vix_open", "vix_high", "vix_low", "vix_close"]
+    if not vix_raw.empty and "Close" in vix_raw.columns:
+        vix = vix_raw[["Open", "High", "Low", "Close"]].copy()
+        vix.columns = vix_cols
+        vix.index = pd.to_datetime(vix.index).normalize()
+    else:
+        log.warning("yfinance VIX weekly returned empty — relying on Cboe overlay")
+        vix = pd.DataFrame(columns=vix_cols)
 
-    vix = vix_raw[["Open", "High", "Low", "Close"]].copy()
-    vix.columns = ["vix_open", "vix_high", "vix_low", "vix_close"]
-
-    # Merge on date index
-    df = spx.join(vix, how="inner")
+    # Merge on date index (left join: SPX bars define the weeks; VIX columns
+    # may be NaN until the Cboe overlay fills them)
+    df = spx.join(vix, how="left")
     df.index.name = "week_start"
     df.index = pd.to_datetime(df.index).normalize()   # strip time component
+
+    # Overlay official Cboe VIX weekly bars (primary source; the publisher's
+    # own data). The yfinance values above remain as the seam-filler for the
+    # in-progress week and as the fallback when the Cboe CDN is unreachable.
+    from range_finder.cboe_data import merge_cboe_weekly_ohlc
+    df = merge_cboe_weekly_ohlc(df, "VIX", {
+        "open": "vix_open", "high": "vix_high",
+        "low": "vix_low",   "close": "vix_close",
+    })
 
     # Derived range metrics — BUG FIX: use math.log directly instead of inline __import__
     df["range_pts"]   = df["spx_high"] - df["spx_low"]
@@ -223,30 +239,31 @@ def fetch_underlying_weekly(
     end   = datetime.today()
     start = end - timedelta(weeks=years * 52 + 4)
 
+    # Underlying weekly bars: Tradier primary, yfinance fallback. The app
+    # ticker IS the Tradier symbol for everything that reaches this fetcher
+    # (QQQ/AMZN/AMD/... — SPX/XSP ride weekly_spx, and dynamic tickers are
+    # validated against Tradier before they're added).
     log.info(f"[{ticker}] Fetching weekly OHLC ({yf_symbol}) {start.date()} → {end.date()}")
-    raw = yf.download(yf_symbol, start=start, end=end, interval="1wk",
-                      progress=False, timeout=60)
-    if raw.empty:
+    from range_finder.bar_sources import fetch_weekly_bars
+    base = fetch_weekly_bars(yf_symbol, ticker, years, ticker)
+    if base.empty:
         raise RuntimeError(
-            f"yfinance returned empty data for {yf_symbol} ({ticker}) — "
+            f"no weekly bars for {yf_symbol} ({ticker}) from any source — "
             "market closed, network issue, or unsupported symbol."
         )
+    base = base[["open", "high", "low", "close", "volume"]].copy()
 
     log.info(f"[{ticker}] Fetching weekly vol proxy ({vol_proxy_yf})")
     vp_raw = yf.download(vol_proxy_yf, start=start, end=end, interval="1wk",
                          progress=False, timeout=60)
-
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
     if isinstance(vp_raw.columns, pd.MultiIndex):
         vp_raw.columns = vp_raw.columns.get_level_values(0)
-
-    base = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-    base.columns = ["open", "high", "low", "close", "volume"]
 
     if not vp_raw.empty:
         vp = vp_raw[["Open", "High", "Low", "Close"]].copy()
         vp.columns = ["vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"]
+        # base comes from bar_sources pre-normalized — align vp before joining
+        vp.index = pd.to_datetime(vp.index).normalize()
         df = base.join(vp, how="left")
     else:
         log.warning(f"[{ticker}] vol proxy {vol_proxy_yf} returned empty — vol_proxy_* will be NaN")
@@ -256,6 +273,18 @@ def fetch_underlying_weekly(
 
     df.index.name = "week_start"
     df.index = pd.to_datetime(df.index).normalize()
+
+    # Overlay official Cboe weekly bars for the vol proxy where one exists
+    # (^VIX -> VIX, ^VXN -> VXN, ...). Note VXN does NOT quote on Tradier, so
+    # for QQQ/NDX this Cboe series is the only non-yfinance source. yfinance
+    # values above remain the seam-filler / fallback.
+    from range_finder.cboe_data import YF_TO_CBOE_INDEX, merge_cboe_weekly_ohlc
+    cboe_index = YF_TO_CBOE_INDEX.get(vol_proxy_yf)
+    if cboe_index:
+        df = merge_cboe_weekly_ohlc(df, cboe_index, {
+            "open": "vol_proxy_open", "high": "vol_proxy_high",
+            "low": "vol_proxy_low",   "close": "vol_proxy_close",
+        })
 
     df["range_pts"]   = df["high"] - df["low"]
     df["range_pct"]   = df["range_pts"] / df["open"]
@@ -685,13 +714,18 @@ def fetch_daily_spx_vix(years: int = 4) -> pd.DataFrame:
     end   = datetime.today()
     start = end - timedelta(days=int(years * 365 + 30))
 
+    # SPX daily bars: Tradier primary, yfinance fallback (bar_sources).
     log.info(f"Fetching daily SPX OHLC from {start.date()} to {end.date()}")
-    spx_raw = yf.download("^GSPC", start=start, end=end, interval="1d",
-                          progress=False, timeout=60)
-    if spx_raw.empty:
-        raise RuntimeError("yfinance returned empty daily SPX data — "
+    from range_finder.bar_sources import fetch_daily_bars
+    spx_bars = fetch_daily_bars("^GSPC", "SPX", years, "SPX")
+    if spx_bars.empty:
+        raise RuntimeError("no daily SPX bars from any source — "
                            "market may be closed or network issue")
+    spx = spx_bars[["open", "high", "low", "close"]].copy()
+    spx.columns = ["spx_open", "spx_high", "spx_low", "spx_close"]
 
+    # VIX / VIX1D daily closes: yfinance seeds the frame; the Cboe overlay
+    # below is the primary source and fills anything yfinance missed.
     log.info("Fetching daily VIX closes")
     vix_raw = yf.download("^VIX", start=start, end=end, interval="1d",
                           progress=False, timeout=60)
@@ -705,12 +739,8 @@ def fetch_daily_spx_vix(years: int = 4) -> pd.DataFrame:
             raw.columns = raw.columns.get_level_values(0)
         return raw
 
-    spx_raw = _flatten(spx_raw)
     vix_raw = _flatten(vix_raw)
     vix1d_raw = _flatten(vix1d_raw)
-
-    spx = spx_raw[["Open", "High", "Low", "Close"]].copy()
-    spx.columns = ["spx_open", "spx_high", "spx_low", "spx_close"]
 
     vix = vix_raw[["Close"]].copy() if not vix_raw.empty and "Close" in vix_raw.columns \
         else pd.DataFrame(columns=["vix_close"])
@@ -725,10 +755,25 @@ def fetch_daily_spx_vix(years: int = 4) -> pd.DataFrame:
                     "(expected pre-2022 or on network errors).")
         vix1d = pd.DataFrame(columns=["vix1d_close"])
 
+    # spx comes from bar_sources pre-normalized — align the yfinance frames
+    # before joining so dates actually match.
+    for frame in (vix, vix1d):
+        if not frame.empty:
+            frame.index = pd.to_datetime(frame.index).normalize()
     df = spx.join(vix, how="left")
     df = df.join(vix1d, how="left")
     df.index.name = "session_date"
     df.index = pd.to_datetime(df.index).normalize()
+
+    # Overlay official Cboe closes for VIX and VIX1D (primary source).
+    # VIX1D is the one that matters most: yfinance's ^VIX1D series only starts
+    # at the 2023-04-24 index launch, but Cboe published reconstructed values
+    # back to 2022-05-13 — this fills that gap AND wins over yfinance wherever
+    # both have the session. The yfinance values above remain as the
+    # seam-filler (e.g. today's row before Cboe posts EOD) and as the fallback
+    # when the Cboe CDN is unreachable.
+    from range_finder.cboe_data import merge_cboe_closes
+    df = merge_cboe_closes(df, {"vix_close": "VIX", "vix1d_close": "VIX1D"})
 
     df["range_pts"]  = df["spx_high"] - df["spx_low"]
     df["range_pct"]  = df["range_pts"] / df["spx_open"]
@@ -795,12 +840,40 @@ def get_daily_spx(conn, ticker: str = "SPX", limit: int = None) -> pd.DataFrame:
     return df
 
 
+def _tradier_token() -> str:
+    """Resolve the Tradier token from Streamlit secrets or environment
+    (same pattern as FRED_API_KEY above). Empty string when unset."""
+    token = ""
+    try:
+        import streamlit as st
+        token = st.secrets.get("TRADIER_TOKEN", "")
+    except Exception:
+        pass
+    return token or os.environ.get("TRADIER_TOKEN", "")
+
+
 def fetch_live_vix1d() -> float | None:
-    """Return a single live ^VIX1D quote, or None on failure.
+    """Return a single live VIX1D quote, or None on failure.
+
+    Tradier /markets/quotes is the primary source (verified: VIX1D quotes
+    live there; it's the app's authenticated broker API, unlike the yfinance
+    scraper). yfinance remains the fallback for when the token is missing or
+    Tradier has an outage.
 
     No DB write — this is the intraday-refresh input for the 0DTE finder UI.
     Cached at the Streamlit fragment level by the caller.
     """
+    token = _tradier_token()
+    if token:
+        try:
+            from phase1.data_client import TradierDataClient
+            spot = TradierDataClient(token).get_spot_price("VIX1D")
+            if spot and spot > 0:
+                return float(spot)
+            log.warning("Tradier VIX1D quote empty — falling back to yfinance")
+        except Exception as e:
+            log.warning(f"Tradier VIX1D quote failed: {e} — falling back to yfinance")
+
     try:
         h = yf.Ticker("^VIX1D").history(period="5d")
         if h.empty:

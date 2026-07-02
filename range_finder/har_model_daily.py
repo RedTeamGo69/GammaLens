@@ -30,6 +30,7 @@ from range_finder.har_model import (
     feature_has_enough_data,
     compare_models,
     PI_ALPHA,
+    DEFAULT_MIN_DAYS_FOR_FIT,
 )
 from range_finder.model_persistence import save_model, load_model
 from range_finder.feature_builder_daily import get_daily_features
@@ -48,12 +49,22 @@ MODEL_SPECS_DAILY = {
     # safe fallback when VIX1D rows are absent (pre-2022) or sparse.
     "M1_daily_baseline": HAR_CORE_DAILY,
 
-    # M2 adds VIX (full history) + VIX1D + VIX1D-implied range. Requires
-    # enough VIX1D history (~12 months) to clear feature_has_enough_data.
+    # M2 adds VIX (full history) + VIX1D. Requires enough VIX1D history to
+    # clear feature_has_enough_data.
+    #
+    # vix1d_implied_range was dropped from M2/M3 (2026-07) for the same reason
+    # vix_implied_range was dropped from the weekly specs (2026-06): it is a
+    # deterministic rescale of vix1d_close (vix1d_close / sqrt(252) / 100 *
+    # Brownian range factor), so corr(vix1d_close, vix1d_implied_range) = 1.0
+    # exactly. Carrying both made the design matrix singular (statsmodels
+    # "covariance of constraints does not have full rank" on every fit) with
+    # NO predictive benefit — the columns span the same space, so OLS
+    # predictions are identical either way. vix1d_implied_range is still
+    # computed/stored and used OUTSIDE the regression (forecast_next_session's
+    # IV-side comparison / VRP display), it is just no longer a model feature.
     "M2_daily_vix": HAR_CORE_DAILY + [
         "vix_close",
         "vix1d_close",
-        "vix1d_implied_range",
     ],
 
     # M3 adds short-term HV, return lags, and day-of event flags. Needs the
@@ -61,7 +72,6 @@ MODEL_SPECS_DAILY = {
     "M3_daily_extended": HAR_CORE_DAILY + [
         "vix_close",
         "vix1d_close",
-        "vix1d_implied_range",
         "hv5",
         "spx_return_lag1",
         "abs_return_lag1",
@@ -132,7 +142,10 @@ def run_daily_pipeline(conn, preferred_model: str = "M2_daily_vix",
     all_results: dict[str, tuple] = {}
 
     for spec_name, feat_cols in MODEL_SPECS_DAILY.items():
-        available = [c for c in feat_cols if feature_has_enough_data(df, c)]
+        # Daily cadence: require ~half a trading year of non-null rows per
+        # feature (the weekly default of 20 would mean just one month here).
+        available = [c for c in feat_cols
+                     if feature_has_enough_data(df, c, min_obs=DEFAULT_MIN_DAYS_FOR_FIT)]
         if len(available) < len(feat_cols):
             missing = set(feat_cols) - set(available)
             log.warning(f"{spec_name}: dropping missing features {sorted(missing)}")

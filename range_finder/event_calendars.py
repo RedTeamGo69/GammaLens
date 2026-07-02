@@ -14,8 +14,23 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 
-# Known 2020-2026 FOMC meeting dates
+# Known 2016-2026 FOMC meeting dates (statement/decision days).
+# 2016-2019 were backfilled (2026-07) for the history-depth experiment —
+# the training window can now extend to ~10y without event_count silently
+# reading 0 on pre-2020 weeks.
 FOMC_DATES = [
+    # 2016
+    "2016-01-27","2016-03-16","2016-04-27","2016-06-15","2016-07-27",
+    "2016-09-21","2016-11-02","2016-12-14",
+    # 2017
+    "2017-02-01","2017-03-15","2017-05-03","2017-06-14","2017-07-26",
+    "2017-09-20","2017-11-01","2017-12-13",
+    # 2018
+    "2018-01-31","2018-03-21","2018-05-02","2018-06-13","2018-08-01",
+    "2018-09-26","2018-11-08","2018-12-19",
+    # 2019
+    "2019-01-30","2019-03-20","2019-05-01","2019-06-19","2019-07-31",
+    "2019-09-18","2019-10-30","2019-12-11",
     # 2020
     "2020-01-29","2020-03-03","2020-03-15","2020-04-29","2020-06-10",
     "2020-07-29","2020-09-16","2020-11-05","2020-12-16",
@@ -42,6 +57,26 @@ FOMC_DATES = [
 ]
 
 CPI_DATES = [
+    # 2016-2019: official monthly-release dates per the FRED release
+    # calendar (release_id=10), verified 2026-07. The annual
+    # seasonal-revision releases (e.g. 2017-02-13, 2019-02-11) are
+    # deliberately excluded — only the 8:30 ET monthly prints move vol.
+    # 2016
+    "2016-01-20","2016-02-19","2016-03-16","2016-04-14","2016-05-17",
+    "2016-06-16","2016-07-15","2016-08-16","2016-09-16","2016-10-18",
+    "2016-11-17","2016-12-15",
+    # 2017
+    "2017-01-18","2017-02-15","2017-03-15","2017-04-14","2017-05-12",
+    "2017-06-14","2017-07-14","2017-08-11","2017-09-14","2017-10-13",
+    "2017-11-15","2017-12-13",
+    # 2018
+    "2018-01-12","2018-02-14","2018-03-13","2018-04-11","2018-05-10",
+    "2018-06-12","2018-07-12","2018-08-10","2018-09-13","2018-10-11",
+    "2018-11-14","2018-12-12",
+    # 2019
+    "2019-01-11","2019-02-13","2019-03-12","2019-04-10","2019-05-10",
+    "2019-06-12","2019-07-11","2019-08-13","2019-09-12","2019-10-10",
+    "2019-11-13","2019-12-11",
     # 2020
     "2020-01-14","2020-02-13","2020-03-11","2020-04-10","2020-05-12",
     "2020-06-10","2020-07-14","2020-08-12","2020-09-11","2020-10-13",
@@ -74,6 +109,24 @@ CPI_DATES = [
 ]
 
 NFP_DATES = [
+    # 2016-2019: official Employment Situation release dates per the FRED
+    # release calendar (release_id=50), verified 2026-07.
+    # 2016
+    "2016-01-08","2016-02-05","2016-03-04","2016-04-01","2016-05-06",
+    "2016-06-03","2016-07-08","2016-08-05","2016-09-02","2016-10-07",
+    "2016-11-04","2016-12-02",
+    # 2017
+    "2017-01-06","2017-02-03","2017-03-10","2017-04-07","2017-05-05",
+    "2017-06-02","2017-07-07","2017-08-04","2017-09-01","2017-10-06",
+    "2017-11-03","2017-12-08",
+    # 2018
+    "2018-01-05","2018-02-02","2018-03-09","2018-04-06","2018-05-04",
+    "2018-06-01","2018-07-06","2018-08-03","2018-09-07","2018-10-05",
+    "2018-11-02","2018-12-07",
+    # 2019
+    "2019-01-04","2019-02-01","2019-03-08","2019-04-05","2019-05-03",
+    "2019-06-07","2019-07-05","2019-08-02","2019-09-06","2019-10-04",
+    "2019-11-01","2019-12-06",
     # 2020
     "2020-01-10","2020-02-07","2020-03-06","2020-04-03","2020-05-08",
     "2020-06-05","2020-07-02","2020-08-07","2020-09-04","2020-10-02",
@@ -162,13 +215,14 @@ def build_event_flags(conn) -> int:
     for d in NFP_DATES:
         mark(d, "has_nfp")
 
-    # Monthly opex: 3rd Friday of each month, 2020 through the END of next
-    # year. 3rd Fridays are deterministic, so flagging future weeks is
+    # Monthly opex: 3rd Friday of each month, 2016 through the END of next
+    # year (2016+ matches the backfilled FOMC/CPI/NFP calendars above).
+    # 3rd Fridays are deterministic, so flagging future weeks is
     # exact — the old `third_friday <= today` filter meant the UPCOMING
     # opex week (the one the HAR forecast and buffer logic actually care
     # about) was never flagged until after it had already passed.
     today = datetime.today()
-    for year in range(2020, today.year + 2):
+    for year in range(2016, today.year + 2):
         for month in range(1, 13):
             first_day = datetime(year, month, 1)
             first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)

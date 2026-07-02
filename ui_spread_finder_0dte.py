@@ -81,6 +81,19 @@ def _today_iso(ref_dt: datetime = None) -> str:
     return (ref_dt or now_ny()).strftime("%Y-%m-%d")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_daily_pi_coverage(ticker: str, model_name: str) -> dict:
+    """Empirical 0DTE PI coverage from scored forecast_log_daily rows.
+
+    One aggregate SELECT cached 10 min — the table gains one row per market
+    day (cron step 4), so anything fresher is wasted Neon compute. See
+    range_finder/calibration.py.
+    """
+    from range_finder.calibration import daily_pi_coverage
+    return daily_pi_coverage(_get_rf_conn(), ticker=ticker,
+                             model_name=model_name)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_daily_features(_conn, ticker: str = "SPX"):
     """Daily feature matrix for one ticker, cached for 5 minutes.
@@ -449,6 +462,12 @@ def _render_0dte_spread_finder_tab(
         forecast = forecast_next_session(
             result, feature_row, feature_cols, spx_ref_input,
         )
+        # Optional conformal interval correction — NO-OP unless
+        # conformal.CONFORMAL_ENABLED is on AND a λ row exists for the
+        # SPX-trained spec (see range_finder/conformal.py). Keyed on the
+        # model ticker (SPX) because XSP/SPY ride the SPX fit.
+        from range_finder.conformal import maybe_apply_conformal
+        forecast = maybe_apply_conformal(forecast, conn, model_ticker, model_choice)
     except Exception as e:
         st.error(f"Daily forecast failed: {e}")
         return
@@ -498,6 +517,24 @@ def _render_0dte_spread_finder_tab(
                    else feature_row.get("vrp_daily"))
     _vrp_banner(vrp_display)
     _render_metric_row(forecast, plan, spot, vix1d_input, vrp_display)
+
+    # ── Empirical PI-coverage caption (daily calibration audit) ─────
+    # forecast_log_daily accumulates one scored row per market day (cron
+    # step 4); show coverage once there's a real sample. Never worth
+    # breaking the finder over.
+    try:
+        _dcov = _cached_daily_pi_coverage(model_ticker, model_choice)
+        if _dcov["n"] >= 20:
+            _dcov_txt = (f"PI calibration ({model_choice}): "
+                         f"{_dcov['one_sided']:.0%} of {_dcov['n']} scored "
+                         f"sessions inside the PI upper (nominal "
+                         f"{_dcov['nominal_one_sided']:.0%})")
+            st.caption(_dcov_txt)
+        elif _dcov["n"] > 0:
+            st.caption(f"PI calibration: accumulating — {_dcov['n']}/20 "
+                       "scored sessions")
+    except Exception:
+        pass
 
     # ── Chain provenance ────────────────────────────────────────────
     if chain_quotes:

@@ -404,10 +404,31 @@ def capture_snapshot():
     _logger.info("Scheduled snapshot complete")
 
 
+# The weekly spec whose Monday forecast gets logged to spread_log for the
+# PI-coverage calibration audit (range_finder/calibration.py). M3_extended
+# is the app's default production spec (bootstrap --model default, UI
+# preferred_model default) — the calibration series should track what the
+# user actually trades off.
+_CALIBRATION_SPEC = "M3_extended"
+
+# Same idea at daily cadence: the 0DTE spec whose forecast gets logged to
+# forecast_log_daily each market day (the cron's preferred_model).
+_DAILY_LOGGED_SPEC = "M2_daily_vix"
+
+
+def _safe_float(val):
+    """float(val) or None — tolerates None/NaN/strings from feature rows."""
+    try:
+        f = float(val)
+        return f if f == f else None   # NaN != NaN
+    except (TypeError, ValueError):
+        return None
+
+
 def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
                               levels, regime_info):
     """Run the full spread finder pipeline: refresh data, rebuild features,
-    save GEX, fit model, and persist Monday open + VIX."""
+    save GEX, fit model, log the Monday plan, and persist Monday open + VIX."""
     import yfinance as yf
     from datetime import timedelta
 
@@ -494,6 +515,37 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
 
     build_event_flags(conn)
 
+    # ── Step 1b: Score expired spread_log weeks (SPX only) ──
+    # The calibration loop: every Monday, fill in actual high/low/range for
+    # any logged plan whose week has expired and hasn't been scored yet.
+    # Runs right after the weekly_spx refresh so update_expiration_outcome's
+    # zero-network DB path (weekly_spx) has the expired week's bar. This is
+    # what accumulates the data behind range_finder/calibration.py — the
+    # write path was dormant for months, so scoring loops over ALL unscored
+    # past weeks, not just last week.
+    if ticker == "SPX":
+        try:
+            from range_finder.spread_levels import update_expiration_outcome
+            this_monday = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT week_start FROM spread_log "
+                "WHERE ticker = 'SPX' AND outcome IS NULL AND week_start < ? "
+                "ORDER BY week_start DESC LIMIT 12",
+                (this_monday,),
+            )
+            unscored = [r[0] for r in cur.fetchall()]
+            for wk in unscored:
+                try:
+                    outcome = update_expiration_outcome(wk, conn, ticker="SPX")
+                    _logger.info(f"  Scored expired week {wk}: {outcome}")
+                except Exception as e:
+                    _logger.warning(f"  Scoring {wk} failed: {e}")
+            if not unscored:
+                _logger.info("  No unscored expired weeks in spread_log")
+        except Exception as e:
+            _logger.warning(f"  Outcome scoring step failed: {e} (continuing)")
+
     # ── Step 2: Rebuild features ──
     #
     # IMPORTANT — the order below is load-bearing.  build_features runs
@@ -544,12 +596,17 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # unnecessarily. OLS with HC3 on ~few hundred weekly rows is
     # milliseconds per spec, so fitting all 5 adds ~1–2s total.
     _logger.info(f"  4/4 Fitting all {len(MODEL_SPECS)} model specs...")
+    _cal_fit = None   # (result, avail_cols) of _CALIBRATION_SPEC — set in the loop
     try:
         from range_finder.feature_builder import get_features
         # A scaled mini (XSP→SPX) loads its parent's shared HAR
         # features; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) load their own rows.
         _features_ticker = feature_source_ticker(ticker)
-        df_feat = get_features(conn, ticker=_features_ticker)
+        # Window pinned to TRAIN_WINDOW_YEARS so deeper weekly_spx backfills
+        # (the 10y history experiment) can't silently retrain production.
+        from range_finder.har_model import train_window_min_date
+        df_feat = get_features(conn, min_date=train_window_min_date(),
+                               ticker=_features_ticker)
         if df_feat.empty:
             _logger.warning("  No features available — skipping forecast")
             return
@@ -569,6 +626,9 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
                 result  = fit_model(X_train, y_train, model_name=spec_name)
                 metrics = evaluate_oos(result, X_test, y_test, model_name=spec_name)
                 save_model(result, avail_cols, spec_name, metrics, conn=conn, ticker=ticker)
+
+                if spec_name == _CALIBRATION_SPEC:
+                    _cal_fit = (result, avail_cols)
 
                 _logger.info(
                     f"    {spec_name}: OOS R² = {metrics['oos_r2']:.4f}, "
@@ -593,6 +653,8 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # with the UI mid-week self-heal (capture_and_save_monday_anchor) so the
     # cron and the on-demand path can never drift apart.
     _logger.info("  Saving Monday open + VIX...")
+    monday_open = None
+    monday_vix = None
     try:
         from range_finder.data_collector import capture_and_save_monday_anchor
 
@@ -621,6 +683,48 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         )
     except Exception as e:
         _logger.warning(f"  Monday open/VIX save failed: {e}")
+
+    # ── Step 5: Log this week's plan for the calibration audit (SPX only) ──
+    # Forecast the week with the production spec, build the plan the way the
+    # UI would (no chain snap — the logged strikes are the model's raw
+    # placement), and persist forecast bounds + strikes to spread_log. Next
+    # Monday's Step 1b scores it against the realized range. This is the
+    # write half of the loop that range_finder/calibration.py reads.
+    if ticker == "SPX" and _cal_fit is not None:
+        try:
+            from range_finder.feature_builder import get_feature_for_week
+
+            week_start = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
+            result, cal_cols = _cal_fit
+
+            feature_row = get_feature_for_week(conn, week_start, ticker="SPX")
+            if feature_row is None:
+                feature_row = df_feat.iloc[-1]
+                _logger.warning(f"  No feature row for {week_start} — "
+                                "logging plan off the latest available row")
+
+            spx_ref = monday_open or spot
+            forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref)
+            plan = build_spread_plan(
+                forecast, feature_row,
+                week_start=week_start,
+                vix_level=monday_vix,
+                spx_open=monday_open,
+                ticker="SPX",
+            )
+            log_spread_plan(
+                conn, plan,
+                ticker="SPX",
+                model_name=_CALIBRATION_SPEC,
+                lower_pct=forecast.get("lower_pct"),
+            )
+            _logger.info(
+                f"  Plan logged for {week_start} ({_CALIBRATION_SPEC}): "
+                f"point={forecast['point_pct']:.4f} "
+                f"PI=[{forecast['lower_pct']:.4f}, {forecast['upper_pct']:.4f}]"
+            )
+        except Exception as e:
+            _logger.warning(f"  Plan logging failed: {e} (calibration row skipped)")
 
 
 def _run_daily_spread_setup(ticker, run_now, refit_today: bool = False):
@@ -675,6 +779,23 @@ def _run_daily_spread_setup(ticker, run_now, refit_today: bool = False):
     except Exception as e:
         _logger.warning(f"  [0DTE] Daily fetch failed: {e} (continuing)")
 
+    # Self-heal historical NULL vix1d_close rows from official Cboe history.
+    # Steady-state this is a no-op (fetch above already merges Cboe); it only
+    # fires when a gap accumulated (e.g. rows written before the Cboe merge
+    # existed, or a long CDN outage). A big heal changes M2_daily_vix's
+    # training set materially, so it forces a refit below.
+    backfilled_rows = 0
+    try:
+        from range_finder.cboe_data import backfill_vix1d, vix1d_coverage
+        cov = vix1d_coverage(conn)
+        if cov["null_in_cboe_window"] > 20:
+            _logger.info(f"  [0DTE] {cov['null_in_cboe_window']} NULL vix1d rows "
+                         "in Cboe-coverable window — backfilling from Cboe...")
+            backfilled_rows = backfill_vix1d(conn)
+            _logger.info(f"  [0DTE] Cboe VIX1D backfill healed {backfilled_rows} rows")
+    except Exception as e:
+        _logger.warning(f"  [0DTE] Cboe VIX1D self-heal failed: {e} (continuing)")
+
     # ── 2: Rebuild daily event flags + feature matrix ──
     _logger.info("  [0DTE] 2/3 Rebuilding daily features...")
     try:
@@ -688,7 +809,10 @@ def _run_daily_spread_setup(ticker, run_now, refit_today: bool = False):
     # M*_daily_* row, so we MUST fit even on a non-Monday. After that, only
     # Mondays / FORCE_WEEKLY_SETUP refit (daily refits don't move OLS
     # coefficients meaningfully — a week of fresh rows does).
-    should_refit = refit_today or is_first_run
+    # A large VIX1D backfill also forces a refit: M2_daily_vix trains only on
+    # rows where vix1d_close is non-null, so healing hundreds of rows changes
+    # its training set materially.
+    should_refit = refit_today or is_first_run or backfilled_rows > 50
     if not should_refit:
         try:
             from range_finder.model_persistence import load_model
@@ -711,19 +835,73 @@ def _run_daily_spread_setup(ticker, run_now, refit_today: bool = False):
     if should_refit:
         _logger.info("  [0DTE] 3/3 Fitting daily HAR specs...")
         try:
-            out = run_daily_pipeline(conn, preferred_model="M2_daily_vix")
+            out = run_daily_pipeline(conn, preferred_model=_DAILY_LOGGED_SPEC)
             _logger.info(f"  [0DTE] Daily HAR fit done — saved {out['preferred']}")
         except Exception as e:
             _logger.warning(f"  [0DTE] Daily HAR fit failed: {e}")
     else:
         _logger.info("  [0DTE] 3/3 Skipping daily HAR refit (not Monday / model present)")
 
-    # ── Plan generation, plan logging, and outcome backtesting removed ──
-    # The cron used to generate today's 0DTE plan, persist it to spread_log_daily,
-    # and score the prior session's outcome. That whole log was write-only (the
-    # 0DTE finder computes its plan on demand and never read it back), so it was
-    # removed. Steps 1-3 above keep daily_spx / daily_model_features / the daily
-    # HAR fit fresh, which is all the live 0DTE finder needs.
+    # ── Plan generation and strike logging stay removed ──
+    # The old spread_log_daily logged full plans nothing ever read. What
+    # replaced it (step 4 below) logs ONLY forecast bounds — the minimum the
+    # PI-coverage audit (range_finder/calibration.py::daily_pi_coverage)
+    # needs — and scores them from daily_spx already in the DB.
+
+    # ── 4: Log today's forecast + score completed sessions ──
+    try:
+        from range_finder.feature_builder_daily import get_daily_features
+        from range_finder.forecast_log_daily import (
+            log_daily_forecast, score_daily_outcomes,
+        )
+        from range_finder.har_model_daily import forecast_next_session
+
+        today_iso = run_now.strftime("%Y-%m-%d")
+
+        # Score first: yesterday's bar is final by now, today's isn't.
+        scored = score_daily_outcomes(conn, before_date=today_iso, ticker="SPX")
+        if scored:
+            _logger.info(f"  [0DTE] 4/4 Scored {scored} completed forecast(s)")
+
+        # Log today's forecast off the preferred spec — but ONLY when a
+        # feature row for TODAY exists (its lag-1 features carry yesterday's
+        # info). Logging off an older row would silently double-lag.
+        feats = get_daily_features(conn, ticker="SPX")
+        if not feats.empty and feats.index.max().strftime("%Y-%m-%d") == today_iso:
+            feature_row = feats.iloc[-1]
+
+            payload = load_model(_DAILY_LOGGED_SPEC, conn=conn, ticker="SPX")
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT spx_open FROM daily_spx "
+                "WHERE session_date = ? AND ticker = 'SPX'",
+                (today_iso,),
+            )
+            row = cur.fetchone()
+            spx_ref = float(row[0]) if row and row[0] else None
+            if spx_ref:
+                forecast = forecast_next_session(
+                    payload["result"], feature_row,
+                    payload["feature_cols"], spx_ref,
+                )
+                log_daily_forecast(
+                    conn, today_iso, _DAILY_LOGGED_SPEC, forecast,
+                    ticker="SPX",
+                    vix1d_close=_safe_float(feature_row.get("vix1d_close")),
+                )
+                _logger.info(
+                    f"  [0DTE] 4/4 Forecast logged for {today_iso} "
+                    f"({_DAILY_LOGGED_SPEC}): point={forecast['point_pct']:.4f} "
+                    f"upper={forecast['upper_pct']:.4f}"
+                )
+            else:
+                _logger.info("  [0DTE] 4/4 No SPX open for today yet — "
+                             "forecast logging skipped")
+        else:
+            _logger.info("  [0DTE] 4/4 No feature row for today — "
+                         "forecast logging skipped")
+    except Exception as e:
+        _logger.warning(f"  [0DTE] 4/4 Forecast logging failed: {e} (continuing)")
 
 
 if __name__ == "__main__":

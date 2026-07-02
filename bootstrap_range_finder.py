@@ -165,6 +165,13 @@ def main():
     # ── Fit all specs and print a comparison table ──
     _log.info("Step 6/10  Fitting all weekly model specs and comparing OOS metrics...")
 
+    # Pin the fit window to TRAIN_WINDOW_YEARS (matches the cron/UI read
+    # paths) — a deeper weekly_spx backfill must not change what fits here.
+    from range_finder.har_model import train_window_min_date
+    import pandas as _pd
+    _min_date = _pd.Timestamp(train_window_min_date())
+    df_feat = df_feat[df_feat.index >= _min_date]
+
     results = {}
     for spec_name in ["M1_baseline", "M2_vix", "M3_extended", "M4_full"]:
         feat_cols = MODEL_SPECS.get(spec_name, [])
@@ -267,6 +274,19 @@ def _run_daily_bootstrap(
         _log.error(f"  ✗ Daily SPX/VIX/VIX1D fetch failed: {e}")
         _log.error("  Cannot proceed with daily HAR. Check network / yfinance.")
         return
+
+    # Heal any historical NULL vix1d_close rows from official Cboe history
+    # (yfinance's ^VIX1D starts at the 2023-04-24 launch; Cboe reconstructed
+    # back to 2022-05-13). More VIX1D rows = a bigger M2_daily_vix train set.
+    try:
+        from range_finder.cboe_data import backfill_vix1d, vix1d_coverage
+        healed = backfill_vix1d(conn)
+        cov = vix1d_coverage(conn)
+        _log.info(f"  ✓ Cboe VIX1D backfill: {healed} rows healed — coverage "
+                  f"{cov['non_null']}/{cov['total']} "
+                  f"({cov['null_in_cboe_window']} still NULL in Cboe window)")
+    except Exception as e:
+        _log.warning(f"  ⚠ Cboe VIX1D backfill failed: {e} (non-fatal)")
 
     _log.info("Step 9/10  Building daily event flags and feature matrix...")
     try:

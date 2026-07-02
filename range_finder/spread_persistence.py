@@ -21,8 +21,17 @@ def log_spread_plan(
     conn,
     plan,
     wing_width_used: int = None,
+    ticker: str = "SPX",
+    model_name: str = None,
+    lower_pct: float = None,
 ) -> None:
-    """Persist a SpreadPlan to spread_log."""
+    """Persist a SpreadPlan to spread_log.
+
+    ``model_name`` and ``lower_pct`` feed the PI-coverage calibration audit
+    (range_finder/calibration.py): the spec that produced the forecast and
+    its lower interval bound, so per-spec / two-sided coverage can be
+    computed once outcomes are scored.
+    """
     width = wing_width_used or plan.recommended_width
 
     call = next((s for s in plan.call_spreads if s.wing_width == width), None)
@@ -32,16 +41,18 @@ def log_spread_plan(
 
     conn.execute("""
         INSERT INTO spread_log (
-            week_start, generated_at,
-            spx_ref_close, point_pct, upper_pct, effective_range_pct,
+            week_start, ticker, model_name, generated_at,
+            spx_ref_close, point_pct, lower_pct, upper_pct, effective_range_pct,
             call_short, call_long, put_short, put_long,
             wing_width_used, buffer_pct, event_count, gex_flag,
             warnings, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(week_start) DO UPDATE SET
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(week_start, ticker) DO UPDATE SET
+            model_name          = excluded.model_name,
             generated_at        = excluded.generated_at,
             spx_ref_close       = excluded.spx_ref_close,
             point_pct           = excluded.point_pct,
+            lower_pct           = excluded.lower_pct,
             upper_pct           = excluded.upper_pct,
             effective_range_pct = excluded.effective_range_pct,
             call_short          = excluded.call_short,
@@ -56,9 +67,12 @@ def log_spread_plan(
             updated_at          = excluded.updated_at
     """, (
         plan.week_start,
+        ticker,
+        model_name,
         plan.generated_at,
         plan.spx_ref_close,
         plan.point_pct,
+        lower_pct,
         plan.upper_pct,
         plan.effective_range_pct,
         call.short_strike if call else None,
@@ -73,7 +87,7 @@ def log_spread_plan(
         now,
     ))
     conn.commit()
-    log.info(f"Spread plan logged for {plan.week_start}")
+    log.info(f"Spread plan logged for {plan.week_start} ({ticker}, {model_name})")
 
 
 def update_outcome(
@@ -82,20 +96,23 @@ def update_outcome(
     actual_high: float,
     actual_low: float,
     credit_received: float = None,
+    ticker: str = "SPX",
 ) -> str:
     """Fill in the actual outcome after the week expires."""
     row = conn.execute(
-        "SELECT call_short, put_short, wing_width_used FROM spread_log WHERE week_start = ?",
-        (week_start,)
+        "SELECT call_short, put_short, wing_width_used FROM spread_log "
+        "WHERE week_start = ? AND ticker = ?",
+        (week_start, ticker)
     ).fetchone()
 
     if not row:
-        log.warning(f"No spread_log entry for {week_start}")
+        log.warning(f"No spread_log entry for {week_start} ({ticker})")
         return "not_found"
 
     call_short, put_short, width = row
     spx_ref = conn.execute(
-        "SELECT spx_ref_close FROM spread_log WHERE week_start = ?", (week_start,)
+        "SELECT spx_ref_close FROM spread_log WHERE week_start = ? AND ticker = ?",
+        (week_start, ticker)
     ).fetchone()[0]
 
     actual_range_pct = (actual_high - actual_low) / spx_ref if spx_ref else None
@@ -124,32 +141,90 @@ def update_outcome(
             outcome          = ?,
             pnl_pts          = ?,
             updated_at       = ?
-        WHERE week_start = ?
+        WHERE week_start = ? AND ticker = ?
     """, (
         actual_high, actual_low, actual_range_pct,
         call_breached, put_breached, outcome,
         pnl_pts, now,
-        week_start,
+        week_start, ticker,
     ))
     conn.commit()
-    log.info(f"Outcome updated for {week_start}: {outcome}")
+    log.info(f"Outcome updated for {week_start} ({ticker}): {outcome}")
     return outcome
 
 
-def update_expiration_outcome(week_start: str, conn) -> str:
-    """Auto-fetch weekly OHLC from yfinance and update breach/outcome in spread_log.
+def _fetch_week_ohlc(conn, week_start: str,
+                     friday_str: str) -> tuple[float, float, float | None] | None:
+    """(high, low, monday_open|None) for one expired Mon-Fri SPX week.
+
+    Source order: weekly_spx first (zero network, and it IS the series the
+    HAR model trains on — exactly what PI coverage should be measured
+    against), then Tradier /markets/history, then yfinance ^GSPC.
+    """
+    try:
+        row = conn.execute(
+            "SELECT spx_open, spx_high, spx_low FROM weekly_spx "
+            "WHERE week_start = ?",
+            (week_start,),
+        ).fetchone()
+        if row and row[1] is not None and row[2] is not None:
+            return float(row[1]), float(row[2]), (float(row[0]) if row[0] else None)
+    except Exception as e:
+        log.warning(f"weekly_spx lookup failed for {week_start}: {e}")
+
+    try:
+        from range_finder.data_collector import _tradier_token
+        token = _tradier_token()
+        if token:
+            from phase1.data_client import TradierDataClient
+            days = TradierDataClient(token).get_history(
+                "SPX", interval="daily", start=week_start, end=friday_str,
+            )
+            if days:
+                highs = [float(d["high"]) for d in days]
+                lows = [float(d["low"]) for d in days]
+                opens = [float(d["open"]) for d in days]
+                return max(highs), min(lows), (opens[0] if opens else None)
+            log.warning(f"Tradier returned no SPX bars for week {week_start} — "
+                        "falling back to yfinance")
+    except Exception as e:
+        log.warning(f"Tradier week fetch failed for {week_start}: {e} — "
+                    "falling back to yfinance")
+
+    # yfinance end date is exclusive — add 1 day
+    fetch_end = (datetime.strptime(friday_str, "%Y-%m-%d")
+                 + timedelta(days=1)).strftime("%Y-%m-%d")
+    raw = yf.download("^GSPC", start=week_start, end=fetch_end,
+                      interval="1d", progress=False, timeout=30)
+    if raw.empty:
+        return None
+    if hasattr(raw.columns, "levels"):
+        raw.columns = raw.columns.get_level_values(0)
+    first_open = float(raw["Open"].iloc[0]) if "Open" in raw.columns else None
+    return float(raw["High"].max()), float(raw["Low"].min()), first_open
+
+
+def update_expiration_outcome(week_start: str, conn, ticker: str = "SPX") -> str:
+    """Auto-fetch the expired week's OHLC and update breach/outcome in spread_log.
 
     Uses daily bars for the expired week to compute actual_high, actual_low,
     then compares against call_short / put_short to determine the outcome.
+    Scoring bars are SPX-only for now (the cron logs SPX plans only) —
+    non-SPX rows are skipped rather than mis-scored against SPX prices.
     """
+    if ticker != "SPX":
+        log.warning(f"update_expiration_outcome: {ticker} scoring not wired yet "
+                    "(SPX-only) — skipping")
+        return "unsupported_ticker"
+
     row = conn.execute(
         "SELECT call_short, put_short, spx_ref_close, wing_width_used "
-        "FROM spread_log WHERE week_start = ?",
-        (week_start,),
+        "FROM spread_log WHERE week_start = ? AND ticker = ?",
+        (week_start, ticker),
     ).fetchone()
 
     if not row:
-        log.warning(f"No spread_log entry for {week_start}")
+        log.warning(f"No spread_log entry for {week_start} ({ticker})")
         return "not_found"
 
     call_short, put_short, spx_ref, width = row
@@ -157,30 +232,21 @@ def update_expiration_outcome(week_start: str, conn) -> str:
     # Compute the week's Mon-Fri date range
     monday = datetime.strptime(week_start, "%Y-%m-%d")
     friday = monday + timedelta(days=4)
-    # yfinance end date is exclusive — add 1 day
-    fetch_end = friday + timedelta(days=1)
+    friday_str = friday.strftime("%Y-%m-%d")
 
-    log.info(f"Fetching ^GSPC daily OHLC for {week_start} to {friday.strftime('%Y-%m-%d')}")
-    raw = yf.download(
-        "^GSPC",
-        start=monday.strftime("%Y-%m-%d"),
-        end=fetch_end.strftime("%Y-%m-%d"),
-        interval="1d",
-        progress=False,
-        timeout=30,
-    )
-
-    if raw.empty:
-        log.error(f"yfinance returned no data for week {week_start}")
+    log.info(f"Fetching SPX daily OHLC for {week_start} to {friday_str}")
+    ohlc = _fetch_week_ohlc(conn, week_start, friday_str)
+    if ohlc is None:
+        log.error(f"No source returned data for week {week_start}")
         return "no_data"
 
-    # Flatten MultiIndex if present (yfinance quirk)
-    if hasattr(raw.columns, "levels"):
-        raw.columns = raw.columns.get_level_values(0)
-
-    actual_high = float(raw["High"].max())
-    actual_low = float(raw["Low"].min())
-    actual_range_pct = (actual_high - actual_low) / spx_ref if spx_ref else None
+    actual_high, actual_low, week_open = ohlc
+    # Normalize by the week's Monday open when we have it — that matches the
+    # model's range_pct = (high-low)/open target definition, so PI-coverage
+    # comparisons against the forecast bounds are apples-to-apples. Fall
+    # back to the plan's reference price (pre-migration behavior).
+    denom = week_open or spx_ref
+    actual_range_pct = (actual_high - actual_low) / denom if denom else None
 
     # Convention: touching the short strike counts as a breach (matches the
     # manual update_outcome() path and real-world assignment risk at expiry).
@@ -216,15 +282,15 @@ def update_expiration_outcome(week_start: str, conn) -> str:
             outcome          = ?,
             pnl_pts          = ?,
             updated_at       = ?
-        WHERE week_start = ?
+        WHERE week_start = ? AND ticker = ?
     """, (
         actual_high, actual_low, actual_range_pct,
         call_breached, put_breached, outcome,
         pnl_pts, now,
-        week_start,
+        week_start, ticker,
     ))
     conn.commit()
-    log.info(f"Expiration outcome for {week_start}: {outcome} "
+    log.info(f"Expiration outcome for {week_start} ({ticker}): {outcome} "
              f"(high={actual_high:.2f}, low={actual_low:.2f})")
     return outcome
 

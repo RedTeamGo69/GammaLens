@@ -58,31 +58,34 @@ def fetch_daily_spx(years: int = 6) -> pd.DataFrame:
 
 def fetch_daily_underlying(yf_symbol: str, years: int = 6,
                             label: str = None,
-                            close_col: str = "spx_close") -> pd.DataFrame:
-    """Pull daily closes for any underlying from yfinance.
+                            close_col: str = "spx_close",
+                            tradier_symbol: str = None) -> pd.DataFrame:
+    """Pull daily closes for any underlying — Tradier primary, yfinance fallback.
 
     Returns a DataFrame indexed by date with one column whose name defaults to
     ``spx_close`` so the existing ``compute_hv_windows`` code path works
     unchanged on any ticker. Pass a different ``close_col`` if you need to
     distinguish multiple series in the same DataFrame.
     """
-    end   = datetime.today()
-    start = end - timedelta(days=years * 365)
-
     label = label or yf_symbol
     log.info(f"Fetching daily {label} closes for HV calculation...")
-    raw = yf.download(yf_symbol, start=start, end=end, interval="1d", progress=False)
 
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-
-    if raw.empty or "Close" not in raw.columns:
-        log.warning(f"Daily {label}: yfinance returned empty data")
+    # bar_sources handles source selection + validation + fallback. The
+    # label doubles as the Tradier symbol for app tickers (SPX/QQQ/...);
+    # callers can override via tradier_symbol.
+    try:
+        from range_finder.bar_sources import fetch_daily_bars
+        bars = fetch_daily_bars(yf_symbol, tradier_symbol or label, years, label)
+    except Exception as e:
+        log.warning(f"Daily {label}: all bar sources failed ({e})")
         return pd.DataFrame(columns=[close_col])
 
-    df = raw[["Close"]].copy()
+    if bars.empty or "close" not in bars.columns:
+        log.warning(f"Daily {label}: no data from any source")
+        return pd.DataFrame(columns=[close_col])
+
+    df = bars[["close"]].copy()
     df.columns = [close_col]
-    df.index = pd.to_datetime(df.index).normalize()
     df.dropna(inplace=True)
 
     log.info(f"Daily {label}: {len(df)} rows")
@@ -121,16 +124,28 @@ def compute_hv_windows(daily_df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
-    """Pull weekly closes for VIX9D and VIX3M from yfinance."""
+    """Pull weekly closes for VIX9D and VIX3M — Cboe primary, yfinance fallback.
+
+    Cboe's official CSVs carry VIX9D back to 2011 and VIX3M back to 2009
+    (far deeper than yfinance's reliable coverage), which also unlocks longer
+    training windows for the history-depth experiment.
+    """
     end   = datetime.today()
     start = end - timedelta(days=years * 365)
 
-    log.info("Fetching VIX9D and VIX3M for term structure...")
+    log.info("Fetching VIX9D and VIX3M for term structure (Cboe primary)...")
 
-    vix9d_raw = yf.download("^VIX9D", start=start, end=end, interval="1wk", progress=False)
-    vix3m_raw = yf.download("^VIX3M", start=start, end=end, interval="1wk", progress=False)
-
-    def extract_close(raw, name):
+    def fetch_series(cboe_index: str, yf_symbol: str, name: str) -> pd.Series:
+        # Primary: official Cboe daily history resampled to Monday weeks.
+        try:
+            from range_finder.cboe_data import fetch_cboe_weekly_closes
+            s = fetch_cboe_weekly_closes(cboe_index, name)
+            return s[s.index >= pd.Timestamp(start)]
+        except Exception as e:
+            log.warning(f"Cboe {cboe_index} unavailable ({e}) — "
+                        f"falling back to yfinance {yf_symbol}")
+        # Fallback: yfinance weekly bars.
+        raw = yf.download(yf_symbol, start=start, end=end, interval="1wk", progress=False)
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         if raw.empty:
@@ -141,8 +156,8 @@ def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
         s.index = pd.to_datetime(s.index).normalize()
         return s
 
-    vix9d = extract_close(vix9d_raw, "vix9d_close")
-    vix3m = extract_close(vix3m_raw, "vix3m_close")
+    vix9d = fetch_series("VIX9D", "^VIX9D", "vix9d_close")
+    vix3m = fetch_series("VIX3M", "^VIX3M", "vix3m_close")
 
     df = pd.DataFrame({"vix9d_close": vix9d, "vix3m_close": vix3m})
     df.index.name = "week_start"
@@ -348,7 +363,8 @@ def _load_earnings_flags(conn, ticker: str) -> pd.DataFrame:
 
 
 def build_features(conn, exclude_covid: bool = True,
-                    ticker: str = "SPX") -> pd.DataFrame:
+                    ticker: str = "SPX",
+                    history_years: int = 6) -> pd.DataFrame:
     """
     Assemble the full model-ready feature matrix and save to model_features.
     Every feature is lagged so that at row t (target week), you only
@@ -396,12 +412,15 @@ def build_features(conn, exclude_covid: bool = True,
     ).tz_localize("America/New_York")
     last_bar_is_complete = _ny_now() >= _last_bar_friday_close
 
-    # --- Fetch supplemental data ---
-    daily_underlying = _load_daily_for_ticker(ticker, years=6)
+    # --- Fetch supplemental data (depth follows history_years so the 10y
+    # history experiment can build a full-depth matrix; production callers
+    # leave the default 6) ---
+    daily_underlying = _load_daily_for_ticker(ticker, years=history_years)
     # VIX9D/VIX3M term structure stays VIX-anchored across all tickers — it's
-    # a macro-vol regime feature that single names also covary with. yfinance
-    # has VIX9D/VIX3M for the full feature window.
-    vix_ts    = fetch_vix_term_structure(years=6)
+    # a macro-vol regime feature that single names also covary with. Cboe's
+    # official CSVs carry both back past 2011, so any history_years the
+    # experiment asks for is available (yfinance stays the fallback).
+    vix_ts    = fetch_vix_term_structure(years=history_years)
 
     # --- HAR components ---
     har = compute_har_features(weekly)

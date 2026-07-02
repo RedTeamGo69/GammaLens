@@ -78,6 +78,18 @@ def _get_rf_conn():
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _cached_pi_coverage(ticker: str) -> dict:
+    """Empirical PI-coverage summary from scored spread_log rows.
+
+    One small aggregate SELECT, cached 10 min — the underlying data only
+    changes once a week (Monday cron logs the new plan and scores last
+    week's), so reruns cost nothing. See range_finder/calibration.py.
+    """
+    from range_finder.calibration import weekly_pi_coverage
+    return weekly_pi_coverage(_get_rf_conn(), ticker=ticker)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _cached_rf_get_features(_conn, ticker: str = "SPX"):
     """model_features table for one ticker, cached for 10 minutes.
 
@@ -91,8 +103,13 @@ def _cached_rf_get_features(_conn, ticker: str = "SPX"):
 
     The ``_conn`` underscore tells Streamlit to skip hashing the connection
     object (psycopg2 connections aren't hashable).
+
+    The window is pinned to har_model.TRAIN_WINDOW_YEARS (same as the cron
+    fit path) so deeper weekly_spx backfills — e.g. the 10y history
+    experiment — can't silently change what the UI trains or forecasts on.
     """
-    return rf_get_features(_conn, ticker=ticker)
+    from range_finder.har_model import train_window_min_date
+    return rf_get_features(_conn, min_date=train_window_min_date(), ticker=ticker)
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -1773,6 +1790,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         spx_close_input, alpha=RF_PI_ALPHA,
     )
 
+    # Optional conformal interval correction — a NO-OP unless
+    # conformal.CONFORMAL_ENABLED is flipped on AND the offline adoption
+    # gate persisted a λ for this ticker/spec (see range_finder/conformal.py).
+    from range_finder.conformal import maybe_apply_conformal
+    forecast = maybe_apply_conformal(forecast, conn, ticker, model_choice)
+
     # Live chain quotes for the Spread Finder's planned Friday, read from
     # data.chain_cache on every rerun (fetch_all_data repopulates that
     # snapshot with fresh Tradier bid/ask on each refresh — see the
@@ -1833,9 +1856,34 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
               f"conservative · buffer +{plan.buffer_pct*100:.2f}%")
         + _mc("GEX Regime", gex_ctx.gamma_regime.title(), f"flag {_flag:+d}", _reg_color)
         + _mc(f"OOS R² · {_mdl_label}", f"{metrics['oos_r2']:.4f}",
-              f"MAE {metrics['mae_pct']*100:.2f}%")
+              f"MAE {metrics['mae_pct']*100:.2f}%"
+              + (f" · dir {metrics['direction_acc']:.0%}"
+                 if metrics.get("direction_acc") is not None else ""))
         + '</div>'
     )
+
+    # ── Empirical PI-coverage caption (the calibration audit, in one line) ──
+    # Reads scored spread_log rows via calibration.weekly_pi_coverage; the
+    # Monday cron logs a plan and scores last week's, so this accumulates one
+    # observation per week. Cached so reruns don't hit Neon.
+    try:
+        _cov = _cached_pi_coverage(ticker)
+        if _cov["n"] == 0:
+            _cov_txt = "PI calibration: no scored weeks yet — accumulating"
+        elif not _cov["sufficient"]:
+            _cov_txt = (f"PI calibration: {_cov['one_sided']:.0%} of {_cov['n']} "
+                        f"scored weeks inside the PI upper — accumulating "
+                        f"(needs 15+ for conclusions)")
+        else:
+            _buf = _cov.get("buffer", {})
+            _buf_txt = (f" · buffer breach {_buf['breach_rate']:.0%}"
+                        if _buf.get("n") else "")
+            _cov_txt = (f"PI calibration: {_cov['one_sided']:.0%} one-sided over "
+                        f"{_cov['n']} scored weeks (nominal "
+                        f"{_cov['nominal_one_sided']:.0%}){_buf_txt}")
+        st.caption(_cov_txt)
+    except Exception:
+        pass   # calibration display is never worth breaking the finder over
 
     # ── Excel export — ALL tickers, one week-named tab ──
     # The active ticker's row reuses the exact tiers rendered above (chain-

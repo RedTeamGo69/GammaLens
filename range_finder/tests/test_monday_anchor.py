@@ -154,3 +154,133 @@ def test_selfheal_without_spot_fallback_raises_and_persists_nothing(monkeypatch)
         )
 
     assert conn.execute("SELECT COUNT(*) FROM weekly_setup").fetchone()[0] == 0
+
+
+# ── anchor-open source chain (Tradier -> Cboe -> yfinance) ─────────────────────
+# A 2026-07-02 yfinance flake made the anchor fall back to live spot mid-week
+# (7483.23 instead of Monday's 7391.88). These pin the Tradier-first chain and
+# the exact fallback ordering that prevents a repeat.
+
+class _FakeTradierHistory:
+    def __init__(self, days):
+        self._days = days
+
+    def get_history(self, symbol, interval="daily", start=None, end=None):
+        if isinstance(self._days, Exception):
+            raise self._days
+        return self._days
+
+
+def _patch_tradier_history(monkeypatch, days, token="tok"):
+    monkeypatch.setattr(dc, "_tradier_token", lambda: token)
+    import phase1.data_client as pdc
+    monkeypatch.setattr(pdc, "TradierDataClient",
+                        lambda tok: _FakeTradierHistory(days))
+
+
+def _cboe_frame(opens_by_date: dict) -> pd.DataFrame:
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in opens_by_date]).normalize()
+    vals = list(opens_by_date.values())
+    df = pd.DataFrame({"open": vals, "high": vals, "low": vals, "close": vals},
+                      index=idx)
+    df.index.name = "session_date"
+    return df
+
+
+def test_open_from_tradier_resolves_target_date(monkeypatch):
+    _patch_tradier_history(monkeypatch, [
+        {"date": "2026-06-29", "open": 7391.88, "high": 7400.0,
+         "low": 7350.0, "close": 7380.0, "volume": 0},
+    ])
+    assert dc._open_from_tradier("^GSPC", dt.date(2026, 6, 29)) \
+        == pytest.approx(7391.88)
+
+
+def test_open_from_tradier_wrong_date_returns_none(monkeypatch):
+    _patch_tradier_history(monkeypatch, [
+        {"date": "2026-06-26", "open": 7350.0, "high": 7360.0,
+         "low": 7340.0, "close": 7355.0, "volume": 0},
+    ])
+    assert dc._open_from_tradier("^GSPC", dt.date(2026, 6, 29)) is None
+
+
+def test_open_from_tradier_no_token_returns_none(monkeypatch):
+    _patch_tradier_history(monkeypatch, [], token="")
+    assert dc._open_from_tradier("^GSPC", dt.date(2026, 6, 29)) is None
+
+
+def test_open_from_tradier_vxn_unmappable(monkeypatch):
+    # ^VXN doesn't quote on Tradier — must decline instantly, no API call.
+    _patch_tradier_history(monkeypatch,
+                           ConnectionError("must never be called"))
+    assert dc._open_from_tradier("^VXN", dt.date(2026, 6, 29)) is None
+
+
+def test_open_from_tradier_plain_symbol_maps_to_itself(monkeypatch):
+    _patch_tradier_history(monkeypatch, [
+        {"date": "2026-06-29", "open": 550.25, "high": 555.0,
+         "low": 548.0, "close": 552.0, "volume": 100},
+    ])
+    assert dc._open_from_tradier("QQQ", dt.date(2026, 6, 29)) \
+        == pytest.approx(550.25)
+
+
+def test_open_from_cboe_serves_vxn(monkeypatch):
+    import range_finder.cboe_data as cd
+    monkeypatch.setattr(cd, "fetch_cboe_index_history",
+                        lambda index, timeout=30: _cboe_frame(
+                            {"2026-06-29": 21.44}))
+    assert dc._open_from_cboe("^VXN", dt.date(2026, 6, 29)) \
+        == pytest.approx(21.44)
+
+
+def test_open_from_cboe_declines_non_vol_symbols(monkeypatch):
+    import range_finder.cboe_data as cd
+    def _boom(index, timeout=30):
+        raise ConnectionError("must never be called")
+    monkeypatch.setattr(cd, "fetch_cboe_index_history", _boom)
+    assert dc._open_from_cboe("^GSPC", dt.date(2026, 6, 29)) is None
+
+
+def test_source_chain_prefers_tradier(monkeypatch):
+    calls = []
+
+    def tradier(sym, d):
+        calls.append("tradier")
+        return 7391.88
+
+    def yfin(sym, d):
+        calls.append("yf")
+        return 9999.0
+
+    monkeypatch.setattr(dc, "_ANCHOR_OPEN_SOURCES", [tradier, dc._open_from_cboe, yfin])
+
+    assert dc._daily_open_on("^GSPC", dt.date(2026, 6, 29)) == pytest.approx(7391.88)
+    assert calls == ["tradier"]          # later sources never consulted
+
+
+def test_source_chain_falls_through_in_order(monkeypatch):
+    calls = []
+
+    def tradier(sym, d):
+        calls.append("tradier")
+        return None                       # Tradier outage
+
+    def cboe(sym, d):
+        calls.append("cboe")
+        return None                       # not a vol index
+
+    def yfin(sym, d):
+        calls.append("yf")
+        return 7391.88
+
+    monkeypatch.setattr(dc, "_ANCHOR_OPEN_SOURCES", [tradier, cboe, yfin])
+
+    assert dc._daily_open_on("^GSPC", dt.date(2026, 6, 29)) == pytest.approx(7391.88)
+    assert calls == ["tradier", "cboe", "yf"]
+
+
+def test_source_chain_all_dry_returns_none(monkeypatch):
+    monkeypatch.setattr(dc, "_ANCHOR_OPEN_SOURCES",
+                        [lambda s, d: None, lambda s, d: None])
+    assert dc._daily_open_on("^GSPC", dt.date(2026, 6, 29)) is None

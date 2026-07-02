@@ -371,13 +371,85 @@ def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
 # week's Monday* when the cron didn't run, so mid-week views stay locked instead
 # of drifting on live spot.
 
-def _daily_open_on(symbol: str, target_date) -> "float | None":
-    """Daily-candle Open for `symbol` on `target_date`, or None.
+# yfinance symbol -> Tradier symbol for the anchor-open lookup. Plain
+# symbols (no ^) ARE their own Tradier symbols; ^VXN is deliberately absent
+# (Tradier can't quote it — Cboe serves it below).
+_YF_TO_TRADIER_INDEX = {
+    "^GSPC":  "SPX",
+    "^NDX":   "NDX",
+    "^VIX":   "VIX",
+    "^VIX1D": "VIX1D",
+    "^VIX9D": "VIX9D",
+    "^VIX3M": "VIX3M",
+}
 
-    Scans a short recent window (yfinance ``period="5d"``) for the bar whose
-    date matches `target_date` — matching on ``.date()`` dodges tz/DST edges.
-    Returns None when that bar isn't published yet or the fetch fails. On
-    Tue-Thu the week's Monday is 1-3 sessions back, well inside the 5-day window.
+
+def _yf_to_tradier_symbol(symbol: str) -> "str | None":
+    """Tradier symbol for a yfinance symbol, or None if Tradier can't serve it."""
+    if not symbol.startswith("^"):
+        return symbol
+    return _YF_TO_TRADIER_INDEX.get(symbol)
+
+
+def _open_from_tradier(symbol: str, target_date) -> "float | None":
+    """Daily-candle Open on `target_date` from Tradier /markets/history."""
+    tradier_symbol = _yf_to_tradier_symbol(symbol)
+    if not tradier_symbol:
+        return None
+    token = _tradier_token()
+    if not token:
+        return None
+    iso = target_date.strftime("%Y-%m-%d")
+    try:
+        from phase1.data_client import TradierDataClient
+        days = TradierDataClient(token).get_history(
+            tradier_symbol, interval="daily", start=iso, end=iso,
+        )
+    except Exception as e:
+        log.warning(f"Tradier daily-open fetch failed for {symbol} "
+                    f"({tradier_symbol}): {e}")
+        return None
+    for d in days:
+        if d.get("date") == iso:
+            try:
+                op = float(d.get("open") or 0.0)
+            except (TypeError, ValueError):
+                return None
+            return op if op > 0 else None
+    return None
+
+
+def _open_from_cboe(symbol: str, target_date) -> "float | None":
+    """Daily-candle Open on `target_date` from official Cboe index history.
+
+    Only serves the vol-index family (the publisher's own data) — notably
+    ^VXN, which Tradier can't quote at all.
+    """
+    from range_finder.cboe_data import YF_TO_CBOE_INDEX, fetch_cboe_index_history
+    index = YF_TO_CBOE_INDEX.get(symbol)
+    if not index:
+        return None
+    try:
+        hist = fetch_cboe_index_history(index)
+    except Exception as e:
+        log.warning(f"Cboe daily-open fetch failed for {symbol} ({index}): {e}")
+        return None
+    ts = pd.Timestamp(target_date)
+    if ts not in hist.index:
+        return None
+    try:
+        op = float(hist.loc[ts, "open"])
+    except (TypeError, ValueError):
+        return None
+    return op if op > 0 else None
+
+
+def _open_from_yf(symbol: str, target_date) -> "float | None":
+    """Daily-candle Open on `target_date` from yfinance (final fallback).
+
+    Scans a short recent window (``period="5d"``) for the bar whose date
+    matches `target_date` — matching on ``.date()`` dodges tz/DST edges. On
+    Tue-Thu the week's Monday is 1-3 sessions back, well inside the window.
     """
     try:
         hist = yf.Ticker(symbol).history(period="5d")
@@ -391,6 +463,30 @@ def _daily_open_on(symbol: str, target_date) -> "float | None":
             op = row.get("Open")
             if op is not None and not (isinstance(op, float) and op != op):
                 return float(op)
+    return None
+
+
+# Ordered anchor-open sources. Tradier first (authenticated broker API —
+# a 2026-07-02 yfinance flake made the Monday anchor silently fall back to
+# live spot, i.e. mid-week drift), Cboe for the vol indices Tradier can't
+# serve, yfinance last. Tests replace this list wholesale (see
+# tests/conftest.py) to stay hermetic.
+_ANCHOR_OPEN_SOURCES = [_open_from_tradier, _open_from_cboe, _open_from_yf]
+
+
+def _daily_open_on(symbol: str, target_date) -> "float | None":
+    """Daily-candle Open for `symbol` on `target_date`, or None.
+
+    Tries each source in ``_ANCHOR_OPEN_SOURCES`` until one has the bar.
+    Returns None when no source has it published yet (or every fetch fails)
+    — callers fall back to live spot / defaults explicitly.
+    """
+    for fn in _ANCHOR_OPEN_SOURCES:
+        op = fn(symbol, target_date)
+        if op is not None:
+            log.info(f"daily open {symbol} @ {target_date}: {op:.2f} "
+                     f"via {fn.__name__.replace('_open_from_', '')}")
+            return op
     return None
 
 
@@ -430,7 +526,8 @@ def capture_and_save_monday_anchor(
     `cfg` lets a caller pass an already-resolved config (the UI's chain-derived
     ``resolve_config`` for arbitrary tickers); when omitted we resolve via
     ``get_config``. Falls back to `spot_fallback` / `live_vix_fallback` only when
-    yfinance has no daily bar for `target_date`.
+    NO anchor source (Tradier -> Cboe -> yfinance) has a daily bar for
+    `target_date`.
     """
     from phase1.ticker_config import get_config, price_scale_divisor
 

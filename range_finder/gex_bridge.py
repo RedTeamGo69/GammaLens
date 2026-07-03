@@ -24,7 +24,7 @@ from range_finder.feature_builder import (
     init_features_table, create_gex_table, upsert_gex,
     get_features, get_feature_for_week,
 )
-from range_finder.spread_levels import SpreadPlan
+from range_finder.spread_levels import SpreadPlan, GEX_NEGATIVE_REGIME_WARNING
 
 log = logging.getLogger(__name__)
 
@@ -217,7 +217,9 @@ def adjust_spread_with_gex(
         call_strike_inside_wall: True if call short is inside the call wall (safer)
         put_strike_inside_wall : True if put short is inside the put wall (safer)
         gex_regime_label       : human-readable regime description
-        gex_adjustment_notes   : list of actionable notes
+        gex_adjustment_notes   : wall-proximity / zero-gamma notes only — the
+                                 regime narrative is composed separately by
+                                 reconcile_gex_warnings()
     """
     call_short = plan.call_spreads[0].short_strike if plan.call_spreads else None
     put_short  = plan.put_spreads[0].short_strike  if plan.put_spreads  else None
@@ -265,21 +267,12 @@ def adjust_spread_with_gex(
                 f"put wall ({gex_ctx.put_wall:.0f}) — consider widening"
             )
 
-    # Regime-specific notes. Use the same substring mapping as
-    # regime_to_gex_flag — the dashboard passes "Positive Gamma" /
-    # "Negative Gamma", so the old exact-equality check against
-    # "positive"/"negative" never matched and these notes never rendered.
-    _flag = regime_to_gex_flag(gex_ctx.gamma_regime)
-    if _flag == 1:
-        notes.append(
-            "Positive GEX — dealer hedging suppresses moves. "
-            "Spread buffer tightened proportionally to GEX magnitude."
-        )
-    elif _flag == -1:
-        notes.append(
-            "Negative GEX — dealer hedging amplifies moves. "
-            "Spread buffer widened proportionally to GEX magnitude. Exercise caution on position sizing."
-        )
+    # Regime-story notes were removed from here: they claimed the buffer was
+    # "tightened/widened proportionally to GEX magnitude", but this function
+    # is annotation-only — the buffer is computed from the *anchored* feature
+    # row in spread_levels.compute_buffer. The single coherent regime message
+    # (anchored vs live, including flips) is composed by
+    # reconcile_gex_warnings() below; callers pass it this dict's gex_regime.
 
     # Zero-gamma proximity warning
     zg_dist = abs(gex_ctx.spot - gex_ctx.zero_gamma)
@@ -292,3 +285,123 @@ def adjust_spread_with_gex(
         )
 
     return result
+
+
+# =============================================================================
+# GEX WARNING RECONCILIATION
+# =============================================================================
+
+# Stable prefixes of every message reconcile_gex_warnings can compose. Used to
+# strip previously-composed messages so a second application is idempotent
+# (a fragment rerun re-reconciling an already-reconciled warning list must not
+# stack a second regime message).
+_GEX_COMPOSED_PREFIXES = (
+    "Positive GEX regime —",
+    "Negative GEX regime —",   # also covers the legacy GEX_NEGATIVE_REGIME_WARNING
+    "GEX regime flipped since the anchor:",
+    "Anchored GEX regime was neutral",
+    "Live GEX regime is",
+)
+
+_GEX_FLAG_WORD = {1: "positive", -1: "negative"}
+
+
+def reconcile_gex_warnings(
+    plan_warnings: list,
+    gex_notes: list,
+    anchored_gex_flag: Optional[int],
+    live_regime: Optional[str],
+    anchor_label: str = "Monday anchor",
+) -> list:
+    """Merge plan warnings and GEX annotation notes into one coherent list.
+
+    The spread plan's buffer is computed from the ANCHORED feature row
+    (spread_levels.compute_buffer), while the dashboard supplies a LIVE gamma
+    regime. Rendering both signals verbatim produced contradictory messages
+    ("Negative GEX regime" next to "Positive GEX") whenever the regime moved
+    after the anchor. This function strips the anchored-regime warning and
+    composes AT MOST ONE regime message describing anchored vs live —
+    including an explicit "regime flipped since the anchor" case.
+
+    Pure function (no Streamlit, no I/O) so both the weekly and 0DTE tabs can
+    share it and it unit-tests trivially.
+
+    Args:
+        plan_warnings     : SpreadPlan.warnings (event/EM/credit warnings and
+                            possibly the anchored GEX_NEGATIVE_REGIME_WARNING)
+        gex_notes         : adjust_spread_with_gex()["gex_adjustment_notes"]
+                            (wall-proximity / zero-gamma notes)
+        anchored_gex_flag : SpreadPlan.gex_flag — the regime baked into the
+                            buffer (+1/0/-1), or None when the feature row had
+                            no GEX data (always the case on the daily matrix)
+        live_regime       : GEXContext.gamma_regime from the dashboard
+                            (e.g. "Positive Gamma", "negative", "transition")
+        anchor_label      : where the anchored features come from, for copy
+                            ("Monday anchor" weekly, "session anchor" 0DTE)
+    """
+    out = [
+        w for w in plan_warnings
+        if w != GEX_NEGATIVE_REGIME_WARNING
+        and not str(w).startswith(_GEX_COMPOSED_PREFIXES)
+    ]
+    for note in gex_notes:
+        if note not in out:
+            out.append(note)
+
+    live_flag = regime_to_gex_flag(live_regime) if live_regime else 0
+    anchored = anchored_gex_flag if anchored_gex_flag in (-1, 0, 1) else None
+
+    msg = None
+    if anchored in (1, -1) and live_flag != 0:
+        if anchored == live_flag:
+            if anchored == 1:
+                msg = (
+                    f"Positive GEX regime — anchored ({anchor_label}) and live "
+                    "dashboard agree. Dealer hedging tends to suppress moves; "
+                    "the buffer was computed from the anchored GEX features."
+                )
+            else:
+                msg = (
+                    f"Negative GEX regime — anchored ({anchor_label}) and live "
+                    "dashboard agree. Dealer hedging amplifies moves; the buffer "
+                    "was widened from the anchored GEX features. Exercise "
+                    "caution on sizing."
+                )
+        else:
+            msg = (
+                f"GEX regime flipped since the anchor: {_GEX_FLAG_WORD[anchored]} "
+                f"at the {anchor_label}, live dashboard now reads "
+                f"{_GEX_FLAG_WORD[live_flag]}. The buffer was computed from the "
+                "anchor regime (strikes stay anchored by policy) — treat the "
+                "live regime as entry-timing context, not a change to the plan."
+            )
+    elif anchored == 1:
+        msg = (
+            f"Positive GEX regime — anchored ({anchor_label}); dealer hedging "
+            "tends to suppress moves and the buffer was computed from the "
+            "anchored GEX features. Live regime is currently unclear "
+            "(transition or unavailable)."
+        )
+    elif anchored == -1:
+        msg = (
+            f"Negative GEX regime — anchored ({anchor_label}); dealer hedging "
+            "amplifies moves and the buffer was widened from the anchored GEX "
+            "features. Live regime is currently unclear (transition or "
+            "unavailable)."
+        )
+    elif live_flag != 0 and anchored == 0:
+        msg = (
+            f"Anchored GEX regime was neutral at the {anchor_label}; live "
+            f"dashboard reads {_GEX_FLAG_WORD[live_flag]}. The buffer used the "
+            "anchored (neutral) features — live reading is advisory for entries."
+        )
+    elif live_flag != 0:
+        msg = (
+            f"Live GEX regime is {_GEX_FLAG_WORD[live_flag]} — advisory only. "
+            "The plan's buffer was not adjusted for GEX (no anchored GEX "
+            "features for this session)."
+        )
+
+    if msg:
+        out.append(msg)
+    return out

@@ -18,7 +18,7 @@ from ui_history import _is_weekly_freeze_day
 
 from range_finder.gex_bridge import (
     GEXContext, extract_gex_context, save_gex_to_range_finder,
-    adjust_spread_with_gex, regime_to_gex_flag,
+    adjust_spread_with_gex, regime_to_gex_flag, reconcile_gex_warnings,
 )
 from range_finder.data_collector import (
     fetch_spx_vix as rf_fetch_spx_vix, save_spx_vix as rf_save_spx_vix,
@@ -2174,7 +2174,17 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         with col_warn:
             st.html('<div class="sf-eyebrow">Warnings &amp; GEX Notes</div>')
 
-            all_warnings = list(_plan.warnings) + _gex_adj.get("gex_adjustment_notes", [])
+            # One coherent GEX story: strips the anchored-regime warning and
+            # composes a single anchored-vs-live message (flip-aware) instead
+            # of concatenating two independent — and possibly contradictory —
+            # regime signals.
+            all_warnings = reconcile_gex_warnings(
+                list(_plan.warnings),
+                _gex_adj.get("gex_adjustment_notes", []),
+                anchored_gex_flag=_plan.gex_flag,
+                live_regime=_gex_adj.get("gex_regime"),
+                anchor_label="Monday anchor",
+            )
 
             # Inside-the-expected-move flags. The model no longer snaps the
             # short strike out to the EM boundary (that "EM floor" feature was

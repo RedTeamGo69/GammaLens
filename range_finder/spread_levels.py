@@ -46,6 +46,14 @@ EVENT_BUFFER_MULTIPLIERS = {
 # gex_normalized > 0 means positive gamma (tighten), < 0 means negative (widen)
 GEX_CONTINUOUS_SCALE = 0.002  # buffer adjustment per unit of gex_normalized
 
+# The anchored-regime warning emitted by build_spread_plan when the feature
+# row's gex_flag is -1. Kept as a constant (exact string, unchanged from the
+# inline literal it replaced) so gex_bridge.reconcile_gex_warnings can strip
+# it by exact match and compose a single coherent regime message instead.
+GEX_NEGATIVE_REGIME_WARNING = (
+    "Negative GEX regime — dealer hedging amplifies moves; buffer widened"
+)
+
 # Legacy module-level SPX defaults. The live per-ticker values come from
 # phase1.ticker_config (wing_widths / min_spread_width) — keep these in
 # sync with the SPX entry there.
@@ -594,7 +602,7 @@ def build_spread_plan(
     if has_fomc:
         warnings.append(f"FOMC week — minimum width floor raised to {min_floor} pts; gaps through strikes are possible")
     if gex_flag == -1:
-        warnings.append("Negative GEX regime — dealer hedging amplifies moves; buffer widened")
+        warnings.append(GEX_NEGATIVE_REGIME_WARNING)
     if forecast.get("model_vs_vix", 0) > 0.01:
         warnings.append(f"Model expects wider range than VIX implies ({forecast['model_vs_vix']*100:+.2f}%) — trust the model")
     if vix_level > 25:

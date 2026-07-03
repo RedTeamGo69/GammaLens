@@ -37,12 +37,9 @@ MODEL_DIR = Path(__file__).parent / "models"
 # current spec. Refit required — the Monday cron and the UI "Forecast" button
 # both regenerate fits automatically on the next run.
 #
-# NOT a version bump (2026-07): the Cboe VIX1D backfill (cboe_data.py) and the
-# Cboe/Tradier data-source migration change WHERE training data comes from and
-# HOW MUCH of it exists, but not a single feature definition — saved fits stay
-# loadable and correct. Training-set growth is handled by the daily cron's
-# refit trigger (backfilled_rows > 50), not by invalidating every ticker's
-# weekly fits here.
+# NOT a version bump (2026-07): the Cboe/Tradier data-source migration
+# changed WHERE training data comes from and HOW MUCH of it exists, but not
+# a single feature definition — saved fits stay loadable and correct.
 SCHEMA_VERSION = 3
 
 

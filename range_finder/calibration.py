@@ -7,8 +7,8 @@
 # NOTHING ever checked whether the realized weekly range actually lands
 # inside that interval ~80% of the time. spread_log stores the forecast
 # bounds (point/lower/upper _pct) AND, once scored, the realized range
-# (actual_range_pct); forecast_log_daily does the same at daily cadence for
-# the 0DTE model. This module turns those rows into coverage numbers.
+# (actual_range_pct). This module turns those rows into coverage numbers.
+# (The daily/0DTE variant of this audit was removed with the 0DTE finder.)
 #
 # Interpretation:
 #   * one-sided coverage (P[actual <= upper]) is the number that matters for
@@ -64,27 +64,6 @@ def load_completed_forecasts(conn, ticker: str = "SPX") -> pd.DataFrame:
         parse_dates=["week_start"],
     )
     return df
-
-
-def load_completed_daily_forecasts(conn, ticker: str = "SPX",
-                                   model_name: str = None) -> pd.DataFrame:
-    """forecast_log_daily rows with both a forecast and a scored outcome."""
-    query = """
-        SELECT session_date, ticker, model_name,
-               point_pct, lower_pct, upper_pct,
-               actual_range_pct
-        FROM forecast_log_daily
-        WHERE ticker = ?
-          AND upper_pct IS NOT NULL
-          AND actual_range_pct IS NOT NULL
-    """
-    params: tuple = (ticker,)
-    if model_name:
-        query += " AND model_name = ?"
-        params = (ticker, model_name)
-    query += " ORDER BY session_date ASC"
-    return pd.read_sql_query(query, conn, params=params,
-                             parse_dates=["session_date"])
 
 
 # =============================================================================
@@ -220,20 +199,14 @@ def weekly_pi_coverage(conn, ticker: str = "SPX") -> dict:
     return cov
 
 
-def daily_pi_coverage(conn, ticker: str = "SPX", model_name: str = None) -> dict:
-    """One-call 0DTE coverage summary for the UI caption."""
-    df = load_completed_daily_forecasts(conn, ticker=ticker, model_name=model_name)
-    return pi_coverage(df)
-
-
 # =============================================================================
 # CLI REPORT
 # =============================================================================
 # Usage:
 #   DATABASE_URL=postgres://... python -m range_finder.calibration
 #
-# Read-only. Prints the weekly + daily coverage report, refusing conclusions
-# under MIN_SAMPLE observations.
+# Read-only. Prints the weekly coverage report, refusing conclusions under
+# MIN_SAMPLE observations.
 
 def _fmt_pct(x: float) -> str:
     return "—" if x != x else f"{x:.0%}"
@@ -296,13 +269,6 @@ def main() -> None:
         for _, r in by_model.iterrows():
             print(f"      {r['model_name']:22s} n={r['n']:<4d} "
                   f"one-sided={_fmt_pct(r['one_sided'])}")
-
-    try:
-        df_d = load_completed_daily_forecasts(conn, ticker="SPX")
-        _print_coverage_block("DAILY / 0DTE (forecast_log_daily, SPX)",
-                              pi_coverage(df_d))
-    except Exception as e:
-        print(f"\n  DAILY / 0DTE: table not available yet ({e})")
 
     print("\n" + "=" * 70)
 

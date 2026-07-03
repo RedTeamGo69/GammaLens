@@ -788,155 +788,6 @@ def get_event_flags(conn) -> pd.DataFrame:
     return df
 
 
-# =============================================================================
-# DAILY SPX + VIX + VIX1D  (0DTE spread finder data layer)
-# =============================================================================
-# Separate from the weekly fetchers so the existing weekly_spx pipeline stays
-# untouched. VIX1D (^VIX1D on yfinance) only exists from ~2022-04-25 so the
-# daily series carries NULL vix1d_close before that — daily HAR specs that
-# don't depend on VIX1D (M1_daily_baseline) can still train on the full window.
-
-def fetch_daily_spx_vix(years: int = 4) -> pd.DataFrame:
-    """Pull daily SPX OHLC + VIX + VIX1D from yfinance.
-
-    Returns DataFrame indexed by session_date (Monday-Friday calendar dates,
-    no weekend rows) with columns:
-        spx_open, spx_high, spx_low, spx_close,
-        range_pts, range_pct, log_range, spx_return,
-        vix_close, vix1d_close
-
-    VIX1D pre-2022 rows are NaN — the feature builder lets daily HAR train
-    on a smaller set of specs in that window via feature_has_enough_data.
-    """
-    end   = datetime.today()
-    start = end - timedelta(days=int(years * 365 + 30))
-
-    # SPX daily bars: Tradier primary, yfinance fallback (bar_sources).
-    log.info(f"Fetching daily SPX OHLC from {start.date()} to {end.date()}")
-    from range_finder.bar_sources import fetch_daily_bars
-    spx_bars = fetch_daily_bars("^GSPC", "SPX", years, "SPX")
-    if spx_bars.empty:
-        raise RuntimeError("no daily SPX bars from any source — "
-                           "market may be closed or network issue")
-    spx = spx_bars[["open", "high", "low", "close"]].copy()
-    spx.columns = ["spx_open", "spx_high", "spx_low", "spx_close"]
-
-    # VIX / VIX1D daily closes: yfinance seeds the frame; the Cboe overlay
-    # below is the primary source and fills anything yfinance missed.
-    log.info("Fetching daily VIX closes")
-    vix_raw = yf.download("^VIX", start=start, end=end, interval="1d",
-                          progress=False, timeout=60)
-
-    log.info("Fetching daily VIX1D closes")
-    vix1d_raw = yf.download("^VIX1D", start=start, end=end, interval="1d",
-                            progress=False, timeout=60)
-
-    def _flatten(raw):
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        return raw
-
-    vix_raw = _flatten(vix_raw)
-    vix1d_raw = _flatten(vix1d_raw)
-
-    vix = vix_raw[["Close"]].copy() if not vix_raw.empty and "Close" in vix_raw.columns \
-        else pd.DataFrame(columns=["vix_close"])
-    if not vix.empty:
-        vix.columns = ["vix_close"]
-
-    if not vix1d_raw.empty and "Close" in vix1d_raw.columns:
-        vix1d = vix1d_raw[["Close"]].copy()
-        vix1d.columns = ["vix1d_close"]
-    else:
-        log.warning("VIX1D returned empty — vix1d_close will be NULL "
-                    "(expected pre-2022 or on network errors).")
-        vix1d = pd.DataFrame(columns=["vix1d_close"])
-
-    # spx comes from bar_sources pre-normalized — align the yfinance frames
-    # before joining so dates actually match.
-    for frame in (vix, vix1d):
-        if not frame.empty:
-            frame.index = pd.to_datetime(frame.index).normalize()
-    df = spx.join(vix, how="left")
-    df = df.join(vix1d, how="left")
-    df.index.name = "session_date"
-    df.index = pd.to_datetime(df.index).normalize()
-
-    # Overlay official Cboe closes for VIX and VIX1D (primary source).
-    # VIX1D is the one that matters most: yfinance's ^VIX1D series only starts
-    # at the 2023-04-24 index launch, but Cboe published reconstructed values
-    # back to 2022-05-13 — this fills that gap AND wins over yfinance wherever
-    # both have the session. The yfinance values above remain as the
-    # seam-filler (e.g. today's row before Cboe posts EOD) and as the fallback
-    # when the Cboe CDN is unreachable.
-    from range_finder.cboe_data import merge_cboe_closes
-    df = merge_cboe_closes(df, {"vix_close": "VIX", "vix1d_close": "VIX1D"})
-
-    df["range_pts"]  = df["spx_high"] - df["spx_low"]
-    df["range_pct"]  = df["range_pts"] / df["spx_open"]
-    df["log_range"]  = df["range_pct"].apply(
-        lambda x: pd.NA if (x is None or pd.isna(x) or x <= 0) else math.log(x)
-    )
-    df["spx_return"] = (df["spx_close"] - df["spx_open"]) / df["spx_open"]
-
-    df.dropna(subset=["spx_open", "spx_close", "range_pct"], inplace=True)
-    log.info(f"Daily SPX/VIX/VIX1D: {len(df)} daily rows collected")
-    return df
-
-
-def save_daily_spx(conn, df: pd.DataFrame, ticker: str = "SPX") -> int:
-    """Upsert daily SPX/VIX/VIX1D rows into the daily_spx table."""
-    now = datetime.now(timezone.utc).isoformat()
-    rows_written = 0
-    cur = conn.cursor()
-    for session_date, row in df.iterrows():
-        cur.execute("""
-            INSERT INTO daily_spx (
-                session_date, ticker,
-                spx_open, spx_high, spx_low, spx_close,
-                range_pts, range_pct, log_range, spx_return,
-                vix_close, vix1d_close,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_date, ticker) DO UPDATE SET
-                spx_open    = excluded.spx_open,
-                spx_high    = excluded.spx_high,
-                spx_low     = excluded.spx_low,
-                spx_close   = excluded.spx_close,
-                range_pts   = excluded.range_pts,
-                range_pct   = excluded.range_pct,
-                log_range   = excluded.log_range,
-                spx_return  = excluded.spx_return,
-                vix_close   = excluded.vix_close,
-                vix1d_close = excluded.vix1d_close,
-                updated_at  = excluded.updated_at
-        """, (
-            session_date.strftime("%Y-%m-%d"), ticker,
-            _safe(row, "spx_open"),   _safe(row, "spx_high"),
-            _safe(row, "spx_low"),    _safe(row, "spx_close"),
-            _safe(row, "range_pts"),  _safe(row, "range_pct"),
-            _safe(row, "log_range"),  _safe(row, "spx_return"),
-            _safe(row, "vix_close"),  _safe(row, "vix1d_close"),
-            now,
-        ))
-        rows_written += 1
-    conn.commit()
-    log.info(f"daily_spx: {rows_written} rows upserted")
-    return rows_written
-
-
-def get_daily_spx(conn, ticker: str = "SPX", limit: int = None) -> pd.DataFrame:
-    """Return daily_spx for one ticker as a DataFrame indexed by session_date."""
-    query = "SELECT * FROM daily_spx WHERE ticker = ? ORDER BY session_date ASC"
-    params = (ticker,)
-    if limit:
-        query += " LIMIT ?"
-        params = (ticker, int(limit))
-    df = pd.read_sql_query(query, conn, params=params, parse_dates=["session_date"])
-    df.set_index("session_date", inplace=True)
-    return df
-
-
 def _tradier_token() -> str:
     """Resolve the Tradier token from Streamlit secrets or environment
     (same pattern as FRED_API_KEY above). Empty string when unset."""
@@ -949,38 +800,6 @@ def _tradier_token() -> str:
     return token or os.environ.get("TRADIER_TOKEN", "")
 
 
-def fetch_live_vix1d() -> float | None:
-    """Return a single live VIX1D quote, or None on failure.
-
-    Tradier /markets/quotes is the primary source (verified: VIX1D quotes
-    live there; it's the app's authenticated broker API, unlike the yfinance
-    scraper). yfinance remains the fallback for when the token is missing or
-    Tradier has an outage.
-
-    No DB write — this is the intraday-refresh input for the 0DTE finder UI.
-    Cached at the Streamlit fragment level by the caller.
-    """
-    token = _tradier_token()
-    if token:
-        try:
-            from phase1.data_client import TradierDataClient
-            spot = TradierDataClient(token).get_spot_price("VIX1D")
-            if spot and spot > 0:
-                return float(spot)
-            log.warning("Tradier VIX1D quote empty — falling back to yfinance")
-        except Exception as e:
-            log.warning(f"Tradier VIX1D quote failed: {e} — falling back to yfinance")
-
-    try:
-        h = yf.Ticker("^VIX1D").history(period="5d")
-        if h.empty:
-            return None
-        return float(h["Close"].dropna().iloc[-1])
-    except Exception as e:
-        log.warning(f"fetch_live_vix1d failed: {e}")
-        return None
-
-
 # =============================================================================
 # SUMMARY
 # =============================================================================
@@ -991,9 +810,7 @@ def print_summary(conn) -> None:
     Uses separate execute() + fetchone() calls — psycopg2's cursor.execute()
     returns None (unlike sqlite3's, which returns the cursor), so the old
     chained ``cur.execute(...).fetchone()`` pattern AttributeErrors on
-    Postgres. The Postgres migration removed sqlite without auditing this
-    summary path, and it stayed latent until the 0DTE bootstrap exercised
-    it on a Postgres deploy.
+    Postgres.
     """
     def _scalar(sql: str, default=0):
         cur = conn.cursor()
@@ -1012,25 +829,10 @@ def print_summary(conn) -> None:
     macro_count            = _scalar("SELECT COUNT(*) FROM macro_daily")
     event_count            = _scalar("SELECT SUM(event_count) FROM event_flags")
 
-    # 0DTE / daily tables. Wrapped in try/except so an older deploy that
-    # hasn't run init_all_tables() against the new schema yet doesn't crash
-    # the whole summary — it just shows "—" rows for the new tables.
-    try:
-        daily_count            = _scalar("SELECT COUNT(*) FROM daily_spx")
-        daily_min, daily_max   = _pair("SELECT MIN(session_date), MAX(session_date) FROM daily_spx")
-        daily_feat_count       = _scalar("SELECT COUNT(*) FROM daily_model_features")
-        daily_event_count      = _scalar("SELECT SUM(event_count) FROM event_flags_daily")
-    except Exception:
-        daily_count = daily_feat_count = daily_event_count = 0
-        daily_min = daily_max = "—"
-
     print("\n" + "=" * 60)
     print("  DATA COLLECTOR — DATABASE SUMMARY")
     print("=" * 60)
     print(f"  weekly_spx           : {weekly_count:>5} rows  ({weekly_min} → {weekly_max})")
     print(f"  macro_daily          : {macro_count:>5} rows")
     print(f"  event_flags          : {event_count:>5} total event-weeks flagged")
-    print(f"  daily_spx            : {daily_count:>5} rows  ({daily_min} → {daily_max})")
-    print(f"  daily_model_features : {daily_feat_count:>5} rows")
-    print(f"  event_flags_daily    : {daily_event_count:>5} total event-days flagged")
     print("=" * 60 + "\n")

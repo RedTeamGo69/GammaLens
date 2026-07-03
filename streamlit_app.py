@@ -716,12 +716,8 @@ def main():
                 weekly_em=w_em_for_chart, monthly_em=m_em_for_chart,
                 show_daily_em=_show_daily_em, ticker=ticker,
             ))
-        else:
-            if tab == "spread":
-                _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
-            else:
-                from ui_spread_finder_0dte import _render_0dte_spread_finder_tab
-                _render_0dte_spread_finder_tab(spot, levels, regime, data, ticker=ticker)
+        elif tab == "spread":
+            _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
 
     # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:

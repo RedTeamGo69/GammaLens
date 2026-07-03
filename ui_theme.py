@@ -80,7 +80,11 @@ EXP_MODES = [
     ("custom", "Custom"),
 ]
 REFRESH_MODES = [("off", "Off"), ("5min", "5 min"), ("30min", "30 min")]
-TABS = [("gex", "Strike GEX"), ("spread", "Spread Finder"), ("0dte", "0DTE Finder")]
+# The 0DTE Finder tab was deliberately removed (2026-07): a 1,036-session
+# audit showed its VRP verdict had no predictive edge, and its full-session
+# range forecast never fit intraday entry timing. The "0dte" EXP_MODES token
+# above is unrelated — that's the chart's expiration selector, which stays.
+TABS = [("gex", "Strike GEX"), ("spread", "Spread Finder")]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

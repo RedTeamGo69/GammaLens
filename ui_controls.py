@@ -169,12 +169,18 @@ def render_refresh_button() -> None:
 def render_tab_control() -> str:
     """Render the Strike GEX / Spread Finder / 0DTE Finder selector. Returns the
     active tab token (``gex`` | ``spread`` | ``0dte``)."""
+    # Sanitize a stale token (e.g. "0dte" from a session that predates the
+    # 0DTE Finder tab removal) — an out-of-options default raises in
+    # st.segmented_control.
+    _last = st.session_state.get("_tab_last", "gex")
+    if _last not in _TAB_TOKENS:
+        _last = "gex"
     sel = st.segmented_control(
         "View", _TAB_TOKENS, selection_mode="single",
-        default=st.session_state.get("_tab_last", "gex"),
+        default=_last,
         format_func=lambda t: _TAB_LABELS[t],
         key="tab_seg", label_visibility="collapsed",
     )
-    tab = sel or st.session_state.get("_tab_last", "gex")
+    tab = sel or _last
     st.session_state["_tab_last"] = tab
     return tab

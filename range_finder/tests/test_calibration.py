@@ -45,15 +45,6 @@ def _make_conn() -> sqlite3.Connection:
             PRIMARY KEY (week_start, ticker)
         )
     """)
-    conn.execute("""
-        CREATE TABLE forecast_log_daily (
-            session_date TEXT NOT NULL, ticker TEXT NOT NULL DEFAULT 'SPX',
-            model_name TEXT NOT NULL, point_pct REAL, lower_pct REAL,
-            upper_pct REAL, spx_ref REAL, vix1d_close REAL,
-            generated_at TEXT, actual_range_pct REAL, scored_at TEXT,
-            PRIMARY KEY (session_date, ticker, model_name)
-        )
-    """)
     return conn
 
 
@@ -173,27 +164,6 @@ def test_loader_returns_only_completed_rows():
 
     assert len(df) == 1
     assert df["week_start"].iloc[0] == pd.Timestamp("2026-06-01")
-
-
-def test_daily_loader_filters_by_model():
-    conn = _make_conn()
-    conn.executemany(
-        "INSERT INTO forecast_log_daily (session_date, ticker, model_name, "
-        "upper_pct, actual_range_pct) VALUES (?, 'SPX', ?, ?, ?)",
-        [
-            ("2026-06-29", "M2_daily_vix", 0.008, 0.006),
-            ("2026-06-29", "M1_daily_baseline", 0.009, 0.006),
-            ("2026-06-30", "M2_daily_vix", 0.008, None),   # unscored
-        ],
-    )
-    conn.commit()
-
-    df_all = cal.load_completed_daily_forecasts(conn)
-    df_m2 = cal.load_completed_daily_forecasts(conn, model_name="M2_daily_vix")
-
-    assert len(df_all) == 2
-    assert len(df_m2) == 1
-    assert df_m2["model_name"].iloc[0] == "M2_daily_vix"
 
 
 def test_weekly_pi_coverage_wrapper():

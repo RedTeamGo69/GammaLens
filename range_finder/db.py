@@ -122,8 +122,8 @@ class PGCursor:
     def rowcount(self):
         """Rows affected by the last execute (UPDATE/DELETE/INSERT).
 
-        psycopg2 and sqlite3 agree on the semantics cboe_data.backfill_vix1d
-        relies on: an UPDATE whose WHERE matches nothing reports 0.
+        psycopg2 and sqlite3 agree on the semantics callers rely on:
+        an UPDATE whose WHERE matches nothing reports 0.
         """
         return self._cur.rowcount
 
@@ -604,103 +604,12 @@ def init_all_tables(conn) -> None:
         )
     """)
 
-    # =========================================================================
-    # 0DTE / daily-cadence tables (separate from the weekly stack above so the
-    # weekly path stays byte-for-byte unchanged). Only SPX rows are populated
-    # by the bootstrap / cron paths; XSP reuses the SPX-trained daily HAR fit
-    # at inference time (XSP = SPX / 10). Other tickers are not supported by
-    # the 0DTE finder.
-    # =========================================================================
-
-    # --- daily_spx — daily SPX OHLC + VIX + VIX1D ---
-    # vix1d_close is Cboe-primary (official history back to 2022-05-13 via
-    # cboe_data.py; yfinance's ^VIX1D only starts at the 2023-04-24 launch
-    # and remains the seam-filler/fallback). Rows before 2022-05-13 have
-    # NULL vix1d_close — no VIX1D existed. Models that require it
-    # (M2_daily_vix / M3_daily_extended) train on the non-null subset via
-    # time_series_split's dropna.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS daily_spx (
-            session_date    TEXT NOT NULL,
-            ticker          TEXT NOT NULL DEFAULT 'SPX',
-            spx_open        REAL,
-            spx_high        REAL,
-            spx_low         REAL,
-            spx_close       REAL,
-            range_pts       REAL,
-            range_pct       REAL,
-            log_range       REAL,
-            spx_return      REAL,
-            vix_close       REAL,
-            vix1d_close     REAL,
-            updated_at      TEXT,
-            PRIMARY KEY (session_date, ticker)
-        )
-    """)
-
-    # --- event_flags_daily — exact day-of FOMC/CPI/NFP flags (no week aggregation) ---
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS event_flags_daily (
-            session_date    TEXT PRIMARY KEY,
-            has_fomc        INTEGER DEFAULT 0,
-            has_cpi         INTEGER DEFAULT 0,
-            has_nfp         INTEGER DEFAULT 0,
-            event_count     INTEGER DEFAULT 0,
-            updated_at      TEXT
-        )
-    """)
-
-    # --- daily_model_features — feature matrix for the daily HAR ---
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS daily_model_features (
-            session_date         TEXT NOT NULL,
-            ticker               TEXT NOT NULL DEFAULT 'SPX',
-            log_range            REAL,
-            range_pct            REAL,
-            har_d1_daily         REAL,
-            har_w_daily          REAL,
-            har_m_daily          REAL,
-            vix_close            REAL,
-            vix1d_close          REAL,
-            vix1d_implied_range  REAL,
-            vrp_daily            REAL,
-            hv5                  REAL,
-            spx_return_lag1      REAL,
-            abs_return_lag1      REAL,
-            has_fomc_today       INTEGER DEFAULT 0,
-            has_cpi_today        INTEGER DEFAULT 0,
-            has_nfp_today        INTEGER DEFAULT 0,
-            event_count          INTEGER DEFAULT 0,
-            gex                  REAL,
-            gex_normalized       REAL,
-            updated_at           TEXT,
-            PRIMARY KEY (session_date, ticker)
-        )
-    """)
-
-    # --- forecast_log_daily — 0DTE forecast-vs-realized calibration log ---
-    # The lean successor to the removed spread_log_daily: forecast BOUNDS
-    # only (no strikes — that bloat made the old table write-only), written
-    # once per market day by the daily cron, scored the next morning from
-    # daily_spx.range_pct already in the DB (zero network), and READ by
-    # calibration.daily_pi_coverage. PK includes model_name so a spec change
-    # keeps series separable.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS forecast_log_daily (
-            session_date     TEXT NOT NULL,
-            ticker           TEXT NOT NULL DEFAULT 'SPX',
-            model_name       TEXT NOT NULL,
-            point_pct        REAL,
-            lower_pct        REAL,
-            upper_pct        REAL,
-            spx_ref          REAL,
-            vix1d_close      REAL,
-            generated_at     TEXT,
-            actual_range_pct REAL,
-            scored_at        TEXT,
-            PRIMARY KEY (session_date, ticker, model_name)
-        )
-    """)
+    # The 0DTE / daily-cadence tables (daily_spx, event_flags_daily,
+    # daily_model_features, forecast_log_daily) are no longer created here:
+    # the 0DTE finder was deliberately removed (2026-07) after a
+    # 1,036-session audit showed its VRP verdict had no predictive edge.
+    # Existing deployments keep their historical rows — drop the tables
+    # manually if the storage matters.
 
     conn.commit()
     log.info("All range finder tables initialized (postgres)")

@@ -1,17 +1,14 @@
-"""Cboe index-history fetch + VIX1D backfill (range_finder.cboe_data).
+"""Cboe index-history fetch + merge/resample helpers (range_finder.cboe_data).
 
 Pins the contracts that make the Cboe layer safe to run unattended:
 
   * CSV parsing tolerates both date formats Cboe has shipped and coerces
     (rather than crashes on) bad rows,
-  * ``backfill_vix1d`` is UPDATE-only (never invents daily_spx rows), fills
-    only NULLs by default (rerun-idempotent), and replaces values only with
-    ``overwrite=True``,
   * ``merge_cboe_closes`` overlays Cboe values without mutating its input and
     degrades to the input frame when Cboe is unavailable.
-"""
-import sqlite3
 
+(The daily_spx VIX1D backfill tests were removed with the 0DTE finder.)
+"""
 import pandas as pd
 import pytest
 
@@ -19,35 +16,6 @@ import range_finder.cboe_data as cd
 
 
 # ── fixtures / helpers ─────────────────────────────────────────────────────────
-
-def _make_conn() -> sqlite3.Connection:
-    """In-memory DB whose daily_spx matches range_finder.db's DDL (subset)."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE daily_spx (
-            session_date TEXT NOT NULL,
-            ticker       TEXT NOT NULL DEFAULT 'SPX',
-            spx_open     REAL,
-            spx_close    REAL,
-            vix1d_close  REAL,
-            updated_at   TEXT,
-            PRIMARY KEY (session_date, ticker)
-        )
-        """
-    )
-    return conn
-
-
-def _seed(conn, rows):
-    """rows: iterable of (session_date, vix1d_close_or_None)."""
-    conn.executemany(
-        "INSERT INTO daily_spx (session_date, ticker, spx_open, spx_close, vix1d_close) "
-        "VALUES (?, 'SPX', 5000.0, 5010.0, ?)",
-        rows,
-    )
-    conn.commit()
-
 
 def _cboe_frame(closes_by_date: dict) -> pd.DataFrame:
     """A fetch_cboe_index_history-shaped frame: normalized index, ohlc floats."""
@@ -132,96 +100,7 @@ def test_fetch_sorts_ascending(monkeypatch):
     assert df.index.is_monotonic_increasing
 
 
-# ── backfill_vix1d ─────────────────────────────────────────────────────────────
-
-def test_backfill_fills_only_nulls(monkeypatch):
-    conn = _make_conn()
-    _seed(conn, [("2022-05-13", None), ("2022-05-16", 30.55), ("2022-05-17", None)])
-    _patch_history(monkeypatch, _cboe_frame({
-        "2022-05-13": 33.63, "2022-05-16": 99.99, "2022-05-17": 29.20,
-    }))
-
-    updated = cd.backfill_vix1d(conn)
-
-    assert updated == 2
-    rows = dict(conn.execute(
-        "SELECT session_date, vix1d_close FROM daily_spx ORDER BY session_date"
-    ).fetchall())
-    assert rows["2022-05-13"] == pytest.approx(33.63)
-    assert rows["2022-05-16"] == pytest.approx(30.55)   # existing value untouched
-    assert rows["2022-05-17"] == pytest.approx(29.20)
-
-
-def test_backfill_is_idempotent(monkeypatch):
-    conn = _make_conn()
-    _seed(conn, [("2022-05-13", None)])
-    _patch_history(monkeypatch, _cboe_frame({"2022-05-13": 33.63}))
-
-    assert cd.backfill_vix1d(conn) == 1
-    assert cd.backfill_vix1d(conn) == 0  # second run finds nothing to fill
-
-
-def test_backfill_overwrite_replaces_values(monkeypatch):
-    conn = _make_conn()
-    _seed(conn, [("2022-05-16", 30.55)])
-    _patch_history(monkeypatch, _cboe_frame({"2022-05-16": 99.99}))
-
-    assert cd.backfill_vix1d(conn, overwrite=True) == 1
-    val = conn.execute(
-        "SELECT vix1d_close FROM daily_spx WHERE session_date = '2022-05-16'"
-    ).fetchone()[0]
-    assert val == pytest.approx(99.99)
-
-
-def test_backfill_never_inserts_rows(monkeypatch):
-    conn = _make_conn()
-    _seed(conn, [("2022-05-13", None)])
-    # Cboe has a session daily_spx doesn't — it must NOT become a new row.
-    _patch_history(monkeypatch, _cboe_frame({
-        "2022-05-13": 33.63, "2022-05-14": 11.11,
-    }))
-
-    cd.backfill_vix1d(conn)
-
-    assert conn.execute("SELECT COUNT(*) FROM daily_spx").fetchone()[0] == 1
-
-
-def test_backfill_respects_start(monkeypatch):
-    conn = _make_conn()
-    _seed(conn, [("2022-05-13", None), ("2023-01-03", None)])
-    _patch_history(monkeypatch, _cboe_frame({
-        "2022-05-13": 33.63, "2023-01-03": 21.50,
-    }))
-
-    assert cd.backfill_vix1d(conn, start="2023-01-01") == 1
-    val = conn.execute(
-        "SELECT vix1d_close FROM daily_spx WHERE session_date = '2022-05-13'"
-    ).fetchone()[0]
-    assert val is None
-
-
-# ── vix1d_coverage ─────────────────────────────────────────────────────────────
-
-def test_coverage_math():
-    conn = _make_conn()
-    _seed(conn, [
-        ("2022-04-25", None),          # before Cboe window — not backfillable
-        ("2022-05-13", None),          # in window, NULL — backfillable
-        ("2023-04-24", 17.5),          # covered
-    ])
-
-    cov = cd.vix1d_coverage(conn)
-
-    assert cov == {
-        "min_date": "2022-04-25",
-        "max_date": "2023-04-24",
-        "non_null": 1,
-        "total": 3,
-        "null_in_cboe_window": 1,
-    }
-
-
-# ── merge_cboe_closes / merge_cboe_vix1d ───────────────────────────────────────
+# ── merge_cboe_closes ──────────────────────────────────────────────────────────
 
 def _daily_frame():
     idx = pd.DatetimeIndex(["2022-05-13", "2022-05-16", "2022-05-17"])
@@ -237,7 +116,7 @@ def test_merge_cboe_wins_and_fills(monkeypatch):
         "2022-05-13": 33.63, "2022-05-16": 99.99,
     }))
 
-    out = cd.merge_cboe_vix1d(df)
+    out = cd.merge_cboe_closes(df, {"vix1d_close": "VIX1D"})
 
     assert out["vix1d_close"].iloc[0] == pytest.approx(33.63)  # Cboe fills NULL
     assert out["vix1d_close"].iloc[1] == pytest.approx(99.99)  # Cboe wins over existing
@@ -252,7 +131,7 @@ def test_merge_degrades_on_cboe_outage(monkeypatch):
         raise ConnectionError("cdn down")
     monkeypatch.setattr(cd, "fetch_cboe_index_history", _boom)
 
-    out = cd.merge_cboe_vix1d(df)
+    out = cd.merge_cboe_closes(df, {"vix1d_close": "VIX1D"})
 
     pd.testing.assert_frame_equal(out, df)   # values degrade to input
     assert out is not df                     # ...but still a new frame
@@ -263,7 +142,7 @@ def test_merge_does_not_mutate_input(monkeypatch):
     original = df.copy()
     _patch_history(monkeypatch, _cboe_frame({"2022-05-13": 33.63}))
 
-    cd.merge_cboe_vix1d(df)
+    cd.merge_cboe_closes(df, {"vix1d_close": "VIX1D"})
 
     pd.testing.assert_frame_equal(df, original)
 

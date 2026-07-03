@@ -62,9 +62,10 @@ def train_window_min_date(years: int = None) -> str:
 # Minimum non-null observations required to fold a feature into a fit.
 # These are cadence-specific: the gate counts ROWS at whatever cadence the
 # caller's frame carries, so "20" means 20 WEEKS (~5 months) for the weekly
-# specs but would mean just 20 trading DAYS (~1 month) for the daily 0DTE
-# specs — far too low a bar for a stable OLS coefficient. Daily callers
-# (har_model_daily) pass min_obs=DEFAULT_MIN_DAYS_FOR_FIT instead.
+# specs but would mean just 20 trading DAYS (~1 month) for a daily-cadence
+# caller — far too low a bar for a stable OLS coefficient. Daily-cadence
+# callers should pass min_obs=DEFAULT_MIN_DAYS_FOR_FIT instead (the removed
+# 0DTE daily HAR did; the gate keeps the capability).
 #
 # Weekly default (20): rule-of-thumb that HC3-robust OLS needs ~10
 # obs/feature plus headroom. Daily default (126): half a trading year —

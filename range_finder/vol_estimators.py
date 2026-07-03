@@ -6,9 +6,8 @@
 # returns — the least efficient estimator OHLC data allows. Parkinson (1980)
 # uses the high-low range (~5x more efficient under GBM); Garman-Klass
 # (1980) adds open/close (~7.4x). Same data, sharper vol estimate — natural
-# CANDIDATE features for the walk-forward experiments
-# (range_finder/feature_experiments.py). Nothing in production consumes
-# these until a candidate clears the adoption gate.
+# CANDIDATE features for future walk-forward feature experiments. Nothing
+# in production consumes these until a candidate clears the adoption gate.
 #
 # Both work at any cadence: pass daily bars with trading_periods=252 or
 # weekly bars with trading_periods=52.

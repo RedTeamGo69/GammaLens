@@ -25,9 +25,7 @@
 #
 # 2026-07 status: walk-forward coverage of the weekly OLS specs is ~82.6%
 # two-sided vs 80% nominal — already calibrated, λ would be ~1. The module
-# exists as the corrective for when that stops being true (and for the 0DTE
-# model, whose empirical coverage is unknown until forecast_log_daily
-# accumulates).
+# exists as the corrective for when that stops being true.
 # =============================================================================
 
 import logging

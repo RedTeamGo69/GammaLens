@@ -4,11 +4,9 @@
 #
 # Cboe publishes free EOD OHLC CSVs for its indices at
 #   https://cdn.cboe.com/api/global/us_indices/daily_prices/{INDEX}_History.csv
-# with verified coverage (2026-07): VIX1D 2022-05-13+, VIX9D 2011+, VIX3M 2009+,
-# VXN 2009+, VIX decades. This matters most for VIX1D: yfinance's ^VIX1D series
-# only starts at the 2023-04-24 index launch, but Cboe reconstructed values back
-# to 2022-05-13 — backfilling those rows grows the 0DTE M2_daily_vix training
-# set by ~30% (the daily window starts ~2022-07).
+# with verified coverage (2026-07): VIX9D 2011+, VIX3M 2009+, VXN 2009+,
+# VIX decades. Feeds the weekly vol features and the Monday-anchor opens for
+# vol indices.
 #
 # yfinance stays as the fallback everywhere; a Cboe outage degrades to current
 # behavior with a warning, never an error.
@@ -16,7 +14,6 @@
 
 import io
 import logging
-from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -26,10 +23,6 @@ log = logging.getLogger(__name__)
 CBOE_INDEX_HISTORY_URL = (
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/{index}_History.csv"
 )
-
-# Cboe's reconstructed VIX1D series begins here — nothing earlier exists to
-# backfill (true 0DTE SPX options didn't trade in size before 2022).
-VIX1D_HISTORY_START = "2022-05-13"
 
 # Cboe has shipped both of these date formats in index-history CSVs.
 _CBOE_DATE_FORMATS = ("%m/%d/%Y", "%Y-%m-%d")
@@ -139,11 +132,6 @@ def merge_cboe_closes(df: pd.DataFrame, col_map: dict[str, str]) -> pd.DataFrame
     return out
 
 
-def merge_cboe_vix1d(df: pd.DataFrame) -> pd.DataFrame:
-    """Overlay official Cboe VIX1D closes onto a daily frame's ``vix1d_close``."""
-    return merge_cboe_closes(df, {"vix1d_close": "VIX1D"})
-
-
 # =============================================================================
 # WEEKLY RESAMPLING — Cboe daily bars -> Monday-anchored weekly bars
 # =============================================================================
@@ -211,125 +199,6 @@ def fetch_cboe_weekly_closes(index: str, name: str) -> pd.Series:
     return s
 
 
-# =============================================================================
-# DB BACKFILL — heal historical NULL vix1d_close rows in place
-# =============================================================================
-
-def vix1d_coverage(conn, ticker: str = "SPX") -> dict:
-    """Read-only VIX1D coverage diagnostic for ``daily_spx``.
-
-    Returns ``{min_date, max_date, non_null, total, null_in_cboe_window}``.
-    ``null_in_cboe_window`` counts NULL vix1d_close rows on/after
-    VIX1D_HISTORY_START — the rows ``backfill_vix1d`` can heal.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT MIN(session_date), MAX(session_date),
-               SUM(CASE WHEN vix1d_close IS NOT NULL THEN 1 ELSE 0 END),
-               COUNT(*)
-        FROM daily_spx WHERE ticker = ?
-        """,
-        (ticker,),
-    )
-    mn, mx, non_null, total = cur.fetchone()
-    cur.execute(
-        """
-        SELECT COUNT(*) FROM daily_spx
-        WHERE ticker = ? AND vix1d_close IS NULL AND session_date >= ?
-        """,
-        (ticker, VIX1D_HISTORY_START),
-    )
-    null_in_window = cur.fetchone()[0]
-    return {
-        "min_date": mn,
-        "max_date": mx,
-        "non_null": int(non_null or 0),
-        "total": int(total or 0),
-        "null_in_cboe_window": int(null_in_window or 0),
-    }
-
-
-def backfill_vix1d(
-    conn,
-    start: str = VIX1D_HISTORY_START,
-    overwrite: bool = False,
-    ticker: str = "SPX",
-) -> int:
-    """Backfill ``daily_spx.vix1d_close`` from official Cboe history.
-
-    UPDATE-only by design: rows are never inserted, so a Cboe session that the
-    SPX OHLC series doesn't have (half-day quirks, source gaps) can't create a
-    close-only skeleton row. Default fills only NULLs (idempotent — a rerun
-    finds nothing to fill); ``overwrite=True`` replaces yfinance values with
-    Cboe's official ones. Returns the number of rows actually updated.
-    """
-    hist = fetch_cboe_index_history("VIX1D")
-    hist = hist[hist.index >= pd.Timestamp(start)]
-    if hist.empty:
-        log.warning(f"Cboe VIX1D history empty at/after {start} — nothing to backfill")
-        return 0
-
-    now = datetime.now(timezone.utc).isoformat()
-    null_guard = "" if overwrite else "AND vix1d_close IS NULL"
-    updated = 0
-    cur = conn.cursor()
-    for session_date, row in hist.iterrows():
-        close = float(row["close"])
-        if pd.isna(close):
-            continue
-        cur.execute(
-            f"""
-            UPDATE daily_spx
-            SET vix1d_close = ?, updated_at = ?
-            WHERE session_date = ? AND ticker = ? {null_guard}
-            """,
-            (close, now, session_date.strftime("%Y-%m-%d"), ticker),
-        )
-        updated += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-    conn.commit()
-    log.info(f"backfill_vix1d: {updated} daily_spx rows updated "
-             f"(overwrite={overwrite}, start={start})")
-    return updated
-
-
-# =============================================================================
-# CLI — coverage report + backfill
-# =============================================================================
-# Usage:
-#   DATABASE_URL=postgres://... python -m range_finder.cboe_data [--overwrite]
-#
-# Prints VIX1D coverage before and after the backfill. Idempotent.
-
-def main() -> None:
-    import argparse
-    import os
-    import sys
-
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S")
-
-    parser = argparse.ArgumentParser(description="Backfill daily_spx.vix1d_close from Cboe")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Replace existing (yfinance) values with Cboe's, not just NULLs")
-    args = parser.parse_args()
-
-    if not os.environ.get("DATABASE_URL", "").strip():
-        log.error("DATABASE_URL not set — cannot reach daily_spx.")
-        sys.exit(1)
-
-    from range_finder.db import get_connection
-
-    conn = get_connection()
-    before = vix1d_coverage(conn)
-    print(f"\nBEFORE: {before}")
-
-    updated = backfill_vix1d(conn, overwrite=args.overwrite)
-    after = vix1d_coverage(conn)
-    print(f"UPDATED: {updated} rows")
-    print(f"AFTER:  {after}\n")
-
-
-if __name__ == "__main__":
-    main()
+# The daily_spx VIX1D backfill (vix1d_coverage / backfill_vix1d / CLI) was
+# removed with the 0DTE finder (2026-07) — it existed solely to grow the
+# daily HAR's VIX1D training window.

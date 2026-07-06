@@ -32,6 +32,7 @@ from ui_theme import (
 from ui_controls import (
     render_settings_controls, render_tab_control, render_refresh_button,
 )
+from ui_url_state import rehydrate_from_url, sync_to_url
 from ui_pwa import inject_pwa_head
 from ui_mobile import inject_mobile_shell
 
@@ -394,6 +395,11 @@ def main():
     # websocket instead of the old full-page reload, so session_state survives.
     from phase1.ticker_config import all_tickers, get_config
     _curated = all_tickers()
+    # Seed nav state (ticker / tab / exp / recents / export extras) from the URL
+    # once per session BEFORE the setdefaults below, so a Streamlit Cloud session
+    # reset (which wipes session_state) restores where the user was instead of
+    # snapping back to SPX / GEX / no-recents. See ui_url_state.
+    rehydrate_from_url()
     st.session_state.setdefault("ticker_meta", {})
     st.session_state.setdefault("recent_tickers", [])
     st.session_state.setdefault("active_ticker", "SPX")
@@ -735,6 +741,12 @@ def main():
         _bucket = _boundary_ms // _period_ms
         st_autorefresh(interval=_interval_ms,
                        key=f"auto_refresh_{refresh_seconds}_{_bucket}")
+
+    # Mirror the resolved nav state into the URL so it survives a session reset
+    # (Cloud process recycle / websocket reconnect). Runs last, after the tab
+    # content has resolved active_ticker / _tab_last / _exp_last / recents /
+    # export extras. Change-gated, so it's a no-op on the steady-state reruns.
+    sync_to_url()
 
 
 if __name__ == "__main__":

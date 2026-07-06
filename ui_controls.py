@@ -116,13 +116,20 @@ def render_settings_controls(ticker: str, ticker_type: str,
 
     # ── Expiration ──
     _eyebrow("Expiration")
+    # Sanitize the remembered token: it can now arrive from the URL
+    # (ui_url_state rehydration), so a stale/tampered value that isn't a valid
+    # option would otherwise raise in st.pills ("default value not in options").
+    # Mirrors the tab-token guard in render_tab_control.
+    _exp_default = st.session_state.get("_exp_last", "0dte")
+    if _exp_default not in _EXP_TOKENS:
+        _exp_default = "0dte"
     exp_sel = st.pills(
         "Expiration", _EXP_TOKENS, selection_mode="single",
-        default=st.session_state.get("_exp_last", "0dte"),
+        default=_exp_default,
         format_func=lambda t: _EXP_LABELS[t],
         key="exp_pills", label_visibility="collapsed",
     )
-    exp_token = exp_sel or st.session_state.get("_exp_last", "0dte")
+    exp_token = exp_sel or _exp_default
     st.session_state["_exp_last"] = exp_token
 
     # ── Custom date range (only when expiration == Custom) ──

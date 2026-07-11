@@ -98,18 +98,64 @@ def _cached_pf_chain(tradier_token: str, ticker: str, exp: str, run_key: str) ->
     return out
 
 
-def _load_behavioral_stats(conn, category: str) -> dict | None:
-    """Guarded import: returns None (gate reads "na") until the Public.com
-    history pipeline ships and public_api.stats exists."""
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_category_stats(_conn, category: str) -> dict | None:
+    """Behavioral stats for one category key; None until history is synced
+    (the gate reads that as "na"). The Sync button clears this cache so
+    fresh fills show immediately."""
     try:
         from public_api.stats import load_category_stats
     except ImportError:
         return None
     try:
-        return load_category_stats(conn, category)
+        return load_category_stats(_conn, category)
     except Exception as e:
         log.warning(f"category stats load failed: {e}")
         return None
+
+
+def _load_behavioral_stats(conn, category: str) -> dict | None:
+    return _cached_category_stats(conn, category)
+
+
+def _render_public_history_panel(conn) -> None:
+    """Sync + status for the fill history that feeds the behavioral gate.
+    Rendered whether or not a trade is loaded — you sync BEFORE trading."""
+    with st.expander("Public.com fill history (behavioral gate data)",
+                     expanded=False):
+        from public_api.client import PublicClient, get_public_credentials
+        from public_api.store import history_summary, load_review_queue
+        from public_api.sync import sync_public_history
+
+        secret, account = get_public_credentials()
+        summ = history_summary(conn, account or None)
+        st.caption(f"{summ['strategies']} strategies ({summ['closed']} closed) "
+                   f"· {summ['review']} fills in review · last sync "
+                   f"{(summ['last_sync'] or '—')[:19]}")
+        if secret and account:
+            if st.button("⟳ Sync fills from Public", key="pf_sync"):
+                with st.spinner("Pulling fill history…"):
+                    res = sync_public_history(conn, PublicClient(secret, account))
+                if res is None:
+                    st.warning("Public API unreachable or unauthorized — "
+                               "nothing synced.")
+                else:
+                    _cached_category_stats.clear()
+                    st.success(
+                        f"Synced {res.strategies} strategies ({res.closed} "
+                        f"closed) from {res.trade_fills} fills — coverage "
+                        f"{res.coverage:.1%}, {res.ambiguous} ambiguous.")
+                    for err in res.errors:
+                        st.caption(f"⚠ {err}")
+        else:
+            st.caption("`PUBLIC_API_SECRET` / `PUBLIC_ACCOUNT_ID` are not in "
+                       "secrets — the sync button appears once they are. "
+                       "Already-synced stats still feed the gate.")
+        review = load_review_queue(conn)
+        if review:
+            st.caption("Ambiguous fills awaiting review (never force-grouped):")
+            st.dataframe(pd.DataFrame(review), use_container_width=True,
+                         hide_index=True)
 
 
 def _pf_anchor(conn, ticker: str, week_start: str, run_now) -> float | None:
@@ -321,6 +367,8 @@ def _render_preflight_tab(
             st.session_state["preflight_trade"] = manual
             payload = manual
 
+    _render_public_history_panel(conn)
+
     if not payload:
         st.info("Send a proposal from the **Monday Cockpit**, load the last "
                 "persisted one, or enter a trade manually — then run Pre-Flight.")
@@ -406,5 +454,4 @@ def _render_preflight_tab(
                 st.html(_gate_card_html(g))
         st.caption(f"category `{report.category}` · DTE {report.dte} · "
                    f"evaluated {report.checked_at[:19]} UTC · logged as "
-                   f"{report.input_hash} · behavioral history and broker "
-                   f"preflight go live with the Public.com pipeline")
+                   f"{report.input_hash}")

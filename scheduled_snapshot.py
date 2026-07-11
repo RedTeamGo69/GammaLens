@@ -385,6 +385,37 @@ def capture_snapshot():
     # 1,036-session audit showed the VRP verdict had no predictive edge and
     # the feature was retired. DB tables keep their historical rows.
 
+    # =========================================================================
+    # PUBLIC.COM FILL-HISTORY SYNC (Pre-Flight behavioral gate data)
+    # =========================================================================
+    # Gated to the SPX matrix entry so the 8-ticker matrix doesn't sync 8×.
+    # The sync is a full idempotent repull (deterministic strategy ids), and
+    # a failure here must never fail the snapshot job — the behavioral gate
+    # simply shows yesterday's stats until the next run.
+    if ticker == "SPX":
+        try:
+            from public_api.client import PublicClient, get_public_credentials
+            from public_api.sync import sync_public_history
+            from range_finder.db import get_connection, init_all_tables
+
+            secret, account = get_public_credentials()
+            if secret and account:
+                sync_conn = get_connection()
+                init_all_tables(sync_conn)
+                res = sync_public_history(sync_conn, PublicClient(secret, account))
+                if res is None:
+                    _logger.warning("Public fill sync skipped — API unreachable/unauthorized")
+                else:
+                    _logger.info(
+                        f"Public fill sync: {res.strategies} strategies "
+                        f"({res.closed} closed), coverage {res.coverage:.1%}, "
+                        f"{res.ambiguous} in review")
+            else:
+                _logger.info("Public fill sync skipped — PUBLIC_API_SECRET / "
+                             "PUBLIC_ACCOUNT_ID not configured")
+        except Exception as e:
+            _logger.warning(f"Public fill sync failed (non-fatal): {e}")
+
     _logger.info("Scheduled snapshot complete")
 
 

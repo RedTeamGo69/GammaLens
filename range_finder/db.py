@@ -679,6 +679,76 @@ def init_all_tables(conn) -> None:
         )
     """)
 
+    # --- strategy_history (grouped Public.com fills — behavioral gate data) ---
+    # One row per inferred strategy (see public_api/grouping.py). The
+    # deterministic strategy_id (hash of underlying + opening txn ids) makes
+    # full-repull syncs idempotent; grouping_version lets a future algorithm
+    # supersede rows deterministically.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_history (
+            strategy_id         TEXT NOT NULL,
+            account_id          TEXT NOT NULL,
+            underlying          TEXT,
+            category            TEXT,
+            status              TEXT,
+            close_reason        TEXT,
+            opened_at           TEXT,
+            closed_at           TEXT,
+            expiration          TEXT,
+            dte_at_open         INTEGER,
+            n_legs              INTEGER,
+            legs_json           TEXT,
+            realized_pnl        REAL,
+            fees                REAL,
+            opened_via          TEXT DEFAULT 'order',
+            rolled_from         TEXT,
+            grouping_version    INTEGER,
+            updated_at          TEXT,
+            PRIMARY KEY (strategy_id)
+        )
+    """)
+
+    # --- trade_category_stats (derived cache for the Pre-Flight behavioral
+    # gate) --- recomputed wholesale on every sync from closed strategies.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_category_stats (
+            account_id          TEXT NOT NULL,
+            category            TEXT NOT NULL,
+            n_trades            INTEGER,
+            n_wins              INTEGER,
+            win_rate            REAL,
+            total_pnl           REAL,
+            avg_pnl             REAL,
+            avg_win             REAL,
+            avg_loss            REAL,
+            worst_loss          REAL,
+            best_trade          REAL,
+            avg_hold_days       REAL,
+            first_trade_date    TEXT,
+            last_trade_date     TEXT,
+            last_computed_at    TEXT,
+            updated_at          TEXT,
+            PRIMARY KEY (account_id, category)
+        )
+    """)
+
+    # --- fill_review_queue (ambiguous fills — flagged, never force-grouped) ---
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fill_review_queue (
+            txn_id              TEXT NOT NULL,
+            account_id          TEXT,
+            symbol              TEXT,
+            underlying          TEXT,
+            ts                  TEXT,
+            reason              TEXT,
+            context             TEXT,
+            resolved            INTEGER DEFAULT 0,
+            resolved_as         TEXT,
+            updated_at          TEXT,
+            PRIMARY KEY (txn_id)
+        )
+    """)
+
     # The 0DTE / daily-cadence tables (daily_spx, event_flags_daily,
     # daily_model_features, forecast_log_daily) are no longer created here:
     # the 0DTE finder was deliberately removed (2026-07) after a

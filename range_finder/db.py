@@ -604,6 +604,81 @@ def init_all_tables(conn) -> None:
         )
     """)
 
+    # --- cockpit_verdicts (Monday Cockpit TRADE/SKIP audit log) ---
+    # Every Cockpit render UPSERTs one row keyed by a hash of its canonical
+    # DECISION state (verdict + reason codes + strikes + rounded VRP/credit
+    # ratios — not volatile spot/quote noise): identical steady-state reruns
+    # collapse into one row, any real drift (new snapshot cycle, slider
+    # change) appends a fresh one. This is the dataset for auditing the
+    # weekly VRP gate the same way the 0DTE banner was audited in 2026-07 —
+    # the gate ships hard-SKIP on the explicit condition that it can be
+    # re-scored against realized outcomes later.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cockpit_verdicts (
+            ticker              TEXT NOT NULL DEFAULT 'XSP',
+            week_start          TEXT NOT NULL,
+            snapshot_hash       TEXT NOT NULL,
+            logged_at           TEXT,
+            verdict             TEXT,
+            reasons             TEXT,
+            model_name          TEXT,
+            anchor              REAL,
+            spot                REAL,
+            friday_exp          TEXT,
+            forecast_point_pct  REAL,
+            forecast_upper_pct  REAL,
+            straddle_mid        REAL,
+            implied_range_pct   REAL,
+            vrp_ratio           REAL,
+            tripwire_ok         INTEGER,
+            call_wall           REAL,
+            put_wall            REAL,
+            zero_gamma          REAL,
+            events_json         TEXT,
+            k_used              REAL,
+            wing_width          REAL,
+            call_short          REAL,
+            call_long           REAL,
+            put_short           REAL,
+            put_long            REAL,
+            credit              REAL,
+            credit_ratio        REAL,
+            max_loss            REAL,
+            pop                 REAL,
+            proposal_json       TEXT,
+            config_json         TEXT,
+            updated_at          TEXT,
+            PRIMARY KEY (ticker, week_start, snapshot_hash)
+        )
+    """)
+
+    # --- preflight_log (Pre-Flight gate evaluations) ---
+    # Append-per-click: the Pre-Flight tab logs on the explicit "Run
+    # Pre-Flight" action, not on every rerun, so volume stays proportional
+    # to actual usage. Lets the tool's own advice be audited later
+    # (optionally joined against whether the trade was actually taken).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS preflight_log (
+            checked_at          TEXT NOT NULL,
+            input_hash          TEXT NOT NULL,
+            ticker              TEXT,
+            category            TEXT,
+            expiration          TEXT,
+            dte                 INTEGER,
+            in_weekly_window    INTEGER,
+            week_start          TEXT,
+            verdict             TEXT,
+            trade_json          TEXT,
+            behavioral_json     TEXT,
+            model_json          TEXT,
+            structure_json      TEXT,
+            public_json         TEXT,
+            reasons             TEXT,
+            updated_at          TEXT,
+            PRIMARY KEY (checked_at, input_hash)
+        )
+    """)
+
     # The 0DTE / daily-cadence tables (daily_spx, event_flags_daily,
     # daily_model_features, forecast_log_daily) are no longer created here:
     # the 0DTE finder was deliberately removed (2026-07) after a

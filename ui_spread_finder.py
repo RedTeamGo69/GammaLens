@@ -109,7 +109,8 @@ def _cached_rf_get_features(_conn, ticker: str = "SPX"):
     experiment — can't silently change what the UI trains or forecasts on.
     """
     from range_finder.har_model import train_window_min_date
-    return rf_get_features(_conn, min_date=train_window_min_date(), ticker=ticker)
+    return rf_get_features(_conn, min_date=train_window_min_date(),
+                           exclude_covid=True, ticker=ticker)
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)

@@ -586,7 +586,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         # (the 10y history experiment) can't silently retrain production.
         from range_finder.har_model import train_window_min_date
         df_feat = get_features(conn, min_date=train_window_min_date(),
-                               ticker=_features_ticker)
+                               exclude_covid=True, ticker=_features_ticker)
         if df_feat.empty:
             _logger.warning("  No features available — skipping forecast")
             return

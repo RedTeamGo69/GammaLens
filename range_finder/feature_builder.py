@@ -33,6 +33,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# The COVID-crash window excluded from training (both at build time and by
+# exclude_covid readers). Single-sourced here so experiments that toggle the
+# exclusion (range_finder.covid_experiment) filter the exact same rows.
+COVID_START = pd.Timestamp("2020-03-01")
+COVID_END = pd.Timestamp("2020-09-30")
+
 
 # =============================================================================
 # DATABASE — add model_features table
@@ -534,13 +540,12 @@ def build_features(conn, exclude_covid: bool = True,
 
     # Exclude COVID crash period if requested (default True)
     if exclude_covid:
-        covid_start = pd.Timestamp("2020-03-01")
-        covid_end = pd.Timestamp("2020-09-30")
         pre_filter = len(df)
-        df = df[(df.index < covid_start) | (df.index > covid_end)]
+        df = df[(df.index < COVID_START) | (df.index > COVID_END)]
         removed = pre_filter - len(df)
         if removed:
-            log.info(f"exclude_covid: removed {removed} rows (2020-03-01 to 2020-09-30)")
+            log.info(f"exclude_covid: removed {removed} rows "
+                     f"({COVID_START.date()} to {COVID_END.date()})")
 
     log.info(f"Feature matrix ({ticker}): {len(df)} rows x {len(df.columns)} columns")
 
@@ -673,9 +678,7 @@ def get_features(conn, min_date: str = None, exclude_covid: bool = False,
         df = df[df.index >= pd.to_datetime(min_date)]
 
     if exclude_covid:
-        covid_start = pd.Timestamp("2020-03-01")
-        covid_end = pd.Timestamp("2020-09-30")
-        df = df[(df.index < covid_start) | (df.index > covid_end)]
+        df = df[(df.index < COVID_START) | (df.index > COVID_END)]
 
     # (The M6_regime interaction terms har_d1_x_regime / har_w_x_regime were
     # derived here when M6 existed. M6 was removed after walk-forward OOS

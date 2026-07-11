@@ -371,6 +371,8 @@ def main():
         _apply_typed_em_snapshot, _apply_em_snapshot,
     )
     from ui_spread_finder import _render_spread_finder_tab
+    from ui_cockpit import _render_cockpit_tab
+    from ui_preflight import _render_preflight_tab
 
     inject_global_css()
     inject_pwa_head()
@@ -724,6 +726,10 @@ def main():
             ))
         elif tab == "spread":
             _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
+        elif tab == "cockpit":
+            _render_cockpit_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
+        elif tab == "preflight":
+            _render_preflight_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
 
     # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:

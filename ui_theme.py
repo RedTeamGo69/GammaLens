@@ -84,7 +84,12 @@ REFRESH_MODES = [("off", "Off"), ("5min", "5 min"), ("30min", "30 min")]
 # audit showed its VRP verdict had no predictive edge, and its full-session
 # range forecast never fit intraday entry timing. The "0dte" EXP_MODES token
 # above is unrelated — that's the chart's expiration selector, which stays.
-TABS = [("gex", "Strike GEX"), ("spread", "Spread Finder")]
+TABS = [
+    ("gex", "Strike GEX"),
+    ("spread", "Spread Finder"),
+    ("cockpit", "Monday Cockpit"),
+    ("preflight", "Pre-Flight"),
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

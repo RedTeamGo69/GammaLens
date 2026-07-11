@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -106,6 +106,29 @@ def get_calendar_snapshot(ts: datetime | None = None) -> dict:
         "options_market_open_time": options_state.market_open.isoformat() if options_state.market_open is not None else None,
         "options_market_close_time": options_state.market_close.isoformat() if options_state.market_close is not None else None,
     }
+
+def trading_days_between(
+    start_date: date | datetime | str,
+    end_date: date | datetime | str,
+    calendar_name: str = CASH_CALENDAR,
+) -> int:
+    """Count trading sessions in the inclusive window [start_date, end_date].
+
+    Holiday-aware via the exchange calendar: a plain Mon→Fri week is 5, a
+    holiday-shortened week is 4, a weekend-only window is 0, an inverted
+    window is 0. Used to label how many sessions a Monday→Friday forecast
+    window actually spans (the weekly HAR target covers the whole week
+    regardless, but the session count matters for staleness copy and DTE
+    bucketing).
+    """
+    def _iso(d: date | datetime | str) -> str:
+        return d if isinstance(d, str) else pd.Timestamp(d).date().isoformat()
+
+    start_s, end_s = _iso(start_date), _iso(end_date)
+    if start_s > end_s:
+        return 0
+    return int(len(get_schedule(calendar_name, start_s, end_s)))
+
 
 def _ensure_ny(ts: datetime) -> datetime:
     return ts.astimezone(NY_TZ) if ts.tzinfo is not None else ts.replace(tzinfo=NY_TZ)

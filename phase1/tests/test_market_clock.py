@@ -6,6 +6,7 @@ from phase1.market_clock import (
     is_cash_market_open,
     get_expiration_close_dt,
     compute_time_to_expiry_years,
+    trading_days_between,
 )
 
 NY = ZoneInfo("America/New_York")
@@ -68,3 +69,31 @@ def test_good_friday_expiration_uses_thursday_close():
     # Should be ~2.25 hours / (252*6.5 hours/year) ≈ 0.00137 years
     assert T < 0.005  # less than ~1.8 days
     assert T > 0.0    # still positive (before close)
+
+
+# ── trading_days_between ──────────────────────────────────────────────────────
+
+def test_trading_days_between_full_week():
+    assert trading_days_between("2026-03-09", "2026-03-13") == 5
+
+
+def test_trading_days_between_holiday_week():
+    # MLK Monday 2026-01-19: the Mon→Fri window has only 4 sessions
+    assert trading_days_between("2026-01-19", "2026-01-23") == 4
+
+
+def test_trading_days_between_same_day_session():
+    assert trading_days_between("2026-03-11", "2026-03-11") == 1
+
+
+def test_trading_days_between_weekend_only():
+    assert trading_days_between("2026-03-14", "2026-03-15") == 0
+
+
+def test_trading_days_between_inverted_window():
+    assert trading_days_between("2026-03-13", "2026-03-09") == 0
+
+
+def test_trading_days_between_accepts_date_objects():
+    from datetime import date
+    assert trading_days_between(date(2026, 3, 9), date(2026, 3, 13)) == 5

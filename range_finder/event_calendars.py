@@ -7,6 +7,7 @@
 # =============================================================================
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -160,6 +161,41 @@ NFP_DATES = [
 ]
 
 
+# ── Tier-2 calendars (display/warning only — NEVER model features) ──────────
+# PPI and PCE inform the Cockpit event strip and Pre-Flight warnings but
+# deliberately do not feed event_flags / model_features: the HAR event
+# features and spread buffer multipliers stay tier-1 (FOMC/CPI/NFP/OpEx)
+# only, so these lists start at 2026 rather than backfilling to 2016.
+# Extend annually like the lists above; events_for_week() warns when a
+# list is close to lapsing.
+PPI_DATES = [
+    # 2026 BLS schedule (verified 2026-07 via bls.gov/schedule/news_release/
+    # ppi.htm + the release archives ppi_02272026/ppi_04142026/ppi_05132026/
+    # ppi_06112026). 13 calendar-2026 releases: the late-2025 data disruption
+    # folded Oct'25 data into the Nov'25 print (Jan 14) and the cadence
+    # caught up over Jan-Feb. All 8:30 ET.
+    "2026-01-14","2026-01-30","2026-02-27","2026-03-18","2026-04-14",
+    "2026-05-13","2026-06-11","2026-07-15","2026-08-13","2026-09-10",
+    "2026-10-15","2026-11-13","2026-12-15",
+]
+
+PCE_DATES = [
+    # 2026 Personal Income & Outlays (PCE price index) releases, verified
+    # 2026-07 via bea.gov/news/schedule (all 8:30 ET). BEA does not list
+    # past dates retroactively, so the list starts at the June print.
+    "2026-06-25","2026-07-30","2026-08-26","2026-09-30","2026-10-29",
+    "2026-11-25","2026-12-23",
+]
+
+# Event metadata for the Cockpit / Pre-Flight event strip. Tier 1 events
+# (FOMC decision, CPI, NFP) can gate a weekly trade via the skip/widen
+# policy; tier 2 (OpEx, PPI, PCE) only ever warn. Times are scheduled ET
+# release times; None = an all-session event (expiration pinning).
+EVENT_TIERS = {"fomc": 1, "cpi": 1, "nfp": 1, "opex": 2, "ppi": 2, "pce": 2}
+RELEASE_TIMES_ET = {"fomc": "14:00", "cpi": "08:30", "nfp": "08:30",
+                    "ppi": "08:30", "pce": "08:30", "opex": None}
+
+
 def _get_week_start(date_str: str) -> str:
     """Given any date string, return the Monday of that week as ISO string."""
     dt = pd.to_datetime(date_str)
@@ -184,6 +220,63 @@ def _warn_if_calendar_stale(name: str, dates: list[str], horizon_days: int = 45)
             f"extend range_finder/event_calendars.py with the next published dates "
             f"or upcoming event weeks will be flagged as event-free."
         )
+
+
+@dataclass(frozen=True)
+class EventInfo:
+    """One macro event inside a trading week, for event strips and gates."""
+    name: str                    # "fomc" | "cpi" | "nfp" | "opex" | "ppi" | "pce"
+    date: str                    # ISO YYYY-MM-DD
+    tier: int                    # 1 = can gate a weekly trade, 2 = warn only
+    release_time_et: str | None  # "HH:MM" ET, None for all-session events
+
+
+def _third_friday(year: int, month: int) -> str:
+    """Monthly OpEx date: the 3rd Friday of the given month, ISO string."""
+    first_day = datetime(year, month, 1)
+    first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)
+    return (first_friday + timedelta(weeks=2)).strftime("%Y-%m-%d")
+
+
+_EVENT_SOURCES = {  # name → hardcoded date list (opex is computed, not listed)
+    "fomc": FOMC_DATES,
+    "cpi": CPI_DATES,
+    "nfp": NFP_DATES,
+    "ppi": PPI_DATES,
+    "pce": PCE_DATES,
+}
+
+_stale_warned: set[str] = set()
+
+
+def events_for_week(week_start: str) -> list[EventInfo]:
+    """All known macro events inside the Mon→Fri window containing week_start.
+
+    Any date within the target week works — it is normalized to its Monday
+    first. Returns EventInfo rows sorted by date (tier-1 first on same-day
+    ties). Warns once per process when a hardcoded calendar is close to
+    lapsing, because an expired list silently reads as an event-free week.
+    """
+    monday = pd.to_datetime(_get_week_start(week_start))
+    friday = monday + timedelta(days=4)
+    lo, hi = monday.strftime("%Y-%m-%d"), friday.strftime("%Y-%m-%d")
+
+    out: list[EventInfo] = []
+    for name, dates in _EVENT_SOURCES.items():
+        if name not in _stale_warned:
+            _warn_if_calendar_stale(name.upper(), dates)
+            _stale_warned.add(name)
+        for d in dates:
+            if lo <= d <= hi:
+                out.append(EventInfo(name=name, date=d, tier=EVENT_TIERS[name],
+                                     release_time_et=RELEASE_TIMES_ET[name]))
+
+    opex = _third_friday(monday.year, monday.month)
+    if lo <= opex <= hi:
+        out.append(EventInfo(name="opex", date=opex, tier=EVENT_TIERS["opex"],
+                             release_time_et=RELEASE_TIMES_ET["opex"]))
+
+    return sorted(out, key=lambda e: (e.date, e.tier, e.name))
 
 
 def build_event_flags(conn) -> int:
@@ -224,10 +317,7 @@ def build_event_flags(conn) -> int:
     today = datetime.today()
     for year in range(2016, today.year + 2):
         for month in range(1, 13):
-            first_day = datetime(year, month, 1)
-            first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)
-            third_friday = first_friday + timedelta(weeks=2)
-            mark(third_friday.strftime("%Y-%m-%d"), "has_opex")
+            mark(_third_friday(year, month), "has_opex")
 
     # Upsert into DB
     cur = conn.cursor()

@@ -362,6 +362,7 @@ class TradierDataClient:
                 greeks = {}
             iv = self._parse_iv_from_greeks(greeks)
             vendor_gamma = safe_float(greeks.get("gamma", 0), 0.0) if greeks else 0.0
+            vendor_delta = safe_float(greeks.get("delta", 0), 0.0) if greeks else 0.0
 
             row = {
                 "strike": strike,
@@ -369,6 +370,7 @@ class TradierDataClient:
                 "volume": volume,
                 "impliedVolatility": iv,
                 "vendorGamma": vendor_gamma,
+                "vendorDelta": vendor_delta,
                 "bid": bid,
                 "ask": ask,
                 "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0,

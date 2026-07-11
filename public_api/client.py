@@ -22,6 +22,8 @@ import time
 
 import requests
 
+from public_api.occ import to_occ_symbol
+
 log = logging.getLogger(__name__)
 
 AUTH_URL = "https://api.public.com/userapiauthservice/personal/access-tokens"
@@ -194,3 +196,73 @@ class PublicClient:
         except Exception as e:
             log.warning(f"Public multi-leg preflight failed: {e}")
             return None
+
+
+def build_multileg_payload(ticker: str, expiration: str,
+                           legs: list[dict]) -> list[dict]:
+    """Proposed-trade legs ({option_type, direction, strike} dicts) → the
+    documented preflight leg shape. All legs are opening legs — this tool
+    never preflights closes (it gates NEW trades)."""
+    out = []
+    for l in legs:
+        opt_type = str(l["option_type"]).lower()
+        out.append({
+            "instrument": {
+                "symbol": to_occ_symbol(ticker, expiration, opt_type,
+                                        float(l["strike"])),
+                "type": "OPTION",
+            },
+            "side": "BUY" if str(l["direction"]).lower() == "buy" else "SELL",
+            "openCloseIndicator": "OPEN",
+            "ratioQuantity": 1,
+            "optionDetails": {
+                "baseSymbol": ticker.upper(),
+                "type": "CALL" if opt_type.startswith("c") else "PUT",
+                "strikePrice": f"{float(l['strike']):g}",
+                "optionExpireDate": expiration,
+            },
+        })
+    return out
+
+
+def normalize_preflight_response(raw: dict | None) -> dict | None:
+    """Documented preflight response → the flat shape
+    preflight_engine.check_public_preflight consumes. None passes through
+    (gate reads "na"); anything error-shaped becomes status=rejected."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return {"status": "rejected", "messages": ["unrecognized response"]}
+    if raw.get("error") or raw.get("errors") or str(raw.get("status", "")).lower() in ("rejected", "error"):
+        msgs = raw.get("messages") or raw.get("errors") or [str(raw.get("error"))]
+        return {"status": "rejected",
+                "messages": [str(m) for m in (msgs if isinstance(msgs, list) else [msgs])]}
+
+    def _num(*path):
+        node = raw
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        try:
+            return float(node)
+        except (TypeError, ValueError):
+            return None
+
+    out = {"status": "ok"}
+    cost = _num("estimatedCost") if _num("estimatedCost") is not None else _num("orderValue")
+    if cost is not None:
+        out["estimated_cost"] = cost
+    bp = _num("buyingPowerRequirement")
+    if bp is None:
+        bp = _num("marginImpact", "marginUsageImpact")
+    if bp is not None:
+        out["buying_power_impact"] = bp
+    margin = _num("marginRequirement", "longInitialRequirement")
+    if margin is None:
+        margin = _num("marginImpact", "initialMarginRequirement")
+    if margin is not None:
+        out["margin_requirement"] = margin
+    if raw.get("strategyName"):
+        out["messages"] = [f"strategy: {raw['strategyName']}"]
+    return out

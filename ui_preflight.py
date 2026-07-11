@@ -425,6 +425,33 @@ def _render_preflight_tab(
         category = category_key(trade, dte)
         stats = _load_behavioral_stats(conn, category)
 
+        # Broker margin/cost preflight — only when Public credentials exist;
+        # every failure path collapses to None → the gate reads "na".
+        public_response = None
+        from public_api.client import (PublicClient, build_multileg_payload,
+                                       get_public_credentials,
+                                       normalize_preflight_response)
+        pub_secret, pub_account = get_public_credentials()
+        if pub_secret and pub_account and payload.get("legs") and exp:
+            try:
+                qm = chain.get("quote_map") or {}
+                natural = 0.0
+                for l in payload["legs"]:
+                    row = qm.get(float(l["strike"])) or {}
+                    px_key = f"{l['option_type']}_"
+                    if str(l["direction"]).lower() == "sell":
+                        natural += float(row.get(px_key + "bid", 0) or 0)
+                    else:
+                        natural -= float(row.get(px_key + "ask", 0) or 0)
+                raw = PublicClient(pub_secret, pub_account).preflight_multileg(
+                    legs=build_multileg_payload(t, exp, payload["legs"]),
+                    quantity=int(payload.get("quantity") or 1),
+                    limit_price=max(0.01, round(abs(natural), 2)),
+                )
+                public_response = normalize_preflight_response(raw)
+            except Exception as e:
+                log.warning(f"public preflight failed: {e}")
+
         report = run_preflight(
             trade,
             stats=stats,
@@ -433,7 +460,7 @@ def _render_preflight_tab(
             week_friday_exp=friday_exp,
             chain_quotes=chain.get("quote_map"),
             em_pts=em_pts,
-            public_response=None,   # broker preflight wired in a later step
+            public_response=public_response,
             cfg=cfg,
             dte=dte,
         )

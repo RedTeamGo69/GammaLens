@@ -53,3 +53,13 @@ def parse_occ_symbol(symbol: str | None) -> OccOption | None:
 def underlying_of(occ: OccOption) -> str:
     """Trading-symbol underlying for an OCC root (SPXW → SPX, etc.)."""
     return _ROOT_TO_UNDERLYING.get(occ.root, occ.root)
+
+
+def to_occ_symbol(root: str, expiration: str, option_type: str,
+                  strike: float) -> str:
+    """Inverse of parse_occ_symbol: (XSP, 2026-07-17, call, 765) →
+    XSP260717C00765000. Used to build broker preflight legs."""
+    y, m, d = expiration.split("-")
+    cp = "C" if option_type.lower().startswith("c") else "P"
+    return (f"{root.upper()}{int(y) % 100:02d}{int(m):02d}{int(d):02d}"
+            f"{cp}{int(round(strike * 1000)):08d}")

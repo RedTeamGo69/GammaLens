@@ -72,10 +72,18 @@ def test_hash_deterministic():
     assert snapshot_hash(make_verdict(), WEEK) == snapshot_hash(make_verdict(), WEEK)
 
 
-def test_spot_drift_does_not_change_hash():
-    # A 90-second refresh where only live spot moved is the SAME decision
-    assert snapshot_hash(make_verdict(spot=601.0), WEEK) == \
-        snapshot_hash(make_verdict(spot=602.7), WEEK)
+def test_spot_drift_within_sweet_spot_band_keeps_hash():
+    # A 90-second refresh where spot wobbles INSIDE the sweet-spot band is
+    # the SAME decision (shorts 606/594 → mid 600, band ±1.5 at 0.25× EM 6)
+    assert snapshot_hash(make_verdict(spot=600.4), WEEK) == \
+        snapshot_hash(make_verdict(spot=601.2), WEEK)
+
+
+def test_entry_mode_flip_changes_hash():
+    # Drifting OUT of the band flips full-condor → leg-in guidance — the
+    # tool is now telling the user something different, so it's a new row
+    assert snapshot_hash(make_verdict(spot=601.0), WEEK) != \
+        snapshot_hash(make_verdict(spot=603.0), WEEK)
 
 
 def test_strike_change_changes_hash():
@@ -109,6 +117,9 @@ def test_build_cockpit_row_maps_fields():
     assert isinstance(json.loads(row["reasons"]), list)
     assert json.loads(row["proposal_json"])["call_short"] == 606
     assert row["tripwire_ok"] == 1
+    assert row["sweet_spot"] == 600.0
+    assert row["entry_mode"] == "full_condor"       # spot 601 is in the band
+    assert row["entry_lean"] == "balanced"
     assert set(row) == set(_COCKPIT_COLS)
 
 

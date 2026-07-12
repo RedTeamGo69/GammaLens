@@ -141,6 +141,10 @@ def _render_public_history_panel(conn) -> None:
                                "nothing synced.")
                 else:
                     _cached_category_stats.clear()
+                    # The Cockpit's "already open this week" hint reads the
+                    # same table — keep its cache in step with this one.
+                    from ui_cockpit import _cached_open_week_strategies
+                    _cached_open_week_strategies.clear()
                     st.success(
                         f"Synced {res.strategies} strategies ({res.closed} "
                         f"closed) from {res.trade_fills} fills — coverage "
@@ -329,6 +333,11 @@ def _render_preflight_tab(
     payload = st.session_state.get("preflight_trade")
     top = st.columns([1, 1, 2])
     with top[0]:
+        # The persisted row holds the whole condor but a legged-in entry may
+        # have only one side working — let recovery rebuild just that side.
+        recover_as = st.selectbox(
+            "Recover as", ["Full condor", "Put spread only", "Call spread only"],
+            key="pf_load_structure", label_visibility="collapsed")
         if st.button("↩ Load last cockpit proposal", key="pf_load_last"):
             try:
                 last = load_last_proposal(conn, COCKPIT_TICKER)
@@ -337,17 +346,24 @@ def _render_preflight_tab(
                 st.warning(f"Could not load: {e}")
             if last and last.get("proposal"):
                 p = last["proposal"]
+                put_legs = [
+                    {"option_type": "put", "direction": "buy", "strike": p.get("put_long")},
+                    {"option_type": "put", "direction": "sell", "strike": p.get("put_short")},
+                ]
+                call_legs = [
+                    {"option_type": "call", "direction": "sell", "strike": p.get("call_short")},
+                    {"option_type": "call", "direction": "buy", "strike": p.get("call_long")},
+                ]
+                legs = (put_legs if recover_as == "Put spread only"
+                        else call_legs if recover_as == "Call spread only"
+                        else put_legs + call_legs)
                 st.session_state["preflight_trade"] = {
-                    "source": f"cockpit log ({last.get('week_start')})",
+                    "source": (f"cockpit log ({last.get('week_start')}, "
+                               f"{recover_as.lower()})"),
                     "ticker": COCKPIT_TICKER,
                     "expiration": p.get("expiration"),
                     "quantity": 1,
-                    "legs": [
-                        {"option_type": "put", "direction": "buy", "strike": p.get("put_long")},
-                        {"option_type": "put", "direction": "sell", "strike": p.get("put_short")},
-                        {"option_type": "call", "direction": "sell", "strike": p.get("call_short")},
-                        {"option_type": "call", "direction": "buy", "strike": p.get("call_long")},
-                    ],
+                    "legs": legs,
                 }
                 payload = st.session_state["preflight_trade"]
             elif last is None:

@@ -387,6 +387,89 @@ def test_pop_mixed_sources_and_unavailable():
     assert v2.proposal.pop_source == "unavailable"
 
 
+# ── entry guidance: sweet spot, leg-in, Wednesday cutoff ─────────────────────
+# Fixture geometry: shorts 606/594 → sweet spot 600; EM 6 → tolerance band
+# ±1.5 pts (0.25× EM) around 600.
+
+def test_entry_full_condor_at_sweet_spot():
+    v = run(spot=600.0)
+    e = v.proposal.entry
+    assert e is not None
+    assert e.sweet_spot == 600.0
+    assert (e.mode, e.lean) == ("full_condor", "balanced")
+    assert "entry_full_condor" in codes(v, "info")
+    assert "sell the whole condor" in e.note
+
+
+def test_entry_tolerance_boundary_is_inclusive():
+    v = run(spot=601.5)                      # exactly 0.25× EM from the mid
+    assert v.proposal.entry.mode == "full_condor"
+
+
+def test_entry_leg_in_call_lean():
+    v = run(spot=603.0)                      # 3 pts above → outside the band
+    e = v.proposal.entry
+    assert (e.mode, e.lean) == ("leg_in", "call_side")
+    assert e.distance_pts == pytest.approx(3.0)
+    assert e.distance_em == pytest.approx(0.5)
+    assert "CALL side" in e.note and "rich side" in e.note
+    assert "entry_leg_in" in codes(v, "info")
+    assert v.verdict == "TRADE"              # guidance, never a gate
+
+
+def test_entry_leg_in_put_lean():
+    v = run(spot=597.0)
+    e = v.proposal.entry
+    assert (e.mode, e.lean) == ("leg_in", "put_side")
+    assert "PUT side" in e.note
+
+
+def test_sweet_spot_follows_snapped_strikes_not_anchor():
+    # Call wall snaps the short call 606→608; put side stays 594 → the
+    # midpoint moves to 601 (the sweet spot is between the SHORTS).
+    v = run(gex_levels={"call_wall": 608.0}, spot=601.0)
+    assert v.proposal.call_short == 608
+    assert v.proposal.entry.sweet_spot == 601.0
+
+
+def test_entry_cutoff_gates_thursday():
+    v = run(entry_weekday=3)                 # Thursday
+    assert v.verdict == "SKIP"
+    assert "entry_cutoff" in codes(v, "gate")
+    text = next(r.text for r in v.reasons if r.code == "entry_cutoff")
+    assert "Thursday" in text and "Wednesday" in text
+
+
+def test_entry_cutoff_allows_wednesday_and_future_weeks():
+    assert "entry_cutoff" not in codes(run(entry_weekday=2))   # Wednesday OK
+    assert "entry_cutoff" not in codes(run(entry_weekday=0))   # Monday OK
+    assert "entry_cutoff" not in codes(run(entry_weekday=None))  # next-week plan
+
+
+def test_entry_cutoff_suppresses_entry_advice():
+    # "Complete by Wednesday" next to a Thursday closed-window gate is
+    # contradictory copy — past the cutoff the advice reason is dropped,
+    # while the assessment still rides on the proposal for the chip strip.
+    v = run(entry_weekday=3)
+    assert "entry_cutoff" in codes(v, "gate")
+    assert "entry_full_condor" not in codes(v)
+    assert "entry_leg_in" not in codes(v)
+    assert v.proposal.entry is not None
+
+
+def test_side_economics_standalone_numbers():
+    v = run()
+    cs, ps = v.proposal.call_side, v.proposal.put_side
+    # decay chain: each side's own credit is 5.26 − 3.94 = 1.32 on width 5
+    assert cs["credit"] == pytest.approx(1.32)
+    assert cs["credit_ratio"] == pytest.approx(0.264)
+    assert cs["breakeven"] == pytest.approx(606 + 1.32)     # own BE, own credit
+    assert cs["max_loss"] == pytest.approx((5 - 1.32) * 100)
+    assert ps["breakeven"] == pytest.approx(594 - 1.32)
+    assert cs["short_delta"] == pytest.approx(0.12)
+    assert ps["short_delta"] == pytest.approx(-0.13)
+
+
 # ── audit payload ────────────────────────────────────────────────────────────
 
 def test_inputs_snapshot_for_audit():

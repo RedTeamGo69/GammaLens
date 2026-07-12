@@ -645,12 +645,22 @@ def init_all_tables(conn) -> None:
             credit_ratio        REAL,
             max_loss            REAL,
             pop                 REAL,
+            sweet_spot          REAL,
+            entry_mode          TEXT,
+            entry_lean          TEXT,
             proposal_json       TEXT,
             config_json         TEXT,
             updated_at          TEXT,
             PRIMARY KEY (ticker, week_start, snapshot_hash)
         )
     """)
+
+    # Migration: leg-in entry-guidance columns (sweet spot / mode / lean,
+    # added 2026-07-11) for deploys whose cockpit_verdicts pre-dates them.
+    for col, ctype in [("sweet_spot", "REAL"), ("entry_mode", "TEXT"),
+                       ("entry_lean", "TEXT")]:
+        cur.execute(
+            f"ALTER TABLE cockpit_verdicts ADD COLUMN IF NOT EXISTS {col} {ctype}")
 
     # --- preflight_log (Pre-Flight gate evaluations) ---
     # Append-per-click: the Pre-Flight tab logs on the explicit "Run

@@ -17,6 +17,7 @@ renders div+CSS HTML (no SVG: st.html strips it; no new Plotly).
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 from datetime import timedelta
@@ -150,6 +151,33 @@ def _cached_cockpit_bundle(tradier_token: str, run_key: str, rfr: float) -> dict
 def _cached_xsp_weekly_em(date_key: str) -> dict | None:
     """Monday-frozen weekly EM snapshot for XSP (written by the 9:28 cron)."""
     return get_em_snapshot(date_key, COCKPIT_TICKER, "weekly")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_open_week_strategies(_conn, expiration: str) -> list[str]:
+    """Best-effort leg-in awareness: open XSP strategies for this expiry per
+    the SYNCED fill history (may lag the sync cadence — labeled as such)."""
+    try:
+        rows = _conn.execute(
+            "SELECT legs_json, opened_at FROM strategy_history "
+            "WHERE underlying = ? AND expiration = ? AND status = 'open'",
+            (COCKPIT_TICKER, expiration)).fetchall()
+    except Exception:
+        return []
+    out: list[str] = []
+    for legs_json, opened_at in rows or []:
+        try:
+            legs = (json.loads(legs_json) or {}).get("open") or []
+            bits = [
+                f"{'SELL' if float(l.get('quantity', 0)) < 0 else 'BUY'} "
+                f"{l['occ']['option_type'].upper()} {float(l['occ']['strike']):g}"
+                for l in legs if l.get("occ")
+            ]
+            if bits:
+                out.append(" / ".join(bits) + f" (opened {str(opened_at)[:10]})")
+        except (TypeError, ValueError, KeyError, AttributeError):
+            continue
+    return out
 
 
 def _planning_week(run_now) -> tuple:
@@ -325,6 +353,9 @@ def _band_gauge_html(anchor: float, spot: float | None, forecast: dict,
             parts.append(tick(k, COLORS.get("yellow", "#f5c542"), w=3))
         for k in (p.call_long, p.put_long):
             parts.append(tick(k, _DIM, w=2))
+        if p.entry is not None:
+            parts.append(tick(p.entry.sweet_spot,
+                              COLORS.get("accent_purple", "#a98bff"), w=2))
     parts.append(tick(anchor, "#e7edf5", w=2))
     if spot:
         parts.append(tick(spot, _BLU, w=2, dashed=True))
@@ -334,6 +365,7 @@ def _band_gauge_html(anchor: float, spot: float | None, forecast: dict,
         f'<span style="color:{SF_WARN};">▢ implied (straddle) band</span>',
         f'<span style="color:{COLORS.get("yellow", "#f5c542")};">| short strikes</span>',
         f'<span style="color:{_DIM};">| wings</span>',
+        f'<span style="color:{COLORS.get("accent_purple", "#a98bff")};">| sweet spot</span>',
         f'<span style="color:{SF_BEAR};">┆ call wall</span>',
         f'<span style="color:{SF_BULL};">┆ put wall</span>',
         f'<span style="color:#e7edf5;">| anchor</span>',
@@ -385,6 +417,42 @@ def _proposal_card_html(verdict: CockpitVerdict) -> str:
                           f"{(verdict.proposal.breakeven_vs_em or {}).get('up', '—')}×", _MUT),
     ])
 
+    # Standalone per-vertical economics — the numbers a legger actually
+    # needs (each side's OWN credit/breakeven/max-loss, not the condor's).
+    def _side_row(sd: dict) -> str:
+        if not sd:
+            return ""
+        d = sd.get("short_delta")
+        return (
+            f'<tr style="color:{_TXT};">'
+            f'<td style="padding:3px 10px;font-weight:700;color:'
+            f'{SF_BULL if sd["side"] == "put" else SF_BEAR};">'
+            f'{sd["side"].upper()} SPREAD</td>'
+            f'<td style="padding:3px 10px;">{sd["short"]:g} / {sd["long"]:g}</td>'
+            f'<td style="padding:3px 10px;">{sd["credit"]:.2f}</td>'
+            f'<td style="padding:3px 10px;">{sd["credit_ratio"]:.2f}</td>'
+            f'<td style="padding:3px 10px;">{sd["breakeven"]:.2f}</td>'
+            f'<td style="padding:3px 10px;">${sd["max_loss"]:.0f}</td>'
+            f'<td style="padding:3px 10px;">'
+            f'{f"{abs(d):.2f}" if d is not None else "—"}</td></tr>')
+
+    side_table = ""
+    if p.put_side or p.call_side:
+        side_table = (
+            f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.08em;'
+            f'color:{_MUT};margin-top:8px;">LEG-IN VIEW · each vertical standalone</div>'
+            f'<div style="overflow-x:auto;"><table style="border-collapse:collapse;'
+            f'font-size:.84rem;">'
+            f'<tr style="color:{_MUT};font-size:.68rem;letter-spacing:.06em;">'
+            f'<th style="text-align:left;padding:3px 10px;">SIDE</th>'
+            f'<th style="text-align:left;padding:3px 10px;">SHORT/LONG</th>'
+            f'<th style="text-align:left;padding:3px 10px;">CREDIT</th>'
+            f'<th style="text-align:left;padding:3px 10px;">C/W</th>'
+            f'<th style="text-align:left;padding:3px 10px;">OWN BE</th>'
+            f'<th style="text-align:left;padding:3px 10px;">OWN MAX LOSS</th>'
+            f'<th style="text-align:left;padding:3px 10px;">|Δ|</th></tr>'
+            f'{_side_row(p.put_side)}{_side_row(p.call_side)}</table></div>')
+
     rows = []
     for key, label in (("put_long", "BUY PUT"), ("put_short", "SELL PUT"),
                        ("call_short", "SELL CALL"), ("call_long", "BUY CALL")):
@@ -411,6 +479,7 @@ def _proposal_card_html(verdict: CockpitVerdict) -> str:
         f'PROPOSED CONDOR · {esc(p.expiration)} · wing {p.wing_width:g} · '
         f'k={p.k_used:g} · EM ±{p.em_pts:.2f} pts off anchor {p.anchor:.2f}</div>'
         f'{stats}'
+        f'{side_table}'
         f'<div style="overflow-x:auto;"><table style="border-collapse:collapse;'
         f'font-size:.84rem;margin-top:2px;">'
         f'<tr style="color:{_MUT};font-size:.68rem;letter-spacing:.06em;">'
@@ -506,6 +575,10 @@ def _render_cockpit_tab(
         except Exception:
             pass
 
+    # Entry-window input: today's weekday only when evaluating THIS week
+    # (Fri–Sun plans next week, whose entry would happen on its Monday).
+    entry_weekday = run_now.weekday() if monday <= run_now.date() else None
+
     verdict = evaluate_cockpit(
         ticker=COCKPIT_TICKER,
         anchor=anchor,
@@ -521,6 +594,7 @@ def _render_cockpit_tab(
         wing_widths=[float(w) for w in xsp_cfg.get("wing_widths", [5, 10])],
         sessions_to_expiry=sessions,
         t_years=t_years,
+        entry_weekday=entry_weekday,
     )
 
     try:
@@ -560,6 +634,43 @@ def _render_cockpit_tab(
                    f"comparison is Monday-calibrated; the live straddle prices "
                    f"only the remaining window.")
 
+    # Entry guidance: sell-whole at the sweet spot vs leg in, plus the
+    # Mon–Wed entry window status. The window chip is spot-independent, so
+    # it renders whenever there is a proposal — even if the spot feed died
+    # and there is no sweet-spot read.
+    if verdict.proposal is not None:
+        ent = verdict.proposal.entry
+        day_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        window_ok = (entry_weekday is None
+                     or entry_weekday <= cfg.entry_cutoff_weekday)
+        window_txt = "Mon–" + day_abbr[cfg.entry_cutoff_weekday] + (
+            f" · today {day_abbr[entry_weekday]}" if entry_weekday is not None
+            else " · planning next week")
+        chips = []
+        if ent is not None:
+            is_full = ent.mode == "full_condor"
+            if ent.lean == "balanced":
+                lean_txt = "balanced"
+            else:
+                toward = "calls" if ent.lean == "call_side" else "puts"
+                em_bit = (f" ({abs(ent.distance_em):.2f}× EM)"
+                          if ent.distance_em is not None else "")
+                lean_txt = f"{abs(ent.distance_pts):g} pts → {toward}{em_bit}"
+            chips += [
+                _chip("SWEET SPOT (mid of shorts)", f"{ent.sweet_spot:.2f}",
+                      COLORS.get("accent_purple", "#a98bff")),
+                _chip("SPOT vs SWEET SPOT", esc(lean_txt), _TXT),
+                _chip("ENTRY", "FULL CONDOR" if is_full else "LEG IN",
+                      SF_BULL if is_full else _BLU,
+                      border=SF_BULL if is_full else _BLU),
+            ]
+        else:
+            chips.append(_chip("ENTRY", "spot unavailable — no sweet-spot read",
+                               _MUT))
+        chips.append(_chip("ENTRY WINDOW", esc(window_txt),
+                           SF_BULL if window_ok else SF_BEAR))
+        st.html(_chip_row(chips))
+
     if forecast and anchor:
         st.html(_band_gauge_html(anchor, xsp_spot, forecast, straddle_em_pts,
                                  verdict, bundle.get("gex_levels")))
@@ -588,22 +699,16 @@ def _render_cockpit_tab(
     st.html(_proposal_card_html(verdict))
     st.html(_reasons_html(verdict))
 
-    # ── Handoff to Pre-Flight ──
+    # ── Handoff to Pre-Flight: whole condor or either vertical alone ──
     p = verdict.proposal
     if p is not None:
-        if st.button("📤 Send to Pre-Flight", key="ckpt_send_preflight",
-                     type="primary" if verdict.verdict == "TRADE" else "secondary"):
+        def _send_to_preflight(legs: list[dict], label: str) -> None:
             st.session_state["preflight_trade"] = {
-                "source": "cockpit",
+                "source": f"cockpit ({label})",
                 "ticker": COCKPIT_TICKER,
                 "expiration": p.expiration,
                 "quantity": 1,
-                "legs": [
-                    {"option_type": "call", "direction": "sell", "strike": p.call_short},
-                    {"option_type": "call", "direction": "buy", "strike": p.call_long},
-                    {"option_type": "put", "direction": "sell", "strike": p.put_short},
-                    {"option_type": "put", "direction": "buy", "strike": p.put_long},
-                ],
+                "legs": legs,
                 "proposal": asdict(p),
                 "week_start": week_start,
                 "cockpit_verdict": verdict.verdict,
@@ -614,6 +719,37 @@ def _render_cockpit_tab(
                 st.rerun(scope="app")
             except TypeError:  # older Streamlit without fragment scopes
                 st.rerun()
+
+        put_legs = [
+            {"option_type": "put", "direction": "sell", "strike": p.put_short},
+            {"option_type": "put", "direction": "buy", "strike": p.put_long},
+        ]
+        call_legs = [
+            {"option_type": "call", "direction": "sell", "strike": p.call_short},
+            {"option_type": "call", "direction": "buy", "strike": p.call_long},
+        ]
+        is_full_entry = p.entry is not None and p.entry.mode == "full_condor"
+        cbtn1, cbtn2, cbtn3 = st.columns(3)
+        with cbtn1:
+            if st.button("📤 Send full condor", key="ckpt_send_condor",
+                         type=("primary" if verdict.verdict == "TRADE"
+                               and is_full_entry else "secondary")):
+                _send_to_preflight(put_legs + call_legs, "full condor")
+        with cbtn2:
+            if st.button("📤 Put spread only", key="ckpt_send_put"):
+                _send_to_preflight(put_legs, "put spread leg")
+        with cbtn3:
+            if st.button("📤 Call spread only", key="ckpt_send_call"):
+                _send_to_preflight(call_legs, "call spread leg")
+
+    # Leg-in awareness from the synced fill history (best effort — lags
+    # the sync cadence, so it's labeled as such).
+    if friday_exp:
+        try:
+            for descr in _cached_open_week_strategies(conn, friday_exp):
+                st.caption(f"📗 Already open this week per synced fills: {descr}")
+        except Exception:
+            pass
 
     # ── Staleness / provenance footer ──
     bits = [f"model {COCKPIT_MODEL_SPEC}" + (f" fitted {model_fitted_at[:16]}" if model_fitted_at else ""),

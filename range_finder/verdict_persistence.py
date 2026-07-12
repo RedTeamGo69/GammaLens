@@ -6,13 +6,17 @@ Mirrors spread_persistence.py: single-statement UPSERTs on a passed conn
 pure and separately testable.
 
 The snapshot hash is the dedupe key and deliberately covers only the
-DECISION state — verdict, reason codes, strikes, k/wing, and coarsely
-rounded VRP/credit ratios. Volatile observation noise (live spot, exact
-quote mids) is excluded, so a Monday morning of steady-state 90-second
-refreshes collapses into a handful of rows while any change that would
-alter what the user is being told (gate flip, snapped strike, slider move)
-lands a fresh row. The stored row itself carries the full latest payload
-for that decision state.
+DECISION state — verdict, reason codes, strikes, k/wing, coarsely rounded
+VRP/credit ratios, and the entry-guidance mode/lean. Volatile observation
+noise (exact spot value, quote mids) is excluded, so a Monday morning of
+steady-state 90-second refreshes collapses into a handful of rows while
+any change that would alter what the user is being told (gate flip,
+snapped strike, slider move) lands a fresh row. Spot participates only
+through the BANDED entry guidance: wobble inside the sweet-spot band is
+the same row, while crossing the band edge (or losing the spot feed
+entirely, mode → None) flips the advice and legitimately mints a new one.
+The stored row itself carries the full latest payload for that decision
+state.
 """
 from __future__ import annotations
 
@@ -50,6 +54,12 @@ def snapshot_hash(verdict: CockpitVerdict, week_start: str) -> str:
         "strikes": [p.call_short, p.call_long, p.put_short, p.put_long] if p else None,
         "wing_width": p.wing_width if p else None,
         "credit_ratio": _round_or_none(p.credit_ratio, 2) if p else None,
+        # Entry guidance is decision state: full-condor↔leg-in flips (and
+        # lean flips) are the tool telling the user something different, so
+        # they land as distinct audit rows. Bounded — mode is binary and
+        # lean ternary, so at most a handful of extra rows per week.
+        "entry_mode": p.entry.mode if p and p.entry else None,
+        "entry_lean": p.entry.lean if p and p.entry else None,
         "config": verdict.inputs.get("config"),
     }
     return hashlib.sha256(_canonical(payload).encode()).hexdigest()[:16]
@@ -98,6 +108,9 @@ def build_cockpit_row(
         "credit_ratio": p.credit_ratio if p else None,
         "max_loss": p.max_loss if p else None,
         "pop": p.pop if p else None,
+        "sweet_spot": p.entry.sweet_spot if p and p.entry else None,
+        "entry_mode": p.entry.mode if p and p.entry else None,
+        "entry_lean": p.entry.lean if p and p.entry else None,
         "proposal_json": _canonical(asdict(p)) if p else None,
         "config_json": _canonical(verdict.inputs.get("config") or {}),
         "updated_at": now,
@@ -110,8 +123,8 @@ _COCKPIT_COLS = [
     "forecast_upper_pct", "straddle_mid", "implied_range_pct", "vrp_ratio",
     "tripwire_ok", "call_wall", "put_wall", "zero_gamma", "events_json",
     "k_used", "wing_width", "call_short", "call_long", "put_short", "put_long",
-    "credit", "credit_ratio", "max_loss", "pop", "proposal_json", "config_json",
-    "updated_at",
+    "credit", "credit_ratio", "max_loss", "pop", "sweet_spot", "entry_mode",
+    "entry_lean", "proposal_json", "config_json", "updated_at",
 ]
 
 # Everything except the PK and first-seen stamp refreshes on conflict, so the

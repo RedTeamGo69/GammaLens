@@ -32,6 +32,13 @@ MIN_SAMPLE = 10                # behavioral gate: trades needed for a hard signa
 BID_ASK_FLAG_PCT = 10.0        # per-leg bid-ask % of mid worth flagging
 OI_FLOOR = 100                 # per-leg open-interest floor
 
+# Leg-in entry guidance (user's actual workflow, 2026-07-11): the whole
+# condor is sold at once only when spot sits at/near the SWEET SPOT — the
+# midpoint between the two short strikes; otherwise one vertical is sold
+# first and the other legged in later, but never past Wednesday.
+SWEET_SPOT_TOL_EM = 0.25       # "near" = within ±this × EM of the midpoint
+ENTRY_CUTOFF_WEEKDAY = 2       # 0=Mon … 2=Wed: last day to enter/complete
+
 
 @dataclass(frozen=True)
 class CockpitConfig:
@@ -48,3 +55,5 @@ class CockpitConfig:
     bid_ask_flag_pct: float = BID_ASK_FLAG_PCT
     oi_floor: int = OI_FLOOR
     wing_width: float | None = None  # None → first entry of the ticker's wing_widths
+    sweet_spot_tol_em: float = SWEET_SPOT_TOL_EM
+    entry_cutoff_weekday: int = ENTRY_CUTOFF_WEEKDAY

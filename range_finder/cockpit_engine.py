@@ -68,6 +68,24 @@ class SnapResult:
     note: str | None
 
 
+@dataclass(frozen=True)
+class EntryAssessment:
+    """Sell-whole vs leg-in guidance (the user's actual workflow).
+
+    The SWEET SPOT is the midpoint between the two SHORT strikes (not the
+    anchor — GEX snapping can make the condor asymmetric). Spot inside the
+    ±sweet_spot_tol_em × EM band → the condor is balanced enough to sell
+    whole; outside it → leg in one vertical at a time. Which side to sell
+    first is deliberately NOT prescribed (the trader does both) — the lean
+    labels the rich side (spot leans toward it) vs the safe side."""
+    sweet_spot: float
+    distance_pts: float          # spot − sweet_spot (+ = leaning call side)
+    distance_em: float | None    # signed, in EM multiples
+    mode: str                    # "full_condor" | "leg_in"
+    lean: str                    # "balanced" | "call_side" | "put_side"
+    note: str
+
+
 @dataclass
 class CondorProposal:
     ticker: str
@@ -95,6 +113,13 @@ class CondorProposal:
     pop_source: str = "unavailable"   # "vendor" | "bs_iv" | "mixed" | "unavailable"
     leg_quotes: dict = field(default_factory=dict)
     breakeven_vs_em: dict = field(default_factory=dict)
+    # Standalone per-vertical economics for legging in: what each side is
+    # worth ON ITS OWN (own credit, own breakeven = short ± own credit, own
+    # max loss) — different numbers from the full-condor fields above, which
+    # use the combined credit.
+    call_side: dict = field(default_factory=dict)
+    put_side: dict = field(default_factory=dict)
+    entry: EntryAssessment | None = None
 
 
 @dataclass
@@ -164,6 +189,64 @@ def compute_vrp(
         "tripwire_ok": tripwire_ok,
         "passes_gate": passes_gate,
         "convention": VRP_CONVENTION,
+    }
+
+
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                  "Saturday", "Sunday"]
+
+
+def assess_entry(
+    spot: float | None,
+    call_short: float,
+    put_short: float,
+    em_pts: float,
+    cfg: CockpitConfig,
+) -> EntryAssessment | None:
+    """Sell-whole vs leg-in call (see EntryAssessment docstring)."""
+    if not spot or spot <= 0 or em_pts <= 0 or call_short <= put_short:
+        return None
+    sweet_spot = round((call_short + put_short) / 2.0, 2)
+    distance = round(spot - sweet_spot, 2)
+    distance_em = round(distance / em_pts, 2)
+    tol_pts = em_pts * cfg.sweet_spot_tol_em
+
+    if abs(distance) <= tol_pts:
+        note = (f"Spot {spot:g} sits {abs(distance):g} pts "
+                f"({abs(distance_em):.2f}× EM) from the sweet spot {sweet_spot:g} "
+                f"— inside the ±{cfg.sweet_spot_tol_em:g}× EM band; balanced "
+                f"enough to sell the whole condor at once.")
+        return EntryAssessment(sweet_spot, distance, distance_em,
+                               "full_condor", "balanced", note)
+
+    lean = "call_side" if distance > 0 else "put_side"
+    rich = "call" if distance > 0 else "put"
+    safe = "put" if distance > 0 else "call"
+    cutoff = _WEEKDAY_NAMES[cfg.entry_cutoff_weekday]
+    note = (f"Spot {spot:g} leans {abs(distance):g} pts "
+            f"({abs(distance_em):.2f}× EM) toward the {rich.upper()} side of the "
+            f"sweet spot {sweet_spot:g} — the {rich} spread is the rich side, "
+            f"the {safe} spread the safe side. Leg in one vertical rather than "
+            f"selling the whole condor; complete by {cutoff}.")
+    return EntryAssessment(sweet_spot, distance, distance_em,
+                           "leg_in", lean, note)
+
+
+def _side_economics(side: str, short: float, long_: float, credit: float,
+                    width: float, short_delta: float | None) -> dict:
+    """What ONE vertical is worth standalone (for legging in)."""
+    return {
+        "side": side,
+        "short": short,
+        "long": long_,
+        "credit": round(credit, 2),
+        "width": width,
+        "credit_ratio": round(credit / width, 4) if width > 0 else 0.0,
+        "max_profit": round(credit * 100, 2),
+        "max_loss": round((width - credit) * 100, 2),
+        "breakeven": round(short + credit, 2) if side == "call"
+        else round(short - credit, 2),
+        "short_delta": short_delta,
     }
 
 
@@ -391,6 +474,10 @@ def propose_condor(
             "up": round((econ["breakeven_up"] - anchor) / em_pts, 2) if em_pts > 0 else None,
             "dn": round((anchor - econ["breakeven_dn"]) / em_pts, 2) if em_pts > 0 else None,
         },
+        call_side=_side_economics("call", call_short, call_long,
+                                  econ["call_credit"], econ["call_width"], d_call),
+        put_side=_side_economics("put", put_short, put_long,
+                                 econ["put_credit"], econ["put_width"], d_put),
     )
     return proposal, reasons
 
@@ -442,9 +529,15 @@ def evaluate_cockpit(
     wing_widths: list[float],
     sessions_to_expiry: int | None = None,
     t_years: float | None = None,
+    entry_weekday: int | None = None,
 ) -> CockpitVerdict:
     """Ordered gates → TRADE/SKIP + reasons + proposal (built even on SKIP
-    whenever the inputs allow, so the user sees what was skipped)."""
+    whenever the inputs allow, so the user sees what was skipped).
+
+    ``entry_weekday``: today's weekday (0=Mon) when the evaluated week is the
+    CURRENT week — used for the entry-window cutoff (never enter or complete
+    a Mon→Fri condor past Wednesday). Pass None when planning a future week
+    (Fri–Sun runs), where entry would happen on its Monday anyway."""
     reasons: list[VerdictReason] = []
 
     def gate(code: str, text: str) -> None:
@@ -516,6 +609,18 @@ def evaluate_cockpit(
              f"Tier-2 event(s) in the window: {names} — not a gate, but expect "
              f"8:30 ET prints / OpEx pinning.")
 
+    # Entry-window cutoff: a Mon→Fri condor is entered (or a leg-in
+    # completed) Mon–Wed only — Thursday+ leaves too little premium and too
+    # much gap risk per the user's own rule. Only applies when evaluating
+    # the CURRENT week (entry_weekday is None when planning a future week).
+    if entry_weekday is not None and entry_weekday > cfg.entry_cutoff_weekday:
+        cutoff_name = _WEEKDAY_NAMES[cfg.entry_cutoff_weekday]
+        today_name = _WEEKDAY_NAMES[entry_weekday % 7]
+        gate("entry_cutoff",
+             f"Today is {today_name} — the entry window for a Mon→Fri condor "
+             f"closes {cutoff_name}; no new entries or leg-in completions past "
+             f"the cutoff.")
+
     if gex_levels is None:
         info("no_gex", "GEX walls unavailable — strikes are model-only (no wall snap).")
 
@@ -539,6 +644,21 @@ def evaluate_cockpit(
                      f"insufficient premium; strikes are never tightened to chase credit.")
             reasons.extend(_liquidity_annotations(proposal, cfg))
 
+            # Sell-whole vs leg-in guidance (informational — the trader
+            # chooses the side; the tool names the rich/safe sides). Past
+            # the entry cutoff the assessment still rides on the proposal
+            # (chips show what the read WOULD be) but no entry advice is
+            # emitted — "complete by Wednesday" next to a Thursday gate is
+            # contradictory copy.
+            proposal.entry = assess_entry(spot, proposal.call_short,
+                                          proposal.put_short, em_pts, cfg)
+            past_cutoff = (entry_weekday is not None
+                           and entry_weekday > cfg.entry_cutoff_weekday)
+            if proposal.entry is not None and not past_cutoff:
+                code = ("entry_full_condor" if proposal.entry.mode == "full_condor"
+                        else "entry_leg_in")
+                info(code, proposal.entry.note)
+
     verdict = "SKIP" if any(r.severity == "gate" for r in reasons) else "TRADE"
 
     inputs = {
@@ -550,6 +670,13 @@ def evaluate_cockpit(
         "k_configured": cfg.k_expected_move,
         "k_used": k_eff,
         "sessions_to_expiry": sessions_to_expiry,
+        "entry_weekday": entry_weekday,
+        "sweet_spot": (proposal.entry.sweet_spot
+                       if proposal and proposal.entry else None),
+        "entry_mode": (proposal.entry.mode
+                       if proposal and proposal.entry else None),
+        "entry_lean": (proposal.entry.lean
+                       if proposal and proposal.entry else None),
         "forecast_point_pct": point_pct if point_pct > 0 else None,
         "forecast_upper_pct": (forecast or {}).get("upper_pct"),
         "forecast_lower_pct": (forecast or {}).get("lower_pct"),

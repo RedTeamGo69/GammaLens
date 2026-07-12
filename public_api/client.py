@@ -37,23 +37,27 @@ DEFAULT_PAGE_SIZE = 100
 MAX_PAGES = 200                  # 20k transactions — far above the ~550-leg history
 
 
+def _read_st_secret(key: str) -> str:
+    """st.secrets lookup, isolated so tests can stub it out — on a dev
+    machine .streamlit/secrets.toml holds LIVE credentials, and without this
+    seam unit tests would silently read them (same hermeticity hazard the
+    range_finder conftest documents for the Tradier token)."""
+    try:
+        import streamlit as st
+        try:
+            return st.secrets.get(key, "") or ""
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
 def get_public_credentials() -> tuple[str, str]:
     """(secret, account_id) via the st.secrets → env chain; ("", "") when
     unconfigured. Import of streamlit is deferred so headless jobs
     (scheduled_snapshot, tests) never need it."""
-    secret = ""
-    account = ""
-    try:
-        import streamlit as st
-        try:
-            secret = st.secrets.get(SECRET_KEY_NAME, "") or ""
-            account = st.secrets.get(ACCOUNT_KEY_NAME, "") or ""
-        except Exception:
-            pass
-    except Exception:
-        pass
-    secret = secret or os.environ.get(SECRET_KEY_NAME, "")
-    account = account or os.environ.get(ACCOUNT_KEY_NAME, "")
+    secret = _read_st_secret(SECRET_KEY_NAME) or os.environ.get(SECRET_KEY_NAME, "")
+    account = _read_st_secret(ACCOUNT_KEY_NAME) or os.environ.get(ACCOUNT_KEY_NAME, "")
     return secret, account
 
 

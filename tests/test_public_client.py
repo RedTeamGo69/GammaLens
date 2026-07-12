@@ -82,6 +82,9 @@ def test_normalize_rejection_and_none():
 # ── credentials ───────────────────────────────────────────────────────────────
 
 def test_get_public_credentials_env_fallback(monkeypatch):
+    # Hermeticity: stub the st.secrets seam — the dev machine's real
+    # secrets.toml must never leak into unit tests.
+    monkeypatch.setattr(client_mod, "_read_st_secret", lambda key: "")
     monkeypatch.setenv("PUBLIC_API_SECRET", "s3cr3t")
     monkeypatch.setenv("PUBLIC_ACCOUNT_ID", "ACCT1")
     secret, account = get_public_credentials()
@@ -89,10 +92,20 @@ def test_get_public_credentials_env_fallback(monkeypatch):
 
 
 def test_get_public_credentials_blank_when_unset(monkeypatch):
+    monkeypatch.setattr(client_mod, "_read_st_secret", lambda key: "")
     monkeypatch.delenv("PUBLIC_API_SECRET", raising=False)
     monkeypatch.delenv("PUBLIC_ACCOUNT_ID", raising=False)
     secret, account = get_public_credentials()
     assert secret == "" and account == ""
+
+
+def test_st_secrets_takes_precedence_over_env(monkeypatch):
+    monkeypatch.setattr(client_mod, "_read_st_secret",
+                        lambda key: {"PUBLIC_API_SECRET": "from-secrets",
+                                     "PUBLIC_ACCOUNT_ID": "A2"}.get(key, ""))
+    monkeypatch.setenv("PUBLIC_API_SECRET", "from-env")
+    secret, account = get_public_credentials()
+    assert (secret, account) == ("from-secrets", "A2")
 
 
 # ── graceful auth failure (no network) ────────────────────────────────────────

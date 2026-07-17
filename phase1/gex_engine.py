@@ -51,7 +51,7 @@ def unique_preserve_order(seq):
     return out
 
 
-def bs_gamma_vec(S_arr, K_arr, T_arr, r, sigma_arr):
+def bs_gamma_vec(S_arr, K_arr, T_arr, r, sigma_arr, q=0.0):
     """
     Vectorized Black-Scholes gamma.
 
@@ -63,6 +63,9 @@ def bs_gamma_vec(S_arr, K_arr, T_arr, r, sigma_arr):
            rate per option so each option uses the rate appropriate for
            its own DTE instead of a flat 3M scalar).
     sigma_arr: (M,)
+    q:     continuous dividend yield of the underlying (scalar; per-ticker
+           value from ticker_config, e.g. ~0.013 for SPX/XSP). 0.0 keeps
+           the legacy no-dividend behavior.
 
     Returns: (N, M)
     """
@@ -88,8 +91,12 @@ def bs_gamma_vec(S_arr, K_arr, T_arr, r, sigma_arr):
     r_v = r_array[opt_valid] if r_is_array else r
 
     sqrt_T = np.sqrt(T_v)
-    d1 = (np.log(S / K_v) + (r_v + 0.5 * sig_v**2) * T_v) / (sig_v * sqrt_T)
-    g = norm.pdf(d1) / (S * sig_v * sqrt_T)
+    # Continuous dividend yield q: d1 drift is (r - q + sigma^2/2) and gamma
+    # carries the e^{-qT} forward discount. For SPX (q ~ 1.3%) at weekly
+    # tenors the correction is <0.5% of gamma — small, but free to be right,
+    # and it matters more for longer-dated expirations in the target set.
+    d1 = (np.log(S / K_v) + (r_v - q + 0.5 * sig_v**2) * T_v) / (sig_v * sqrt_T)
+    g = np.exp(-q * T_v) * norm.pdf(d1) / (S * sig_v * sqrt_T)
 
     gamma[:, opt_valid] = g
     return gamma
@@ -120,6 +127,14 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
     # so the chart shows the full gamma landscape including deep OTM tails
     lower = spot * (1 - COMPUTATION_RANGE_PCT)
     upper = spot * (1 + COMPUTATION_RANGE_PCT)
+
+    # Per-ticker continuous dividend yield for the direct-IV gamma path
+    # (ticker_config carries ~1.3% for SPX/XSP; single names vary).
+    try:
+        from phase1.ticker_config import get_config as _get_ticker_cfg
+        q = float(_get_ticker_cfg(ticker).get("dividend_yield", 0.0) or 0.0)
+    except Exception:
+        q = 0.0
 
     now = now or datetime.now(NY_TZ)
     now_ny = now.astimezone(NY_TZ) if now.tzinfo is not None else now.replace(tzinfo=NY_TZ)
@@ -204,7 +219,11 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             print(f"  [{i+1}/{len(all_exps)}] {exp}  — FAILED ({entry.get('error', 'unknown error')})")
             continue
 
-        if first_live_exp is None:
+        # first_live_exp drives the headline call_iv/put_iv stats — an
+        # ok-but-EMPTY chain (Tradier returns status ok with a null options
+        # block on some outages) must not claim the slot, or the IV stats
+        # silently read 0 while a later expiration had live quotes.
+        if first_live_exp is None and (calls_raw or puts_raw):
             first_live_exp = exp
 
         for raw_opt, sign in [(c, +1) for c in calls_raw] + [(p, -1) for p in puts_raw]:
@@ -242,7 +261,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             _this_strike_size = size
             _this_strike_volume_dominates = volume > oi
 
-            prep = prepare_option_for_model(raw_opt, sign, T, spot, r_for_exp)
+            prep = prepare_option_for_model(raw_opt, sign, T, spot, r_for_exp, q=q)
             norm_opt = prep["normalized"]
 
             if not prep["accepted"]:
@@ -384,6 +403,13 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
     stats = {
         "net_gex": net_gex_total,
         "net_gex_fmt": fmt_gex(net_gex_total),
+        # The classic dealer-positioning assumption baked into every signed
+        # number here: dealers are LONG the calls customers sold (+gamma)
+        # and SHORT the puts customers bought (-gamma). It is a heuristic,
+        # not an observation — it degrades when flow is dealer-initiated or
+        # heavily 0DTE two-sided. Surfaced so UI/tooling can label the
+        # convention instead of presenting signed GEX as ground truth.
+        "sign_convention": "dealer long calls (+), short puts (-) — heuristic",
         "gex_ratio": gex_ratio_val,
         "pc_ratio": total_put_oi / total_call_oi if total_call_oi > 0 else 0.0,
         "call_oi": fmt_oi(total_call_oi),

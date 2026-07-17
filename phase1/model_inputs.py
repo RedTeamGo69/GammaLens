@@ -25,14 +25,19 @@ from phase1.config import (
 SYNTH_IV_ECONOMIC_FLOOR = 0.05
 
 
-def bs_gamma(S, K, T, r, sigma):
+def bs_gamma(S, K, T, r, sigma, q=0.0):
     """
-    Scalar Black-Scholes gamma.
+    Scalar Black-Scholes gamma with continuous dividend yield q.
+
+    q defaults to 0.0 (legacy). The synthetic-IV inversion kernels below
+    deliberately stay q=0: they invert vendor gamma to an IV and re-evaluate
+    gamma with the SAME kernel, so the yield term cancels in the round trip —
+    threading q there would change nothing but the intermediate IV label.
     """
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return 0.0
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    return norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    return np.exp(-q * T) * norm.pdf(d1) / (S * sigma * np.sqrt(T))
 
 
 _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
@@ -199,7 +204,7 @@ def fit_synthetic_iv(target_gamma, S, K, T, r):
     }
 
 
-def prepare_option_for_model(opt, sign, T, spot, r):
+def prepare_option_for_model(opt, sign, T, spot, r, q=0.0):
     """
     Rich evaluation path for model input selection.
 
@@ -219,7 +224,7 @@ def prepare_option_for_model(opt, sign, T, spot, r):
     vendor_gamma = opt.get("vendorGamma", 0.0) or 0.0
 
     if iv > 0:
-        gamma_now = bs_gamma(spot, K, T, r, iv)
+        gamma_now = bs_gamma(spot, K, T, r, iv, q=q)
         return {
             "accepted": True,
             "reason": "direct_iv",

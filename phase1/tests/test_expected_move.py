@@ -233,3 +233,38 @@ def test_live_market_no_context_note():
     assert result["market_context"] == "live"
     assert result["context_note"] is None
     assert result["classification"]["move_source"] == "spx"
+
+
+# ── find_weekly_expiration: holiday weeks must not roll into next week ────────
+
+from datetime import date as _date
+
+from phase1.expected_move import find_weekly_expiration
+
+
+def test_weekly_exp_exact_friday_match():
+    avail = ["2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02",
+             "2026-04-03", "2026-04-06"]
+    assert find_weekly_expiration(avail, _date(2026, 3, 30)) == "2026-04-03"
+
+
+def test_weekly_exp_good_friday_week_picks_thursday_not_next_monday():
+    """Good Friday week (Friday 2026-04-03 delisted): the weekly straddle
+    must come from Thursday — the week's true last trading day — NOT next
+    Monday, whose extra weekend premium inflates the EM that feeds the
+    Cockpit's VRP gate."""
+    avail = ["2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02",
+             "2026-04-06", "2026-04-07"]          # no 04-03; daily expiries
+    assert find_weekly_expiration(avail, _date(2026, 3, 30)) == "2026-04-02"
+
+
+def test_weekly_exp_none_when_week_is_exhausted():
+    # Friday evening, this week's expiry already delisted: no honest weekly
+    # EM exists — None, never next week's contract.
+    avail = ["2026-04-06", "2026-04-07", "2026-04-08"]
+    assert find_weekly_expiration(avail, _date(2026, 4, 3)) is None
+
+
+def test_weekly_exp_weekend_rolls_to_next_friday():
+    avail = ["2026-04-06", "2026-04-08", "2026-04-10"]
+    assert find_weekly_expiration(avail, _date(2026, 4, 4)) == "2026-04-10"

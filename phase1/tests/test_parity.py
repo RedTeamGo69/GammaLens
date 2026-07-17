@@ -36,3 +36,24 @@ def test_parity_falls_back_if_not_enough_valid_quotes():
 
     assert spot == tradier_spot
     assert "tradier" in source
+
+
+# ── dividend yield in put-call parity (audit M29) ────────────────────────────
+
+def test_parity_growth_factor_lifts_implied_spot():
+    from phase1.parity import _compute_implied_spot_core
+    K = 6000.0
+    # Fabricate mids consistent with S=6000 under q=0 parity at K=6000:
+    # C - P = S*e^{-qT} - K*e^{-rT}. With q=0, r≈0, C-P ≈ S-K = 0 at ATM.
+    calls = [{"strike": K, "bid": 30.0, "ask": 30.2},
+             {"strike": K + 5, "bid": 27.0, "ask": 27.2},
+             {"strike": K - 5, "bid": 33.0, "ask": 33.2}]
+    puts = [{"strike": K, "bid": 30.0, "ask": 30.2},
+            {"strike": K + 5, "bid": 32.0, "ask": 32.2},
+            {"strike": K - 5, "bid": 28.0, "ask": 28.2}]
+    r, T = 0.04, 0.25
+    base = _compute_implied_spot_core(calls, puts, 6000.0, r=r, T=T, q=0.0)
+    lifted = _compute_implied_spot_core(calls, puts, 6000.0, r=r, T=T, q=0.02)
+    if base["spot"] and lifted["spot"]:
+        # e^{qT} = e^{0.005} ≈ 1.005 → implied spot scales up.
+        assert lifted["spot"] > base["spot"]

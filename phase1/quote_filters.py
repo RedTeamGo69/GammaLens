@@ -106,3 +106,64 @@ def summarize_quote_quality(rows, max_spread: float) -> dict:
     summary["crossed_or_locked"] = summary["crossed"] + summary["locked"]
 
     return summary
+
+
+# ── OCC root separation ──────────────────────────────────────────────────────
+#
+# Tradier's /markets/options/chains returns EVERY root listed on an
+# underlying. On the 3rd Friday that means two contracts per SPX strike —
+# the AM-settled monthly (root SPX, last trade Thursday close, settles to
+# Friday-open SET) and the PM-settled weekly (root SPXW, trades through
+# Friday close). NDX similarly lists NDX + NDXP; corporate-action-adjusted
+# equity roots (SPY1 next to SPY) are the same shape. Every strike-keyed
+# QUOTE consumer (parity, ATM straddle, spread quote maps) silently
+# overwrites one root's row with the other's — mixing two different
+# contracts' quotes into one spread or straddle.
+#
+# GEX aggregation must NOT use this filter: both roots' open interest carry
+# dealer gamma, and the engine sums by strike rather than overwriting.
+
+def preferred_root(roots: set[str]) -> "str | None":
+    """Pick the root whose quotes strike-keyed consumers should use.
+
+    Rule (ticker-agnostic): the shortest root is the base symbol; prefer the
+    PM-settled companion base+"W" (SPXW) if listed, then base+"P" (NDXP),
+    else the base itself (plain SPY over adjusted SPY1). Returns None when
+    there is nothing to choose between (0 or 1 distinct roots).
+    """
+    distinct = {r for r in roots if r}
+    if len(distinct) <= 1:
+        return None
+    base = min(distinct, key=len)
+    if f"{base}W" in distinct:
+        return f"{base}W"
+    if f"{base}P" in distinct:
+        return f"{base}P"
+    return base
+
+
+def filter_to_preferred_root(
+    calls: "list[dict] | None",
+    puts: "list[dict] | None",
+) -> "tuple[list[dict], list[dict], str | None]":
+    """Restrict both sides of a chain to a single OCC root for QUOTE use.
+
+    The root is chosen once from the union of both sides so the call and put
+    legs of any derived structure always price off the same contract. Rows
+    without a "root" key (older cached entries, test fixtures) never trigger
+    filtering — the chain passes through unchanged, preserving pre-root
+    behavior. Returns (calls, puts, chosen_root); chosen_root is None when no
+    filtering was needed.
+    """
+    calls = calls or []
+    puts = puts or []
+    roots = {(row.get("root") or "") for row in calls}
+    roots |= {(row.get("root") or "") for row in puts}
+    chosen = preferred_root(roots)
+    if chosen is None:
+        return calls, puts, None
+    return (
+        [row for row in calls if (row.get("root") or "") == chosen],
+        [row for row in puts if (row.get("root") or "") == chosen],
+        chosen,
+    )

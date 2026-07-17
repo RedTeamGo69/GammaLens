@@ -148,6 +148,18 @@ def parse_treasury_rate_response(payload: dict):
     }
 
 
+def _redact_key(text: str, key: str) -> str:
+    """Strip a FRED api key from any message before it reaches logs.
+
+    FRED's API only accepts the key as a URL query parameter (no header
+    auth exists), and requests/urllib3 exception messages embed the full
+    URL including the query string — so a ConnectionError printed verbatim
+    leaks the key into GitHub Actions logs / Streamlit Cloud logs."""
+    if key and key in text:
+        return text.replace(key, "***FRED_KEY***")
+    return text
+
+
 def _fetch_fred(fred_api_key: str):
     """Fetch from FRED DTB3. Returns parsed dict or None."""
     url = "https://api.stlouisfed.org/fred/series/observations"
@@ -275,7 +287,8 @@ def fetch_risk_free_rate(fred_api_key: str, debug: bool = False):
                         curve = _fetch_fred_curve(fred_api_key)
                     except Exception as e:
                         if debug:
-                            print(f"  FRED curve fetch failed (non-fatal): {e}")
+                            print(f"  FRED curve fetch failed (non-fatal): "
+                                  f"{_redact_key(str(e), fred_api_key)}")
                         curve = None
                     parsed["curve"] = curve
                     if curve:
@@ -288,7 +301,8 @@ def fetch_risk_free_rate(fred_api_key: str, debug: bool = False):
                     return parsed
             except Exception as e:
                 if debug:
-                    print(f"  FRED attempt {attempt + 1} failed: {e}")
+                    print(f"  FRED attempt {attempt + 1} failed: "
+                          f"{_redact_key(str(e), fred_api_key)}")
             if attempt < 2:
                 time.sleep(2 * (attempt + 1))  # 2s, 4s backoff
 

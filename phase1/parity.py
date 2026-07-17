@@ -17,7 +17,10 @@ from phase1.config import (
     DEFAULT_RISK_FREE_RATE,
 )
 
-from phase1.quote_filters import usable_for_parity, quote_mid, summarize_quote_quality
+from phase1.quote_filters import (
+    usable_for_parity, quote_mid, summarize_quote_quality,
+    filter_to_preferred_root,
+)
 from phase1.market_clock import is_cash_market_open, compute_time_to_expiry_years, now_ny
 
 def weighted_median(values, weights):
@@ -81,7 +84,7 @@ def parity_candidate_weight(strike, tradier_spot, combined_spread):
     return float(spread_component * distance_component)
 
 def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RATE,
-                                T=None, r_curve=None):
+                                T=None, r_curve=None, q=0.0):
     """
     Core parity engine with diagnostics.
 
@@ -97,6 +100,14 @@ def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RA
     if r_curve and T and T > 0:
         from phase1.rates import interpolate_rate as _interp_rate
         r = _interp_rate(r_curve, T * 365.25, fallback=r)
+
+    # Parity pairs a call and a put at the SAME strike of the SAME contract.
+    # On 3rd Fridays the chain carries both the AM-settled monthly (SPX) and
+    # PM-settled weekly (SPXW) — mixing roots pairs two different contracts
+    # (different last-trade times, different settlement), corrupting the
+    # implied spot. Filter both sides to one root before strike-keying.
+    calls, puts, _parity_root = filter_to_preferred_root(calls, puts)
+
     diagnostics = {
         "call_quality": summarize_quote_quality(calls or [], MAX_PARITY_SPREAD),
         "put_quality": summarize_quote_quality(puts or [], MAX_PARITY_SPREAD),
@@ -152,6 +163,12 @@ def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RA
     diagnostics["final_atm_strikes"] = len(atm_strikes)
 
     discount = np.exp(-r * T) if T and T > 0 else 1.0
+    # European put-call parity with a continuous dividend yield:
+    #   C - P = S·e^(-qT) - K·e^(-rT)  →  S = (C - P + K·e^(-rT))·e^(qT).
+    # Without the e^(qT) growth factor the implied spot equals S·e^(-qT),
+    # biased low by ~q·T (≈1.2 SPX pts at 5 DTE with q=1.3% — small but
+    # systematic, and it feeds the reference spot everything else keys on).
+    growth = np.exp(q * T) if (q and T and T > 0) else 1.0
 
     implied_prices = []
     implied_weights = []
@@ -163,7 +180,7 @@ def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RA
         if c_mid is None or p_mid is None:
             continue
 
-        s_implied = c_mid - p_mid + K * discount
+        s_implied = (c_mid - p_mid + K * discount) * growth
 
         if s_implied > 0 and tradier_spot > 0:
             if abs(s_implied - tradier_spot) / tradier_spot < PARITY_RELATIVE_BAND:
@@ -221,11 +238,12 @@ def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RA
 
 
 def compute_implied_spot(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RATE, T=None,
-                          r_curve=None):
+                          r_curve=None, q=0.0):
     """
     Compatibility wrapper.
     """
-    core = _compute_implied_spot_core(calls, puts, tradier_spot, r=r, T=T, r_curve=r_curve)
+    core = _compute_implied_spot_core(calls, puts, tradier_spot, r=r, T=T,
+                                      r_curve=r_curve, q=q)
     return core["spot"], core["source"]
 
 
@@ -283,7 +301,15 @@ def get_reference_spot_details(
     calls = entry["calls"]
     puts = entry["puts"]
 
-    core = _compute_implied_spot_core(calls, puts, tradier_spot, r=r, T=T, r_curve=r_curve)
+    # Per-ticker dividend yield for the parity growth factor e^(qT).
+    try:
+        from phase1.ticker_config import get_config as _tk_cfg
+        _q = float(_tk_cfg(ticker).get("dividend_yield", 0.0) or 0.0)
+    except Exception:
+        _q = 0.0
+
+    core = _compute_implied_spot_core(calls, puts, tradier_spot, r=r, T=T,
+                                      r_curve=r_curve, q=_q)
 
     details["spot"] = round(float(core["spot"]), 2)
     details["source"] = core["source"]

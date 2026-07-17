@@ -6,7 +6,9 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from phase1.quote_filters import quote_mid, has_two_sided_quote, is_crossed
+from phase1.quote_filters import (
+    quote_mid, has_two_sided_quote, is_crossed, filter_to_preferred_root,
+)
 from phase1.session_classifier import classify_session
 
 
@@ -21,6 +23,12 @@ def find_atm_straddle(calls: list[dict], puts: list[dict], spot: float):
 
     Returns a dict with straddle details, or None if no usable pair exists.
     """
+    # A straddle is one contract's call + put. On 3rd Fridays the chain mixes
+    # the AM-settled monthly and PM-settled weekly roots (SPX/SPXW) — the
+    # strike-keyed dicts below would overwrite one contract's quotes with the
+    # other's, pricing a straddle that doesn't exist. Pick one root first.
+    calls, puts, _straddle_root = filter_to_preferred_root(calls, puts)
+
     call_by_k = {}
     for c in calls:
         K = c["strike"]
@@ -93,22 +101,32 @@ def compute_expected_move(straddle_info: dict | None, spot: float) -> dict:
 # ── Expiration finders for weekly / monthly EM ─────────────────────────────
 
 def find_weekly_expiration(avail_exps: list[str], ref_date: date) -> str | None:
-    """Find this Friday's expiration (or nearest weekly within 7 days).
+    """Find this Friday's expiration (or the week's last listed expiry).
 
     On Friday itself days_to_fri is 0, so "this Friday" is today; on
     Sat/Sun it rolls forward to next week's Friday.
+
+    The fallback is capped at THIS week's Friday — never rolled into next
+    week. On a holiday-shortened week (Good Friday delists the Friday
+    expiry) the correct weekly contract is Thursday's, the actual last
+    trading day. Rolling to next Monday instead priced ~sqrt(5/4) ≈ 12%
+    extra weekend/session premium into the straddle, and that inflated EM
+    feeds the Monday weekly snapshot → the Cockpit's VRP gate → a phantom
+    "TRADE" verdict on exactly the weeks with no edge. Returning None when
+    the week has no remaining listed expiry is honest: the weekly EM is
+    genuinely unavailable, and the gate reads "na" instead of lying.
     """
     days_to_fri = (4 - ref_date.weekday()) % 7
-    friday = (ref_date + timedelta(days=days_to_fri)).strftime("%Y-%m-%d")
+    friday_date = ref_date + timedelta(days=days_to_fri)
+    friday = friday_date.strftime("%Y-%m-%d")
 
     # Exact Friday match
     if friday in avail_exps:
         return friday
 
-    # Fallback: nearest expiration between tomorrow and 7 days out
+    # Fallback: latest expiration still inside THIS week (tomorrow..Friday).
     today_str = ref_date.strftime("%Y-%m-%d")
-    cutoff = (ref_date + timedelta(days=7)).strftime("%Y-%m-%d")
-    candidates = sorted(e for e in avail_exps if today_str < e <= cutoff)
+    candidates = sorted(e for e in avail_exps if today_str < e <= friday)
     return candidates[-1] if candidates else None  # prefer the furthest in the week
 
 

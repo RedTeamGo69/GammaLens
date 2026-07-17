@@ -93,14 +93,15 @@ def _find_wall_cluster(df_subset, sort_col, ascending, cluster_radius=25, top_n=
 
 
 def find_key_levels(gex_df, spot, all_options=None, r=DEFAULT_RISK_FREE_RATE,
-                    r_curve=None):
+                    r_curve=None, q=0.0):
     """
     Wall / zero-gamma level detection.
 
     r and r_curve mirror calculate_all(): the curve (when provided) is
     interpolated per-option inside zero_gamma_sweep so each expiration
     uses its tenor-appropriate rate; the scalar `r` is the flat-rate
-    fallback.
+    fallback. q is the underlying's continuous dividend yield (per-ticker
+    from ticker_config) threaded into the sweep's BS gamma.
     """
     if gex_df.empty:
         return {
@@ -109,14 +110,22 @@ def find_key_levels(gex_df, spot, all_options=None, r=DEFAULT_RISK_FREE_RATE,
             "put_wall": spot,
             "put_wall_gex": 0.0,
             "zero_gamma": spot,
+            "net_gex": 0.0,
         }
 
     pos = gex_df[gex_df["net_gex"] > 0]
     neg = gex_df[gex_df["net_gex"] < 0]
 
-    # Cluster-based wall identification
-    cw_cluster = _find_wall_cluster(pos if not pos.empty else gex_df, "net_gex", ascending=False)
-    pw_cluster = _find_wall_cluster(neg if not neg.empty else gex_df, "net_gex", ascending=True)
+    # Cluster-based wall identification. The cluster radius scales with
+    # spot: the legacy absolute 25 pts encodes SPX-at-6600 (~0.38%); on
+    # XSP (~660) 25 pts spanned ~4% of price and glued the whole book into
+    # one "cluster". The ratio reproduces SPX behavior and gives every
+    # underlying the same relative neighborhood.
+    _radius = max(0.5, float(spot) * 25.0 / 6600.0)
+    cw_cluster = _find_wall_cluster(pos if not pos.empty else gex_df, "net_gex",
+                                    ascending=False, cluster_radius=_radius)
+    pw_cluster = _find_wall_cluster(neg if not neg.empty else gex_df, "net_gex",
+                                    ascending=True, cluster_radius=_radius)
 
     if not pos.empty:
         cw = pos.loc[pos["net_gex"].idxmax()]
@@ -136,7 +145,7 @@ def find_key_levels(gex_df, spot, all_options=None, r=DEFAULT_RISK_FREE_RATE,
 
     atm_iv = _estimate_atm_iv(all_options, spot)
     zg_details = zero_gamma_sweep_details(all_options, spot, r=r, atm_iv=atm_iv,
-                                          r_curve=r_curve)
+                                          r_curve=r_curve, q=q)
     zg = zg_details["zero_gamma"]
     print(
         f"  Zero gamma (sweep): ${zg:.2f} "
@@ -150,7 +159,7 @@ def find_key_levels(gex_df, spot, all_options=None, r=DEFAULT_RISK_FREE_RATE,
         if exps_in_options:
             nearest_exp = min(exps_in_options)
     per_exp_zg = _compute_per_expiry_zero_gamma(all_options, spot, r, nearest_exp,
-                                                r_curve=r_curve)
+                                                r_curve=r_curve, q=q)
 
     if per_exp_zg["nearest_exp_zero_gamma"] is not None:
         print(
@@ -170,6 +179,13 @@ def find_key_levels(gex_df, spot, all_options=None, r=DEFAULT_RISK_FREE_RATE,
         "put_wall": float(pw["strike"]),
         "put_wall_gex": float(pw["net_gex"]),
         "put_wall_cluster": pw_cluster,
+        # Chain-wide net GEX — the SAME quantity gex_engine.calculate_all
+        # reports as stats["net_gex"] (both are gex_df["net_gex"].sum()).
+        # Exposed here so gex_bridge.extract_gex_context can persist the TRUE
+        # net into gex_inputs instead of silently falling back to the
+        # call_wall_gex + put_wall_gex two-strike proxy (which can carry the
+        # wrong sign when one wall dominates an oppositely-signed book).
+        "net_gex": float(gex_df["net_gex"].sum()),
         "zero_gamma": round(float(zg_details['zero_gamma']), 2),
         "zero_gamma_is_true_crossing": bool(zg_details["is_true_crossing"]),
         "zero_gamma_type": zg_details["zero_gamma_type"],

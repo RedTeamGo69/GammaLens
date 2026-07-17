@@ -254,9 +254,19 @@ class TradierDataClient:
         if iv in (None, "", 0):
             iv = greeks.get("ask_iv")
         iv = safe_float(iv, 0.0)
-        if iv > 3:
+        # Unit heuristic: Tradier normally sends decimal IV (0.18), but some
+        # feeds slip percent units (18.0). Values in (3, 300] are treated as
+        # percent and rescaled — a genuine 300%+ decimal IV essentially never
+        # occurs on the underlyings this app trades, while blindly dividing
+        # would turn a real percent-unit 350 into a fake 3.5 decimal (350%)
+        # or a corrupt >300 reading into near-zero. Anything above 300 is
+        # garbage either way: drop it (0.0 = missing → synthetic-IV path).
+        if 3 < iv <= 300:
             _logger.debug("IV normalization: %.4f → %.4f (divided by 100)", iv, iv / 100.0)
             iv /= 100.0
+        elif iv > 300:
+            _logger.debug("IV rejected as garbage: %.4f (unit-ambiguous, > 300)", iv)
+            iv = 0.0
         return max(iv, 0.0)
 
     def get_chain_once(self, ticker, expiration):
@@ -374,6 +384,13 @@ class TradierDataClient:
                 "bid": bid,
                 "ask": ask,
                 "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0,
+                # OCC root (SPX vs SPXW, NDX vs NDXP, SPY vs adjusted SPY1).
+                # On 3rd Fridays Tradier returns BOTH the AM-settled monthly
+                # and the PM-settled weekly for index underlyings — two
+                # different contracts per strike. Quote consumers must filter
+                # to one root (quote_filters.filter_to_preferred_root); GEX
+                # aggregation deliberately keeps every root's OI.
+                "root": str(o.get("root_symbol") or "").upper(),
             }
 
             if o.get("option_type") == "call":
@@ -392,6 +409,23 @@ class TradierDataClient:
         last_error = None
         for attempt in range(retries + 1):
             result = self.get_chain_once(ticker, expiration)
+            # A status-ok chain with ZERO options for a LISTED expiration is a
+            # transient vendor gap (Tradier occasionally returns a null
+            # "options" block mid-session), not a settled contract — the
+            # expired-expiration filter upstream already drops genuinely dead
+            # exps before we get here. Treat empty-ok as retryable so a blip
+            # doesn't get cached as a permanent hole that blocks the GEX/EM
+            # computation for the whole session.
+            if result["status"] == "ok" and not result["calls"] and not result["puts"]:
+                last_error = "empty options block (listed expiration)"
+                if attempt < retries:
+                    backoff = sleep_sec * (2 ** attempt)
+                    time.sleep(backoff + random.uniform(0, sleep_sec))
+                    continue
+                # Retries exhausted — surface as failed so callers skip it
+                # loudly instead of silently treating it as "no gamma here".
+                return {"status": "failed", "calls": [], "puts": [],
+                        "error": last_error}
             if result["status"] == "ok":
                 if attempt > 0:
                     print(f"    ✓ Recovered {expiration} on retry {attempt}")

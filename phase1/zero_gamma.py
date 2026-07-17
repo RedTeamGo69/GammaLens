@@ -38,7 +38,7 @@ def _build_per_option_rate(T_arr: np.ndarray, r_scalar: float, r_curve) -> np.nd
     )
 
 
-def _sweep_gex_at_prices(all_options, test_prices, r, r_curve=None):
+def _sweep_gex_at_prices(all_options, test_prices, r, r_curve=None, q=0.0):
     """
     Compute total signed GEX proxy at each test price.
 
@@ -59,7 +59,7 @@ def _sweep_gex_at_prices(all_options, test_prices, r, r_curve=None):
     T_arr = np.array([o[4] for o in all_options], dtype=float)
 
     r_input = _build_per_option_rate(T_arr, r, r_curve)
-    gamma_matrix = bs_gamma_vec(test_prices, K_arr, T_arr, r_input, iv_arr)
+    gamma_matrix = bs_gamma_vec(test_prices, K_arr, T_arr, r_input, iv_arr, q=q)
     weights = sign_arr * oi_arr * 100.0
     total_gex = (gamma_matrix * weights).sum(axis=1) * (test_prices ** 2)
 
@@ -116,7 +116,7 @@ def _compute_sweep_range_pct(atm_iv=None):
 
 
 def zero_gamma_sweep_details(all_options, spot, r=DEFAULT_RISK_FREE_RATE, atm_iv=None,
-                              r_curve=None):
+                              r_curve=None, q=0.0):
     """
     Return rich diagnostics for zero-gamma solving.
 
@@ -149,15 +149,34 @@ def zero_gamma_sweep_details(all_options, spot, r=DEFAULT_RISK_FREE_RATE, atm_iv
     lo = float(spot) * (1 - range_pct)
     hi = float(spot) * (1 + range_pct)
 
-    coarse_prices = np.arange(lo, hi + ZG_SWEEP_STEP, ZG_SWEEP_STEP, dtype=float)
-    coarse_gex = _sweep_gex_at_prices(all_options, coarse_prices, r, r_curve=r_curve)
+    # Clamp the sweep to the strike book. Beyond the outermost strikes total
+    # gamma decays monotonically toward zero, so the min-|GEX| fallback would
+    # otherwise gravitate to a meaningless node at the sweep edge — far from
+    # any strike a dealer actually hedges — whenever no true crossing exists.
+    strikes = [float(o[0]) for o in all_options]
+    lo_clamped = max(lo, min(strikes))
+    hi_clamped = min(hi, max(strikes))
+    if lo_clamped < hi_clamped:
+        lo, hi = lo_clamped, hi_clamped
+
+    # Grid steps scale with spot: the legacy absolutes ($5 coarse / $0.50
+    # fine) encode SPX-at-6600 ratios (~0.075% / 0.0075%). On XSP (~660)
+    # those absolutes made the coarse grid 10x coarser relative to price
+    # and the "fine" flip point ±0.08% wide. The ratios reproduce the SPX
+    # behavior exactly and give every other underlying the same relative
+    # precision.
+    coarse_step = max(0.01, float(spot) * ZG_SWEEP_STEP / 6600.0)
+    fine_step = max(0.001, float(spot) * ZG_FINE_STEP / 6600.0)
+
+    coarse_prices = np.arange(lo, hi + coarse_step, coarse_step, dtype=float)
+    coarse_gex = _sweep_gex_at_prices(all_options, coarse_prices, r, r_curve=r_curve, q=q)
     coarse_cross = _find_nearest_crossing_details(coarse_prices, coarse_gex, spot)
 
     if coarse_cross is not None:
-        fine_lo = coarse_cross["crossing"] - ZG_SWEEP_STEP
-        fine_hi = coarse_cross["crossing"] + ZG_SWEEP_STEP
-        fine_prices = np.arange(fine_lo, fine_hi + ZG_FINE_STEP, ZG_FINE_STEP, dtype=float)
-        fine_gex = _sweep_gex_at_prices(all_options, fine_prices, r, r_curve=r_curve)
+        fine_lo = coarse_cross["crossing"] - coarse_step
+        fine_hi = coarse_cross["crossing"] + coarse_step
+        fine_prices = np.arange(fine_lo, fine_hi + fine_step, fine_step, dtype=float)
+        fine_gex = _sweep_gex_at_prices(all_options, fine_prices, r, r_curve=r_curve, q=q)
         fine_cross = _find_nearest_crossing_details(fine_prices, fine_gex, spot)
 
         if fine_cross is not None:
@@ -202,10 +221,10 @@ def zero_gamma_sweep_details(all_options, spot, r=DEFAULT_RISK_FREE_RATE, atm_iv
     min_idx = int(np.argmin(np.abs(coarse_gex)))
     fallback_center = float(coarse_prices[min_idx])
 
-    fine_lo = fallback_center - ZG_SWEEP_STEP
-    fine_hi = fallback_center + ZG_SWEEP_STEP
-    fine_prices = np.arange(fine_lo, fine_hi + ZG_FINE_STEP, ZG_FINE_STEP, dtype=float)
-    fine_gex = _sweep_gex_at_prices(all_options, fine_prices, r, r_curve=r_curve)
+    fine_lo = fallback_center - coarse_step
+    fine_hi = fallback_center + coarse_step
+    fine_prices = np.arange(fine_lo, fine_hi + fine_step, fine_step, dtype=float)
+    fine_gex = _sweep_gex_at_prices(all_options, fine_prices, r, r_curve=r_curve, q=q)
 
     fine_cross = _find_nearest_crossing_details(fine_prices, fine_gex, spot)
     if fine_cross is not None:
@@ -244,9 +263,9 @@ def zero_gamma_sweep_details(all_options, spot, r=DEFAULT_RISK_FREE_RATE, atm_iv
 
 
 def zero_gamma_sweep(all_options, spot, r=DEFAULT_RISK_FREE_RATE, atm_iv=None,
-                     r_curve=None):
+                     r_curve=None, q=0.0):
     return zero_gamma_sweep_details(all_options, spot, r=r, atm_iv=atm_iv,
-                                    r_curve=r_curve)["zero_gamma"]
+                                    r_curve=r_curve, q=q)["zero_gamma"]
 
 
 def _estimate_atm_iv(all_options, spot):
@@ -269,7 +288,8 @@ def _estimate_atm_iv(all_options, spot):
     return float(sum(iv * w / w_sum for iv, w in zip(ivs, weights)))
 
 
-def _compute_per_expiry_zero_gamma(all_options, spot, r, nearest_exp=None, r_curve=None):
+def _compute_per_expiry_zero_gamma(all_options, spot, r, nearest_exp=None, r_curve=None,
+                                   q=0.0):
     """
     Compute zero-gamma separately for the nearest expiry (typically 0DTE) and
     the remaining expirations. This reveals whether intraday gamma is dominated
@@ -300,12 +320,12 @@ def _compute_per_expiry_zero_gamma(all_options, spot, r, nearest_exp=None, r_cur
 
     if len(nearest_opts) >= 4:
         atm_iv = _estimate_atm_iv(nearest_opts, spot)
-        zg = zero_gamma_sweep(nearest_opts, spot, r=r, atm_iv=atm_iv, r_curve=r_curve)
+        zg = zero_gamma_sweep(nearest_opts, spot, r=r, atm_iv=atm_iv, r_curve=r_curve, q=q)
         result["nearest_exp_zero_gamma"] = round(float(zg), 2)
 
     if len(other_opts) >= 4:
         atm_iv = _estimate_atm_iv(other_opts, spot)
-        zg = zero_gamma_sweep(other_opts, spot, r=r, atm_iv=atm_iv, r_curve=r_curve)
+        zg = zero_gamma_sweep(other_opts, spot, r=r, atm_iv=atm_iv, r_curve=r_curve, q=q)
         result["other_exp_zero_gamma"] = round(float(zg), 2)
 
     return result

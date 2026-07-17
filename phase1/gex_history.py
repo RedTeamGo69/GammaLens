@@ -223,8 +223,16 @@ def get_em_snapshot(date_str, ticker="SPX", em_type="daily"):
                     "straddle": {"strike": row[4]},
                     "captured_at": row[5],
                 }
-    except Exception:
-        pass
+    except Exception as e:
+        # A DB outage must be distinguishable from "no snapshot exists" in
+        # the logs — callers legitimately treat None as absence (the dedup
+        # guard PROCEEDS with capture on None, the safe direction), but a
+        # silent swallow here made outages invisible while the UI showed
+        # "no EM" as if that were a fact about the data.
+        import logging
+        logging.getLogger(__name__).warning(
+            f"get_em_snapshot({date_str}, {ticker}, {em_type}) failed — "
+            f"treating as absent: {e}")
     return None
 
 

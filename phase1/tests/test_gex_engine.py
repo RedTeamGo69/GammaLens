@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 import phase1.gex_engine as gex_engine
 from phase1.config import NY_TZ
@@ -33,6 +34,62 @@ def test_find_key_levels_empty_df_returns_spot():
     assert levels["call_wall"] == 5000
     assert levels["put_wall"] == 5000
     assert levels["zero_gamma"] == 5000
+    # Regression: the bridge reads levels["net_gex"]; on an empty chain it
+    # must be a concrete 0.0, never absent (a KeyError would crash the
+    # force-mode/empty path) and never a stale None.
+    assert levels["net_gex"] == 0.0
+
+
+def test_find_key_levels_exposes_true_chain_wide_net_gex():
+    """Regression for the gex_bridge net_gex bug: find_key_levels must return
+    the chain-wide net GEX (identical to calculate_all's stats["net_gex"]),
+    NOT leave the key absent — otherwise gex_bridge.extract_gex_context reads
+    None and silently persists the call_wall_gex + put_wall_gex two-strike
+    proxy, which can carry the WRONG SIGN when one wall dominates an
+    oppositely-signed book."""
+    class FakeClient:
+        def prefetch_chains(self, ticker, expirations):
+            return None
+
+        def get_chain_cached(self, ticker, exp):
+            # Two call strikes (net-positive book) plus a single very heavy
+            # put wall. The put wall is the largest-magnitude single strike,
+            # so put_wall_gex alone is a poor proxy for the true net.
+            return {
+                "status": "ok",
+                "calls": [
+                    {"strike": 5050, "openInterest": 400, "impliedVolatility": 0.20,
+                     "vendorGamma": 0.0, "bid": 5.0, "ask": 5.5, "mid": 5.25},
+                    {"strike": 5100, "openInterest": 400, "impliedVolatility": 0.20,
+                     "vendorGamma": 0.0, "bid": 4.0, "ask": 4.5, "mid": 4.25},
+                ],
+                "puts": [
+                    {"strike": 4950, "openInterest": 300, "impliedVolatility": 0.20,
+                     "vendorGamma": 0.0, "bid": 5.0, "ask": 5.5, "mid": 5.25},
+                ],
+                "error": None,
+            }
+
+    fake_now = datetime(2026, 3, 10, 10, 0, tzinfo=NY_TZ)
+    gex_df, stats, all_options, _, _ = gex_engine.calculate_all(
+        client=FakeClient(),
+        ticker="SPX",
+        target_exps=["2026-03-20"],
+        spot=5000,
+        r=0.04,
+        now=fake_now,
+    )
+
+    levels = gex_engine.find_key_levels(gex_df, 5000, all_options=all_options, r=0.04)
+
+    # The exposed net must equal both calculate_all's stat and the raw sum.
+    assert "net_gex" in levels
+    assert levels["net_gex"] == stats["net_gex"]
+    assert abs(levels["net_gex"] - float(gex_df["net_gex"].sum())) < 1e-6
+    # And it must genuinely differ from the two-strike wall proxy the bridge
+    # used to fall back on — proving the fix changes the persisted value.
+    proxy = float(levels["call_wall_gex"]) + float(levels["put_wall_gex"])
+    assert abs(levels["net_gex"] - proxy) > 1e-6
 
 
 def test_calculate_all_basic_fake_client():
@@ -157,18 +214,22 @@ def test_zero_gamma_sweep_details_flags_fallback_when_no_crossing():
 def test_zero_gamma_sweep_details_detects_true_crossing(monkeypatch):
     import numpy as np
 
-    def fake_sweep(_all_options, prices, _r, r_curve=None):
+    def fake_sweep(_all_options, prices, _r, r_curve=None, q=0.0):
         # _sweep_gex_at_prices returns total GEX (already Spot²-scaled).
-        # r_curve is accepted but ignored — this test pins the crossing
-        # location, not the rate path.
+        # r_curve/q are accepted but ignored — this test pins the crossing
+        # location, not the rate/dividend path.
         return np.array([float(p - 100.0) for p in prices])
 
     import phase1.zero_gamma as zero_gamma_mod
     monkeypatch.setattr(zero_gamma_mod, "_sweep_gex_at_prices", fake_sweep)
 
+    # spot=98 puts the synthetic crossing at 100 INSIDE the ±5% sweep window
+    # (93.1..102.9). The old fixture's spot=95 only worked because the legacy
+    # $5 coarse grid overshot the declared sweep-high by a full step — the
+    # spot-relative grid honors the window boundary exactly.
     details = gex_engine.zero_gamma_sweep_details(
         all_options=[(1, 1, 1, 1, 1)],
-        spot=95.0,
+        spot=98.0,
         r=0.04,
     )
 
@@ -257,3 +318,21 @@ def test_calculate_all_after_hours_all_expirations_expired():
     assert levels["zero_gamma"] == 5000
     regime = gex_engine.get_gamma_regime_text(5000, levels["zero_gamma"])
     assert regime["regime"] == "At Zero Gamma"
+
+
+# ── dividend yield in BS gamma (audit G20) ───────────────────────────────────
+
+def test_bs_gamma_vec_dividend_yield_matches_closed_form():
+    """Gamma with continuous yield q = e^{-qT}·φ(d1_q)/(S·σ·√T), where the
+    d1 drift is (r - q + σ²/2). Verify the vectorized kernel against a direct
+    computation and confirm q actually changes the value (q=0 is the legacy
+    path)."""
+    import math
+    from scipy.stats import norm
+    S, K, T, r, sig, q = 5000.0, 5100.0, 0.25, 0.04, 0.20, 0.02
+    d1 = (math.log(S / K) + (r - q + 0.5 * sig * sig) * T) / (sig * math.sqrt(T))
+    expected = math.exp(-q * T) * norm.pdf(d1) / (S * sig * math.sqrt(T))
+    gq = gex_engine.bs_gamma_vec([S], [K], [T], r, [sig], q=q)
+    assert gq[0, 0] == pytest.approx(expected, rel=1e-9)
+    g0 = gex_engine.bs_gamma_vec([S], [K], [T], r, [sig], q=0.0)
+    assert gq[0, 0] != g0[0, 0]           # q genuinely threads through

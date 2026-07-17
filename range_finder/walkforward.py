@@ -130,6 +130,11 @@ def walk_forward_evaluate(
                 "obs_ci_lower": float(frame["obs_ci_lower"].iloc[0]),
                 "obs_ci_upper": float(frame["obs_ci_upper"].iloc[0]),
                 "train_n": train_n,
+                # Per-row historical benchmark for Campbell-Thompson OOS R²:
+                # the mean of the TRAINING window in force when this week was
+                # predicted. Benchmarking against the test-set mean instead
+                # hands the null model future information.
+                "train_mean": float(y_tr.mean()),
             })
     finally:
         har_logger.setLevel(prior_level)
@@ -173,7 +178,8 @@ def summarize(frame: pd.DataFrame, alpha: float = PI_ALPHA) -> dict:
 
     return {
         "n_oos": int(len(frame)),
-        "oos_r2": _oos_r2(y_true, y_pred),
+        "oos_r2": _oos_r2(y_true, y_pred,
+                          benchmark=frame.get("train_mean")),
         "mae_log": mae_log,
         "mae_pct": mae_pct,
         "direction_acc": direction_acc,

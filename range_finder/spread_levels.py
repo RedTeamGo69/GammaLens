@@ -147,6 +147,12 @@ class SpreadPlan:
 
     recommended_width: int = 25
 
+    # Per-side share of the forecast range used to place the bands. 0.5 is
+    # the legacy symmetric half-split; the empirical side-share quantile
+    # (har_model.estimate_side_share_quantile) is > 0.5 because the weekly
+    # open concentrates near one extreme of the realized range.
+    side_share_q:     float = 0.5
+
     warnings:         list[str] = field(default_factory=list)
 
 
@@ -514,8 +520,15 @@ def build_spread_plan(
     dte: int = 5,
     ticker: str = "SPX",
     chain_quotes: dict = None,
+    side_share_q: "float | None" = None,
 ) -> SpreadPlan:
-    """Build a complete SpreadPlan from a forecast dict."""
+    """Build a complete SpreadPlan from a forecast dict.
+
+    side_share_q: per-side share of the (buffered) range each band gets,
+    from har_model.estimate_side_share_quantile. None → legacy symmetric
+    /2 split. Values are clamped to [0.5, 1.0]: below 0.5 would place
+    strikes TIGHTER than the legacy behavior.
+    """
     cfg = get_ticker_config(ticker)
     if wing_widths is None:
         wing_widths = cfg["wing_widths"]
@@ -531,10 +544,20 @@ def build_spread_plan(
     buffer_pct, buffer_reason = compute_buffer(forecast, feature_row)
     buffer_pts = round(buffer_pct * spx_ref, 2)
 
-    # --- Effective range ---
+    # --- Effective range → per-side bands ---
     pi_upper_pct    = forecast["upper_pct"]
     effective_range = pi_upper_pct + buffer_pct
-    half_range      = effective_range / 2
+
+    # Per-side share: legacy /2, or the empirical side-share quantile when
+    # provided. The range forecast bounds HOW WIDE the week trades; s_up =
+    # (H-O)/(H-L) says where the open sits inside that width, and its
+    # empirical mass concentrates near the extremes — so giving each side
+    # only half the range under-protects the strikes on trending weeks even
+    # when the range forecast itself verifies.
+    side_share = 0.5
+    if side_share_q is not None:
+        side_share = min(max(float(side_share_q), 0.5), 1.0)
+    half_range      = effective_range * side_share
 
     effective_upper = round(spx_ref * (1 + half_range), 2)
     effective_lower = round(spx_ref * (1 - half_range), 2)
@@ -627,6 +650,7 @@ def build_spread_plan(
         effective_range_pct  = round(effective_range, 4),
         effective_upper_px   = effective_upper,
         effective_lower_px   = effective_lower,
+        side_share_q         = round(side_share, 4),
         call_spreads         = call_spreads,
         put_spreads          = put_spreads,
         has_fomc             = has_fomc,
@@ -703,9 +727,14 @@ def build_spread_tiers(
         ("Effective (+buffer)", "conservative", plan.effective_range_pct),
     ]
 
+    # Same per-side share as the plan (legacy 0.5 or the empirical
+    # side-share quantile) so every tier's band is placed on the same
+    # convention as the headline effective range.
+    side_share = min(max(float(getattr(plan, "side_share_q", 0.5) or 0.5), 0.5), 1.0)
+
     tiers = []
     for label, risk, range_pct in tiers_config:
-        half = range_pct / 2
+        half = range_pct * side_share
         raw_call = spx_ref * (1 + half)
         raw_put  = spx_ref * (1 - half)
 

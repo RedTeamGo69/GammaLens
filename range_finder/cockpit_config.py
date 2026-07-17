@@ -57,3 +57,10 @@ class CockpitConfig:
     wing_width: float | None = None  # None → first entry of the ticker's wing_widths
     sweet_spot_tol_em: float = SWEET_SPOT_TOL_EM
     entry_cutoff_weekday: int = ENTRY_CUTOFF_WEEKDAY
+    # Per-contract, per-leg all-in fee (commission + regulatory). Public.com
+    # is commission-free with pennies of regulatory fees, so the default 0.0
+    # changes nothing — but when set, the cockpit surfaces the round-trip
+    # fee drag against the condor's credit so thin-credit weeks are judged
+    # net of costs instead of gross. Worst case is entry-only fees (expire
+    # worthless: 4 legs); a traded exit doubles it.
+    fees_per_contract: float = 0.0

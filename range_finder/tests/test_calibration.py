@@ -41,7 +41,7 @@ def _make_conn() -> sqlite3.Connection:
             model_name TEXT, point_pct REAL, lower_pct REAL, upper_pct REAL,
             effective_range_pct REAL, buffer_pct REAL, event_count INTEGER,
             actual_high REAL, actual_low REAL, actual_range_pct REAL,
-            outcome TEXT,
+            outcome TEXT, call_breached INTEGER, put_breached INTEGER,
             PRIMARY KEY (week_start, ticker)
         )
     """)
@@ -182,3 +182,55 @@ def test_weekly_pi_coverage_wrapper():
 
     assert cov["one_sided"] == pytest.approx(1.0)
     assert cov["buffer"]["breach_rate"] == pytest.approx(0.0)
+
+
+# ── strike_touch_summary ──────────────────────────────────────────────────────
+
+def _touch_frame(flags):
+    """flags: list of (call_breached, put_breached) — None = unscored."""
+    return pd.DataFrame({
+        "actual_range_pct": [0.02] * len(flags),
+        "upper_pct": [0.03] * len(flags),
+        "call_breached": [f[0] for f in flags],
+        "put_breached": [f[1] for f in flags],
+    })
+
+
+def test_strike_touch_counts_either_side():
+    cov = cal.strike_touch_summary(_touch_frame(
+        [(0, 0), (1, 0), (0, 1), (0, 0), (1, 1)]))
+    assert cov["n"] == 5
+    assert cov["call_touch"] == pytest.approx(0.4)
+    assert cov["put_touch"] == pytest.approx(0.4)
+    assert cov["any_touch"] == pytest.approx(0.6)   # (1,1) counts once
+
+
+def test_strike_touch_skips_unscored_legacy_rows():
+    cov = cal.strike_touch_summary(_touch_frame(
+        [(0, 0), (None, None), (1, 0)]))
+    assert cov["n"] == 2
+    assert cov["any_touch"] == pytest.approx(0.5)
+
+
+def test_strike_touch_missing_columns_is_nan_not_crash():
+    df = pd.DataFrame({"actual_range_pct": [0.02], "upper_pct": [0.03]})
+    cov = cal.strike_touch_summary(df)
+    assert cov["n"] == 0
+    assert cov["any_touch"] != cov["any_touch"]      # NaN
+
+
+def test_strike_touch_can_exceed_range_miss_rate():
+    """The mathematical heart of the finding: weeks whose RANGE stayed
+    inside the PI (coverage success) can still touch a strike. The touch
+    rate must be free to exceed the one-sided miss rate."""
+    df = pd.DataFrame({
+        "actual_range_pct": [0.02, 0.02, 0.02, 0.02],   # all inside 0.03
+        "upper_pct": [0.03] * 4,
+        "lower_pct": [None] * 4,
+        "call_breached": [1, 1, 0, 0],                   # trending weeks
+        "put_breached": [0, 0, 0, 0],
+    })
+    cov = cal.pi_coverage(df)
+    touch = cal.strike_touch_summary(df)
+    assert cov["one_sided"] == pytest.approx(1.0)        # audit says perfect
+    assert touch["any_touch"] == pytest.approx(0.5)      # reality: half touched

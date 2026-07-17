@@ -101,7 +101,12 @@ def apply_conformal(forecast: dict, lam: float) -> dict:
     new_lower = math.exp(center - lam * halfwidth)
 
     spx_ref = float(forecast.get("spx_ref_close") or 0.0)
-    half_upper = new_upper / 2.0
+    # Respect the forecast's per-side share (legacy 0.5 or the empirical
+    # side-share quantile) — a hardcoded /2 here would silently revert the
+    # asymmetric band placement whenever conformal is switched on.
+    _side_share = float(forecast.get("side_share_q") or 0.5)
+    _side_share = min(max(_side_share, 0.5), 1.0)
+    half_upper = new_upper * _side_share
 
     out["lower_pct"] = round(new_lower, 4)
     out["upper_pct"] = round(new_upper, 4)

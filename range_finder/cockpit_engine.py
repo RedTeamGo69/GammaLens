@@ -141,7 +141,15 @@ def build_leg_quote_map(calls: list[dict], puts: list[dict]) -> dict:
     Superset of the spread finder's chain_quotes shape — spread_levels'
     _snap_to_chain_strike / _lookup_chain_price read only the `{side}_bid` /
     `{side}_ask` keys, so this map drops into those helpers unchanged.
+
+    Chains are filtered to a single OCC root first: on 3rd Fridays Tradier
+    returns both the AM-settled monthly (SPX) and PM-settled weekly (SPXW)
+    per strike, and the strike-keyed map below would otherwise interleave
+    two different contracts' quotes into one condor's legs.
     """
+    from phase1.quote_filters import filter_to_preferred_root
+    calls, puts, _root = filter_to_preferred_root(calls, puts)
+
     quotes: dict = {}
 
     def _absorb(rows: list[dict], prefix: str) -> None:
@@ -374,10 +382,16 @@ def propose_condor(
     expiration: str,
     ticker: str,
     t_years: float | None = None,
+    live_spot: float | None = None,
 ) -> tuple[CondorProposal | None, list[VerdictReason]]:
     """Model strikes → wall snap (outward-only) → increment rounding →
     listed-strike snap → wings → chain pricing → POP. Returns the proposal
-    (None when unpriceable) plus the reasons generated along the way."""
+    (None when unpriceable) plus the reasons generated along the way.
+
+    live_spot feeds ONLY the PoP delta fallback: strikes deliberately stay
+    anchored to the frozen Monday open, but a Black-Scholes delta computed
+    mid-week from that stale anchor misprices P(ITM) by however far spot has
+    drifted. None keeps the legacy anchor-as-spot behavior."""
     reasons: list[VerdictReason] = []
     wing = float(cfg.wing_width or (wing_widths[0] if wing_widths else 5.0))
 
@@ -433,10 +447,11 @@ def propose_condor(
         ))
         return None, reasons
 
+    _pop_spot = live_spot if (live_spot and live_spot > 0) else anchor
     d_call, src_call = resolve_short_delta(
-        _short_leg_row(chain_quotes, call_short, "call"), anchor, t_years or 0.0, "call")
+        _short_leg_row(chain_quotes, call_short, "call"), _pop_spot, t_years or 0.0, "call")
     d_put, src_put = resolve_short_delta(
-        _short_leg_row(chain_quotes, put_short, "put"), anchor, t_years or 0.0, "put")
+        _short_leg_row(chain_quotes, put_short, "put"), _pop_spot, t_years or 0.0, "put")
     pop = condor_pop(d_call, d_put)
     if pop is None:
         pop_source = "unavailable"
@@ -633,7 +648,7 @@ def evaluate_cockpit(
             anchor=anchor, em_pts=em_pts, k_eff=k_eff, gex_levels=gex_levels,
             chain_quotes=chain_quotes, cfg=cfg, strike_increment=strike_increment,
             wing_widths=wing_widths, expiration=friday_exp, ticker=ticker,
-            t_years=t_years,
+            t_years=t_years, live_spot=spot,
         )
         reasons.extend(prop_reasons)
         if proposal is not None:
@@ -642,6 +657,13 @@ def evaluate_cockpit(
                      f"Credit/width {proposal.credit_ratio:.2f} is below the "
                      f"{cfg.min_credit_ratio:.2f} floor at model-approved strikes — "
                      f"insufficient premium; strikes are never tightened to chase credit.")
+            if cfg.fees_per_contract > 0 and proposal.credit > 0:
+                _entry_fees = 4 * cfg.fees_per_contract
+                _drag = _entry_fees / (proposal.credit * 100.0)
+                info("fee_drag",
+                     f"Entry fees ≈ ${_entry_fees:.2f} (4 legs × "
+                     f"${cfg.fees_per_contract:.2f}) = {_drag:.1%} of the "
+                     f"${proposal.credit * 100:.0f} credit; a traded exit doubles it.")
             reasons.extend(_liquidity_annotations(proposal, cfg))
 
             # Sell-whole vs leg-in guidance (informational — the trader

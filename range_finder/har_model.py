@@ -171,6 +171,19 @@ def time_series_split(
     cols_needed = [target_col] + (feature_cols or [])
     clean = df[cols_needed].dropna()
 
+    # A single sparse feature silently guts the sample: dropna() is row-wise,
+    # so e.g. gex_normalized (only populated for recent weeks) can shrink a
+    # 300-row frame to a few dozen without any signal to the caller. Surface
+    # it loudly with the per-column NaN counts so the offending feature is
+    # identifiable at a glance.
+    if len(clean) < max(40, int(len(df) * 0.5)) and len(df) > 0:
+        _null_counts = df[cols_needed].isna().sum().sort_values(ascending=False)
+        _worst = ", ".join(f"{c}={int(n)}" for c, n in _null_counts.head(3).items() if n)
+        log.warning(
+            f"time_series_split: dropna kept only {len(clean)}/{len(df)} rows "
+            f"— sparse feature(s) are starving the fit (worst NaN counts: {_worst})"
+        )
+
     n_test  = max(1, int(len(clean) * test_size))
     n_train = len(clean) - n_test
 
@@ -228,6 +241,13 @@ def fit_model_wls(
     decay = np.log(2) / half_life
     # Most recent observation gets weight 1.0, older observations decay
     weights = np.exp(-decay * np.arange(n)[::-1])
+    # Normalize to mean 1.0: statsmodels' WLS scale (and with it every
+    # prediction interval) is estimated from the weighted residuals, and
+    # un-normalized weights averaging ~0.25 shrank the residual scale ~4x —
+    # quoting PIs materially narrower than the data supports. Normalization
+    # leaves the coefficient estimates untouched (WLS is invariant to a
+    # scalar weight rescaling) and only repairs the scale.
+    weights = weights / weights.mean()
 
     model = sm.WLS(y_train, X_train, weights=weights)
     result = model.fit(cov_type="HC3")
@@ -254,14 +274,19 @@ def evaluate_oos(
     X_test: pd.DataFrame,
     y_test: pd.Series,
     model_name: str = "HAR",
+    y_train_mean: "float | None" = None,
 ) -> dict:
-    """Evaluate out-of-sample performance."""
+    """Evaluate out-of-sample performance.
+
+    y_train_mean: pass the TRAINING target mean for a proper Campbell-
+    Thompson OOS R² benchmark; omitted → legacy test-mean benchmark.
+    """
     y_pred_log = result.predict(X_test)
 
     y_pred_pct = np.exp(y_pred_log)
     y_true_pct = np.exp(y_test)
 
-    oos_r2 = _oos_r2(y_test, y_pred_log)
+    oos_r2 = _oos_r2(y_test, y_pred_log, benchmark=y_train_mean)
     mae    = mean_absolute_error(y_test, y_pred_log)
     rmse   = math.sqrt(mean_squared_error(y_test, y_pred_log))
     mae_pct = mean_absolute_error(y_true_pct, y_pred_pct)
@@ -315,10 +340,25 @@ def compare_models(results: dict[str, dict]) -> pd.DataFrame:
     return df
 
 
-def _oos_r2(y_true: pd.Series, y_pred: pd.Series) -> float:
-    """Out-of-sample R² (Campbell & Thompson 2008)."""
+def _oos_r2(y_true: pd.Series, y_pred: pd.Series, benchmark=None) -> float:
+    """Out-of-sample R² (Campbell & Thompson 2008).
+
+    benchmark: the null model's forecast — a scalar (train mean) or a Series
+    aligned to y_true (per-row train means from a walk-forward). Campbell-
+    Thompson benchmarks against the HISTORICAL mean; the legacy default of
+    y_true.mean() (the TEST-set mean) hands the null model look-ahead
+    information and understates the model's relative skill. None keeps the
+    legacy behavior for callers that have no train context.
+    """
     ss_res = ((y_true - y_pred) ** 2).sum()
-    ss_tot = ((y_true - y_true.mean()) ** 2).sum()
+    if benchmark is None:
+        bench = y_true.mean()
+    elif np.isscalar(benchmark):
+        bench = benchmark
+    else:
+        bench = pd.Series(benchmark).reindex(y_true.index)
+        bench = bench.fillna(y_true.mean())
+    ss_tot = ((y_true - bench) ** 2).sum()
     return float(1 - ss_res / ss_tot)
 
 
@@ -411,15 +451,83 @@ def compare_enhancements(
 # FORECAST + PREDICTION INTERVAL
 # =============================================================================
 
+# =============================================================================
+# SIDE-SHARE QUANTILE — empirical anchor-position calibration
+# =============================================================================
+
+# Tail mass for the side-share quantile. 0.20 → the 80th percentile of how
+# much of a week's range lands on one side of the open (q ≈ 0.84 on SPX).
+# Chosen from the 150-week walk-forward (side_placement_experiment.py,
+# 2026-07-16): any-touch 45.3% under the legacy /2 split vs 10.0% at
+# beta=0.20 — which matches the 10% tail mass the 90% one-sided PI is
+# audited against, at an average band cost of 3.41%/side vs 2.02%. Deeper
+# betas bought little (beta=0.10 → 7.3% touch for +0.37% width) and thin
+# the credit further.
+SIDE_SHARE_BETA = 0.20
+
+# Below this many completed weeks the estimate is noise — fall back to the
+# legacy symmetric half-split rather than trust a thin quantile.
+SIDE_SHARE_MIN_OBS = 52
+
+
+def estimate_side_share_quantile(
+    weekly_df: pd.DataFrame,
+    beta: float = SIDE_SHARE_BETA,
+    min_obs: int = SIDE_SHARE_MIN_OBS,
+) -> dict:
+    """Empirical (1-beta) quantile of the share of a week's range on one side
+    of the open — the honest replacement for the symmetric /2 split.
+
+    The range forecast says how WIDE the week trades, not WHERE the open sits
+    inside that range. Splitting the forecast half-up/half-down protects the
+    strikes only when the open lands mid-range — and it doesn't: even for a
+    driftless walk the open concentrates near one extreme (arcsine law), so a
+    trending week breaches a half-split strike while the realized range stays
+    inside the forecast. s_up = (H-O)/(H-L) measures that anchor position per
+    completed week; its (1-beta) pooled quantile q is the per-side range
+    share that historically contained all but a beta-tail of weeks. Callers
+    place bands at ref*(1 ± u*q) instead of ref*(1 ± u/2).
+
+    Pools s_up with s_dn = 1 - s_up (up/down symmetry doubles the sample and
+    forces a direction-neutral q). Only the caller-supplied rows are used —
+    pass training-window rows for walk-forward work, everything-to-date live.
+
+    Returns {"q": float|None, "n": int, "beta": beta}; q is None (caller
+    falls back to /2) when fewer than min_obs valid weeks exist.
+    """
+    cols = ("spx_open", "spx_high", "spx_low")
+    if weekly_df is None or weekly_df.empty or any(c not in weekly_df.columns for c in cols):
+        return {"q": None, "n": 0, "beta": beta}
+
+    o = weekly_df["spx_open"].astype(float)
+    h = weekly_df["spx_high"].astype(float)
+    l = weekly_df["spx_low"].astype(float)
+    rng = h - l
+    valid = (rng > 0) & o.notna() & h.notna() & l.notna() & (h >= o) & (o >= l)
+    if int(valid.sum()) < min_obs:
+        return {"q": None, "n": int(valid.sum()), "beta": beta}
+
+    s_up = ((h - o) / rng)[valid].clip(0.0, 1.0)
+    pooled = pd.concat([s_up, 1.0 - s_up], ignore_index=True)
+    q = float(pooled.quantile(1.0 - beta))
+    # q below 0.5 would place strikes TIGHTER than the legacy split — only a
+    # pathological sample does that; never allow it.
+    return {"q": round(max(q, 0.5), 4), "n": int(valid.sum()), "beta": beta}
+
+
 def forecast_next_week(
     result: sm.regression.linear_model.RegressionResultsWrapper,
     feature_row: pd.Series,
     feature_cols: list[str],
     spx_close: float,
     alpha: float = PI_ALPHA,
+    side_share_q: "float | None" = None,
 ) -> dict:
     """
     Generate a point forecast + prediction interval for the upcoming week.
+
+    side_share_q: per-side range share from estimate_side_share_quantile().
+    None keeps the legacy symmetric half-split for the price levels.
     """
     # Build feature vector, using training-data means for missing values
     # (0.0 would be wrong for log-transformed features like har_d1/har_w/har_m)
@@ -452,19 +560,41 @@ def forecast_next_week(
     log_lower = float(frame["obs_ci_lower"].iloc[0])
     log_upper = float(frame["obs_ci_upper"].iloc[0])
 
-    # Back-transform log -> range_pct
+    # Back-transform log -> range_pct.
+    #
+    # DELIBERATE (documented after the 2026-07 audit): exp(E[log range]) is
+    # the conditional MEDIAN of the range, not its mean — the lognormal mean
+    # would need a Jensen correction (× exp(sigma²/2), ~+2-4% here). For
+    # strike placement the median is the right anchor: it's the
+    # equal-probability center of the range distribution, and the PI bounds
+    # (which placement actually rides) are quantiles, which back-transform
+    # exactly under any monotone map. Do NOT add a smearing correction to
+    # point_pct without re-running the VRP-gate calibration — the Cockpit's
+    # implied/forecast ratio tripwire was tuned against this median
+    # convention.
     point_pct = math.exp(log_point)
     lower_pct = max(0.0, math.exp(log_lower))
     upper_pct = math.exp(log_upper)
 
-    # Price levels (symmetric around the open). NOTE: pi_lower_px below
-    # deliberately uses half_upper, not a "half_lower" — the model forecasts
-    # a RANGE (high-low), so the PI-UPPER range bound maps to one symmetric
-    # price band (ref ± upper_pct/2) and pi_lower_px is that band's floor.
-    # lower_pct (the narrow-range PI bound) is a different, tighter band used
-    # by the Lower-PI tier in build_spread_tiers, not a lower price here.
-    half_point = point_pct / 2
-    half_upper = upper_pct / 2
+    # Price levels around the open. NOTE: pi_lower_px below deliberately
+    # derives from upper_pct, not a "half_lower" — the model forecasts a
+    # RANGE (high-low), so the PI-UPPER range bound maps to one price band
+    # and pi_lower_px is that band's floor. lower_pct (the narrow-range PI
+    # bound) is a different, tighter band used by the Lower-PI tier in
+    # build_spread_tiers, not a lower price here.
+    #
+    # The per-side share defaults to the legacy symmetric 1/2. When the
+    # caller provides side_share_q (estimate_side_share_quantile), each side
+    # gets u*q of the range instead — because a range says nothing about
+    # WHERE the open sits inside it, and empirically the open concentrates
+    # near one extreme, a half-split band is touched far more often than the
+    # range-coverage number suggests.
+    side_share = 0.5
+    if side_share_q is not None and 0.5 <= float(side_share_q) <= 1.0:
+        side_share = float(side_share_q)
+
+    half_point = point_pct * side_share
+    half_upper = upper_pct * side_share
 
     vix_implied = float(feature_row.get("vix_implied_range", 0) or 0)
 
@@ -481,6 +611,7 @@ def forecast_next_week(
         "model_vs_vix":    round(point_pct - vix_implied, 4),
         "confidence_level": int((1 - alpha) * 100),
         "alpha":           alpha,
+        "side_share_q":    round(side_share, 4),
     }
 
     return forecast

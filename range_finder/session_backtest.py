@@ -217,14 +217,23 @@ def detailed_bucket_stats(df: pd.DataFrame, low_thresh: float, high_thresh: floa
 # MAIN
 # =============================================================================
 
-def run_backtest(years: int = 4) -> dict:
+def run_backtest(years: int = 4, holdout_frac: float = 0.30) -> dict:
     """
     Full backtest pipeline. Returns recommended thresholds and stats.
+
+    Thresholds are selected on the FIRST (1 - holdout_frac) of the sample
+    chronologically and validated on the untouched tail — grid-searching and
+    scoring on the same full sample (the original behavior) reports in-sample
+    accuracies that overstate how the chosen pair generalizes.
     """
     df = fetch_backtest_data(years=years)
 
-    log.info("Running grid search over threshold pairs...")
-    results = grid_search_thresholds(df)
+    n_fit = max(1, int(len(df) * (1.0 - holdout_frac)))
+    df_fit, df_holdout = df.iloc[:n_fit], df.iloc[n_fit:]
+
+    log.info(f"Running grid search over threshold pairs "
+             f"(fit on {len(df_fit)} days, holdout {len(df_holdout)})...")
+    results = grid_search_thresholds(df_fit)
 
     if results.empty:
         log.warning("No valid threshold pairs found (insufficient data?).")
@@ -235,10 +244,16 @@ def run_backtest(years: int = 4) -> dict:
     high_t = float(best["high_thresh"])
 
     log.info(f"\nOptimal thresholds: low={low_t:.2f}, high={high_t:.2f}")
-    log.info(f"Combined score: {best['combined_score']:.4f}")
+    log.info(f"Combined score (in-sample): {best['combined_score']:.4f}")
     log.info(f"Separation: {best['separation_pct']:.3f}%")
     log.info(f"Accuracy (low bucket): {best['accuracy_low']:.1%}")
     log.info(f"Accuracy (high bucket): {best['accuracy_high']:.1%}")
+
+    # Out-of-sample check: the chosen pair's bucket stats on the untouched
+    # chronological tail. If the separation collapses here, the thresholds
+    # are curve-fit, not structure.
+    holdout_stats = (detailed_bucket_stats(df_holdout, low_t, high_t)
+                     if len(df_holdout) >= 30 else {})
 
     stats = detailed_bucket_stats(df, low_t, high_t)
 
@@ -258,6 +273,14 @@ def run_backtest(years: int = 4) -> dict:
     print(f"  Top 5 threshold pairs by combined score:")
     print(results.head(5)[["low_thresh", "high_thresh", "combined_score",
                            "accuracy_low", "accuracy_high", "separation_pct"]].to_string(index=False))
+    if holdout_stats:
+        print(f"\n  HOLDOUT ({len(df_holdout)} untouched days) — bucket medians "
+              f"with the fit-selected thresholds:")
+        for label, s in holdout_stats.items():
+            print(f"    [{label.upper()}] {s['count']} days: median range "
+                  f"{s['median_range_pct']:.3f}%")
+        print("  (If low/high medians converge here, the thresholds are "
+              "curve-fit — don't adopt.)")
     print("=" * 65)
 
     return {
@@ -265,6 +288,8 @@ def run_backtest(years: int = 4) -> dict:
         "recommended_high_threshold": high_t,
         "best_result": best.to_dict(),
         "bucket_stats": stats,
+        "holdout_stats": holdout_stats,
+        "holdout_n": len(df_holdout),
         "top_5": results.head(5).to_dict(orient="records"),
         "dataset_size": len(df),
     }

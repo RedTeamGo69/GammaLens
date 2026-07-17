@@ -11,9 +11,17 @@
 # (The daily/0DTE variant of this audit was removed with the 0DTE finder.)
 #
 # Interpretation:
-#   * one-sided coverage (P[actual <= upper]) is the number that matters for
-#     strike placement — shorts are placed off the PI UPPER bound. Nominal
-#     for an 80% central interval is 90% one-sided (10% in each tail).
+#   * one-sided coverage (P[actual <= upper]) audits the RANGE forecast.
+#     Nominal for an 80% central interval is 90% one-sided (10% in each
+#     tail). NOTE: this is an UPPER BOUND on strike survival, not strike
+#     survival itself — no-touch of both band edges implies range <= upper,
+#     but a trending week can breach one strike while its total range stays
+#     inside the forecast (the open rarely sits mid-range; arcsine law).
+#   * strike-touch rate (P[high >= call_short or low <= put_short], from the
+#     scored breach flags) is the number that actually matters for condor
+#     P&L. It is strictly worse than one-sided coverage by construction;
+#     the side-share quantile placement (har_model.
+#     estimate_side_share_quantile) exists to close that gap.
 #   * two-sided coverage (P[lower <= actual <= upper]) audits the interval
 #     as a whole. Nominal is 80%.
 #   * buffer breach rate audits the heuristic buffer ON TOP of the PI:
@@ -52,7 +60,8 @@ def load_completed_forecasts(conn, ticker: str = "SPX") -> pd.DataFrame:
         SELECT week_start, ticker, model_name,
                point_pct, lower_pct, upper_pct, effective_range_pct,
                buffer_pct, event_count,
-               actual_high, actual_low, actual_range_pct, outcome
+               actual_high, actual_low, actual_range_pct, outcome,
+               call_breached, put_breached
         FROM spread_log
         WHERE ticker = ?
           AND upper_pct IS NOT NULL
@@ -131,6 +140,41 @@ def pi_coverage(df: pd.DataFrame, nominal_two_sided: float = NOMINAL_TWO_SIDED) 
     }
 
 
+def strike_touch_summary(df: pd.DataFrame) -> dict:
+    """Empirical strike-touch rates from the scored breach flags.
+
+    The honest condor metric: a week counts against the placement when the
+    realized high reached the logged call short OR the realized low reached
+    the logged put short — regardless of whether the total range stayed
+    inside the PI. Only rows where BOTH breach flags were scored are used
+    (legacy rows may carry NULLs).
+    """
+    need = ("call_breached", "put_breached")
+    if df.empty or any(c not in df.columns for c in need):
+        return {"n": 0, "call_touch": float("nan"), "put_touch": float("nan"),
+                "any_touch": float("nan"),
+                "any_touch_ci": (float("nan"), float("nan")),
+                "sufficient": False}
+    scored = df[df["call_breached"].notna() & df["put_breached"].notna()]
+    n = len(scored)
+    if n == 0:
+        return {"n": 0, "call_touch": float("nan"), "put_touch": float("nan"),
+                "any_touch": float("nan"),
+                "any_touch_ci": (float("nan"), float("nan")),
+                "sufficient": False}
+    call_t = scored["call_breached"].astype(float) > 0
+    put_t = scored["put_breached"].astype(float) > 0
+    any_t = call_t | put_t
+    return {
+        "n": n,
+        "call_touch": float(call_t.mean()),
+        "put_touch": float(put_t.mean()),
+        "any_touch": float(any_t.mean()),
+        "any_touch_ci": _binomial_ci(int(any_t.sum()), n),
+        "sufficient": n >= MIN_SAMPLE,
+    }
+
+
 def buffer_breach_rate(df: pd.DataFrame) -> dict:
     """How often the realized range blew through PI-upper PLUS the buffer.
 
@@ -196,6 +240,7 @@ def weekly_pi_coverage(conn, ticker: str = "SPX") -> dict:
     df = load_completed_forecasts(conn, ticker=ticker)
     cov = pi_coverage(df)
     cov["buffer"] = buffer_breach_rate(df)
+    cov["strike_touch"] = strike_touch_summary(df)
     return cov
 
 
@@ -228,6 +273,14 @@ def _print_coverage_block(title: str, cov: dict) -> None:
               f"(CI {_fmt_pct(lo2)}-{_fmt_pct(hi2)}, nominal "
               f"{_fmt_pct(cov['nominal_two_sided'])}, "
               f"n={cov['n_two_sided']})")
+    touch = cov.get("strike_touch")
+    if touch and touch["n"]:
+        lo3, hi3 = touch["any_touch_ci"]
+        print(f"    strike-touch rate   : {_fmt_pct(touch['any_touch'])} "
+              f"(CI {_fmt_pct(lo3)}-{_fmt_pct(hi3)}, "
+              f"call {_fmt_pct(touch['call_touch'])} / "
+              f"put {_fmt_pct(touch['put_touch'])}, n={touch['n']}) "
+              f"<- the condor number; strictly worse than coverage")
     if not cov["sufficient"]:
         # ASCII only — Windows cp1252 consoles choke on warning glyphs
         print(f"    [!] n < {MIN_SAMPLE} - numbers shown, conclusions refused. "

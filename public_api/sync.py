@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 from public_api.categorize import category_key_for_group
 from public_api.grouping import group_fills
 from public_api.stats import compute_category_stats, upsert_category_stats
-from public_api.store import upsert_review_queue, upsert_strategies
+from public_api.store import (
+    delete_superseded_strategies,
+    resolve_stale_review_items,
+    upsert_review_queue,
+    upsert_strategies,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +37,8 @@ class SyncResult:
     ambiguous: int = 0
     coverage: float = 0.0
     categories: int = 0
+    superseded_removed: int = 0
+    review_resolved: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -69,6 +76,14 @@ def sync_public_history(conn, client, account_id: str | None = None,
     try:
         upsert_strategies(conn, grouped.strategies, categories, account)
         upsert_review_queue(conn, grouped.ambiguous, account)
+        # Reconcile: this id set came from the COMPLETE history (pagination
+        # fails closed), so rows absent from it are id-churn artifacts
+        # (scale-ins / leg-in merges changed the opening-txn set) and queue
+        # rows for fills that now grouped cleanly are no longer ambiguous.
+        result.superseded_removed = delete_superseded_strategies(
+            conn, account, [g.strategy_id for g in grouped.strategies])
+        result.review_resolved = resolve_stale_review_items(
+            conn, account, [a.get("txn_id") for a in grouped.ambiguous])
         stats = compute_category_stats(grouped.strategies, categories)
         result.categories = upsert_category_stats(conn, account, stats)
     except Exception as e:
@@ -77,5 +92,7 @@ def sync_public_history(conn, client, account_id: str | None = None,
 
     log.info(f"Public sync: {result.strategies} strategies "
              f"({result.closed} closed) from {result.trade_fills} fills, "
-             f"coverage {result.coverage:.1%}, {result.ambiguous} in review")
+             f"coverage {result.coverage:.1%}, {result.ambiguous} in review, "
+             f"{result.superseded_removed} superseded removed, "
+             f"{result.review_resolved} review rows auto-resolved")
     return result

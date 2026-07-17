@@ -184,12 +184,33 @@ def test_legged_in_condor_merges_same_day_opposite_verticals():
     assert len(g.legs_open) == 4
 
 
-def test_different_day_verticals_stay_separate():
+def test_multi_day_same_week_verticals_merge_as_leg_in():
+    """The actual trading workflow: put spread sold Monday, call side legged
+    in Wednesday (the Cockpit's Mon-Wed entry cutoff), same Friday expiry.
+    grouping v2 merges these; v1's same-day window left them as two phantom
+    verticals that never matched the position actually managed as a condor."""
     txns = [
-        fill("p1", T0, P750, "SELL", 1, 90.00),
+        fill("p1", T0, P750, "SELL", 1, 90.00),    # Monday
         fill("p2", T0, P745, "BUY", 1, 55.00),
-        fill("c1", T2, C765, "SELL", 1, 80.00),    # two days later
+        fill("c1", T2, C765, "SELL", 1, 80.00),    # Wednesday, same week
         fill("c2", T2, C770, "BUY", 1, 50.00),
+    ]
+    res = group_fills(txns)
+    assert len(res.strategies) == 1
+    g = res.strategies[0]
+    assert g.opened_via == "leg_in"
+    assert len(g.legs_open) == 4
+    assert g.opened_at.startswith("2026-07-13")    # condor dates from first leg
+
+
+def test_cross_week_verticals_stay_separate():
+    """Opposite-side verticals in DIFFERENT weeks never merge, even ahead of
+    a shared expiration — that's two positions, not a leg-in."""
+    txns = [
+        fill("p1", "2026-07-10T14:00:00.000000+00:00", P750, "SELL", 1, 90.00),  # prior Fri
+        fill("p2", "2026-07-10T14:00:00.000000+00:00", P745, "BUY", 1, 55.00),
+        fill("c1", T0, C765, "SELL", 1, 80.00),    # Monday of the next week
+        fill("c2", T0, C770, "BUY", 1, 50.00),
     ]
     res = group_fills(txns)
     assert len(res.strategies) == 2
@@ -224,3 +245,27 @@ def test_scale_in_attaches_to_existing_group():
     res = group_fills(txns)
     assert len(res.strategies) == 1
     assert len(res.strategies[0].legs_open) == 2
+
+
+# ── position-flip tracker reset (audit D46) ──────────────────────────────────
+
+def test_position_flip_resets_tracker_so_later_fills_classify_correctly():
+    """After a flip fill lands in review, the contract's tracked position must
+    advance to reality (p+q). Hold +1 long, SELL 3 (crosses zero → flip/review,
+    true book now -2), then SELL 1 more. With the reset, that SELL is a
+    same-direction scale-in of the short (an OPEN) — without it, the stale +1
+    book would mis-read the SELL 1 as a close. The flip fill carries the
+    underlying key the review-queue writer persists."""
+    txns = [
+        fill("a", T0, C765, "BUY", 1, 50.00),                 # +1 long call
+        fill("b", T1, C765, "SELL", 3, 240.00),               # -3 → crosses 0: flip
+        fill("c", T2, C765, "SELL", 1, 80.00),                # more short vs true -2
+    ]
+    res = group_fills(txns)
+    flips = [a for a in res.ambiguous if a["reason"] == "position_flip"]
+    assert len(flips) == 1
+    assert flips[0]["txn_id"] == "b"
+    assert flips[0]["underlying"] == "XSP"      # underlying key present (D50)
+    # Fill 'c' classified against the corrected -2 book as a same-direction
+    # open — NOT flagged as an orphan close from a stale +1 book.
+    assert not any(a["txn_id"] == "c" for a in res.ambiguous)

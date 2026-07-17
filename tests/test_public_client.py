@@ -127,3 +127,53 @@ def test_client_no_secret_short_circuits():
     c = PublicClient("", "ACCT1")
     assert c._access_token() is None
     assert c.get_history_page() is None
+
+
+# ── pagination fails closed (grouping needs the COMPLETE prefix) ───────────────
+
+def _page(txn_ids, next_token):
+    return {"transactions": [{"id": i, "type": "TRADE"} for i in txn_ids],
+            "nextToken": next_token}
+
+
+def test_get_all_history_complete_multipage_returns_all(monkeypatch):
+    c = PublicClient("secret", "ACCT1")
+    pages = [_page(["a", "b"], "t1"), _page(["c", "d"], "t2"), _page(["e"], None)]
+    calls = {"i": 0}
+
+    def fake_page(page_size=100, next_token=None, start=None):
+        p = pages[calls["i"]]
+        calls["i"] += 1
+        return p
+
+    monkeypatch.setattr(c, "get_history_page", fake_page)
+    txns = c.get_all_history()
+    assert [t["id"] for t in txns] == ["a", "b", "c", "d", "e"]
+
+
+def test_get_all_history_midstream_failure_returns_none(monkeypatch):
+    """A page failure AFTER the first page must discard the partial history
+    and return None — persisting a truncated prefix corrupts grouping."""
+    c = PublicClient("secret", "ACCT1")
+    pages = [_page(["a", "b"], "t1"), None]  # page 2 fails
+    calls = {"i": 0}
+
+    def fake_page(page_size=100, next_token=None, start=None):
+        p = pages[calls["i"]]
+        calls["i"] += 1
+        return p
+
+    monkeypatch.setattr(c, "get_history_page", fake_page)
+    assert c.get_all_history() is None
+
+
+def test_get_all_history_page_ceiling_returns_none(monkeypatch):
+    """If pagination never terminates before max_pages, the history is
+    incomplete, so return None rather than a truncated list."""
+    c = PublicClient("secret", "ACCT1")
+
+    def fake_page(page_size=100, next_token=None, start=None):
+        return _page(["x"], "always-more")  # nextToken never clears
+
+    monkeypatch.setattr(c, "get_history_page", fake_page)
+    assert c.get_all_history(max_pages=3) is None

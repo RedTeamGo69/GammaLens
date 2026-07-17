@@ -143,10 +143,20 @@ class PublicClient:
         page_size: int = DEFAULT_PAGE_SIZE,
         max_pages: int = MAX_PAGES,
     ) -> list[dict] | None:
-        """Paginate to exhaustion. None when the FIRST page fails (auth /
-        network — caller should treat Public as unavailable); a mid-stream
-        failure returns what was fetched with a logged warning, because a
-        partial idempotent sync is strictly better than none."""
+        """Paginate to exhaustion, or return None if the history is incomplete.
+
+        None means "Public is unavailable — do not sync" and the caller shows
+        the last good data. A page failure at ANY point (first or mid-stream)
+        returns None, NOT the partial list: the downstream grouping engine
+        infers running positions from the COMPLETE history prefix, so a
+        truncated list makes it classify fills whose opening leg was dropped
+        as brand-new opens with inverted direction, then persist those corrupt
+        strategies under deterministic ids a later healthy sync never
+        regenerates (and nothing deletes). A partial sync is therefore worse
+        than none here — a transient failure simply retries next run.
+
+        The max_pages ceiling is treated the same way: if we hit it there may
+        be unfetched pages, so the result is incomplete and we return None."""
         transactions: list[dict] = []
         next_token: str | None = None
         for page_num in range(max_pages):
@@ -154,17 +164,22 @@ class PublicClient:
                                          next_token=next_token, start=start)
             if page is None:
                 if page_num == 0:
-                    return None
-                log.warning(f"Public history pagination stopped early at page "
-                            f"{page_num} — proceeding with {len(transactions)} rows.")
-                break
+                    log.warning("Public history first page failed — treating "
+                                "Public as unavailable.")
+                else:
+                    log.warning(f"Public history pagination failed at page "
+                                f"{page_num} after {len(transactions)} rows — "
+                                f"discarding the partial history so grouping "
+                                f"never runs on a truncated prefix.")
+                return None
             transactions.extend(page.get("transactions") or [])
             next_token = page.get("nextToken")
             if not next_token:
                 break
         else:
             log.warning(f"Public history hit the {max_pages}-page ceiling — "
-                        f"pagination may be incomplete.")
+                        f"history is incomplete, skipping this sync.")
+            return None
         return transactions
 
     # ── order preflight (margin/cost estimate — NEVER placement) ────────────

@@ -73,6 +73,76 @@ def upsert_strategies(conn, groups: list[StrategyGroup],
     return n
 
 
+def delete_superseded_strategies(conn, account_id: str,
+                                 keep_ids: list[str]) -> int:
+    """Remove strategy_history rows the current full repull did NOT regenerate.
+
+    strategy_id is a hash of the OPENING txn-id set, so it churns whenever
+    that set grows between syncs — a scale-in attaches a new opening leg, or
+    the leg-in merge combines two verticals into one condor. Upsert-only
+    persistence left the pre-churn row behind forever as a phantom 'open'
+    strategy duplicating legs that also live inside the new row.
+
+    Safe ONLY because get_all_history fails closed (returns None on any
+    incomplete pagination): reaching persistence means the id set was
+    computed from the COMPLETE account history, so a row absent from it is a
+    superseded artifact, never a fill we failed to fetch. The empty-set
+    guard is belt-and-braces — an account with zero true history has nothing
+    to reconcile, and a pathological empty result must not wipe the table.
+    """
+    if not keep_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in keep_ids)
+    cur = conn.execute(
+        f"""
+        DELETE FROM strategy_history
+        WHERE account_id = ? AND strategy_id NOT IN ({placeholders})
+        """,
+        (account_id, *keep_ids),
+    )
+    conn.commit()
+    removed = getattr(cur, "rowcount", 0) or 0
+    if removed:
+        log.info(f"reconciled strategy_history: removed {removed} superseded row(s)")
+    return removed
+
+
+def resolve_stale_review_items(conn, account_id: str,
+                               still_ambiguous_txn_ids: list[str]) -> int:
+    """Auto-resolve queue rows whose fill the latest complete sync grouped.
+
+    A fill lands in fill_review_queue when grouping couldn't place it at the
+    time; a later fill often completes the picture and the next full repull
+    groups it cleanly — but the queue row previously stayed 'in review'
+    forever, so the UI counter never drained. Any unresolved row whose txn_id
+    is NOT in the current sync's ambiguous set is no longer ambiguous.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    ids = [t for t in still_ambiguous_txn_ids if t]
+    if ids:
+        placeholders = ", ".join("?" for _ in ids)
+        cur = conn.execute(
+            f"""
+            UPDATE fill_review_queue SET resolved = 1, updated_at = ?
+            WHERE account_id = ? AND resolved = 0 AND txn_id NOT IN ({placeholders})
+            """,
+            (now, account_id, *ids),
+        )
+    else:
+        cur = conn.execute(
+            """
+            UPDATE fill_review_queue SET resolved = 1, updated_at = ?
+            WHERE account_id = ? AND resolved = 0
+            """,
+            (now, account_id),
+        )
+    conn.commit()
+    resolved = getattr(cur, "rowcount", 0) or 0
+    if resolved:
+        log.info(f"review queue: auto-resolved {resolved} no-longer-ambiguous row(s)")
+    return resolved
+
+
 def upsert_review_queue(conn, ambiguous: list[dict], account_id: str) -> int:
     now = datetime.now(timezone.utc).isoformat()
     n = 0

@@ -77,21 +77,38 @@ def compute_category_stats(strategies: list, categories: dict[str, str]) -> dict
 
 def upsert_category_stats(conn, account_id: str, stats: dict) -> int:
     """Replace the account's derived stats wholesale (categories that no
-    longer exist after a re-group must not linger)."""
+    longer exist after a re-group must not linger).
+
+    Runs inside an explicit transaction: the connection layer is
+    statement-level autocommit (see range_finder/db.py), so a bare
+    DELETE-then-INSERT could die between the two and leave the behavioral
+    gate reading an EMPTY stats table until the next sync. BEGIN/COMMIT
+    makes the wholesale swap atomic; on any failure the DELETE rolls back
+    and the previous stats stay readable.
+    """
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute("DELETE FROM trade_category_stats WHERE account_id = ?",
-                 (account_id,))
     placeholders = ", ".join("?" for _ in _STATS_COLS)
     n = 0
-    for cat, s in stats.items():
-        row = {"account_id": account_id, "category": cat,
-               "last_computed_at": now, "updated_at": now, **s}
-        conn.execute(
-            f"INSERT INTO trade_category_stats ({', '.join(_STATS_COLS)}) "
-            f"VALUES ({placeholders})",
-            tuple(row.get(c) for c in _STATS_COLS),
-        )
-        n += 1
+    conn.execute("BEGIN", ())
+    try:
+        conn.execute("DELETE FROM trade_category_stats WHERE account_id = ?",
+                     (account_id,))
+        for cat, s in stats.items():
+            row = {"account_id": account_id, "category": cat,
+                   "last_computed_at": now, "updated_at": now, **s}
+            conn.execute(
+                f"INSERT INTO trade_category_stats ({', '.join(_STATS_COLS)}) "
+                f"VALUES ({placeholders})",
+                tuple(row.get(c) for c in _STATS_COLS),
+            )
+            n += 1
+        conn.execute("COMMIT", ())
+    except Exception:
+        try:
+            conn.execute("ROLLBACK", ())
+        except Exception:
+            pass
+        raise
     conn.commit()
     return n
 

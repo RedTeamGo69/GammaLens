@@ -38,11 +38,17 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone as _tz
+
+_UTC = _tz.utc
 
 from public_api.occ import OccOption, parse_occ_symbol, underlying_of
 
-GROUPING_VERSION = 1
+# v2: leg-in condor merge window widened from same-DAY to same-WEEK — the
+# Cockpit's documented workflow legs in the put side Monday and the call side
+# as late as Wednesday (Mon–Wed entry cutoff), so same-day merging left every
+# multi-day leg-in split as two phantom verticals.
+GROUPING_VERSION = 2
 CLUSTER_WINDOW_SEC = 2.0
 
 
@@ -218,7 +224,22 @@ def group_fills(
     production; omit in tests that want purely fill-driven state.
     """
     fills = [l for l in (_to_leg(t) for t in transactions) if l is not None]
-    fills.sort(key=lambda f: f.ts)
+    # Chronological sort on PARSED timestamps normalized to UTC — raw-string
+    # ordering breaks the running-position inference if the feed ever mixes
+    # timezone offsets or aware/naive stamps ("2026-07-13T09:31:00-04:00"
+    # sorts before "2026-07-13T13:30:59+00:00" lexicographically but is the
+    # LATER fill). Unparseable stamps sort last, tie-broken by raw string.
+    _utc_max = datetime.max.replace(tzinfo=_UTC)
+
+    def _chrono_key(f: FillLeg):
+        dt = _parse_ts(f.ts)
+        if dt is None:
+            return (_utc_max, f.ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_UTC)
+        return (dt.astimezone(_UTC), f.ts)
+
+    fills.sort(key=_chrono_key)
     total = len(fills)
 
     groups: list[_Group] = []
@@ -244,10 +265,21 @@ def group_fills(
             else:
                 ambiguous.append({                      # would cross through zero
                     "txn_id": leg.txn_id, "symbol": leg.symbol, "ts": leg.ts,
+                    "underlying": leg.underlying,
                     "reason": "position_flip",
                     "context": f"fill qty {q:g} against position {p:g} would "
                                f"cross zero — split open/close intent unclear",
                 })
+                # GROUP attribution is ambiguous, but the position arithmetic
+                # is not: at the broker this fill DID execute, and the
+                # contract's true position is now p + q. Leaving the tracker
+                # at the stale p mis-classified every SUBSEQUENT fill on this
+                # contract (opens read as closes and vice versa). Advance the
+                # tracked position to reality and drop the group linkage —
+                # the next fill classifies against the true book, and only
+                # the flip fill itself stays in review.
+                pos[leg.symbol] = p + q
+                owner.pop(leg.symbol, None)
                 continue
 
         # Closes attach to their owning groups first (so a roll's close half
@@ -258,6 +290,7 @@ def group_fills(
             if g is None:
                 ambiguous.append({
                     "txn_id": leg.txn_id, "symbol": leg.symbol, "ts": leg.ts,
+                    "underlying": leg.underlying,
                     "reason": "orphan_close",
                     "context": "closing fill with no owning open group",
                 })
@@ -314,9 +347,24 @@ def group_fills(
                           coverage=round(coverage, 4))
 
 
+def _week_of(date_str: str) -> str:
+    """ISO date → that week's Monday (leg-in merge bucketing)."""
+    try:
+        d = datetime.fromisoformat(date_str).date()
+    except (TypeError, ValueError):
+        return date_str
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
 def _merge_legged_in_condors(groups: list[_Group], owner: dict) -> None:
-    """Two same-day, same-expiry credit verticals on opposite sides of one
-    underlying → one condor legged in over the day."""
+    """Two same-WEEK, same-expiry credit verticals on opposite sides of one
+    underlying → one condor legged in across the week.
+
+    Same-week (not same-day): the trader's documented workflow sells the put
+    spread first and legs the call side in up to the Wednesday entry cutoff.
+    Requiring the SAME expiration already scopes the merge to one weekly
+    cycle; the week bucket just stops a Friday vertical from pairing with the
+    NEXT week's opposite side ahead of a shared later expiry."""
     def _is_credit_vertical(g: _Group) -> bool:
         legs = g.open_legs
         return (len(legs) == 2 and all(l.occ for l in legs)
@@ -327,7 +375,7 @@ def _merge_legged_in_condors(groups: list[_Group], owner: dict) -> None:
     by_key: dict[tuple, list[_Group]] = {}
     for g in groups:
         if g.opened_via == "order" and _is_credit_vertical(g):
-            key = (g.underlying, g.open_date, next(iter(g.expirations)))
+            key = (g.underlying, _week_of(g.open_date), next(iter(g.expirations)))
             by_key.setdefault(key, []).append(g)
 
     for candidates in by_key.values():

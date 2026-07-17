@@ -83,9 +83,13 @@ def test_upsert_category_stats_replaces_wholesale():
     fc = FakeConn()
     n = upsert_category_stats(fc, "TESTACCT", {"a|b|c|d": {"n_trades": 1}})
     assert n == 1
-    assert "DELETE FROM trade_category_stats" in fc.calls[0][0]
-    insert_sql, params = fc.calls[1]
+    executed = [c[0] for c in fc.calls]
+    # Atomic swap: BEGIN, DELETE, INSERT, COMMIT.
+    assert executed[0] == "BEGIN"
+    assert "DELETE FROM trade_category_stats" in executed[1]
+    insert_sql, params = fc.calls[2]
     assert insert_sql.count("?") == len(params) == len(_STATS_COLS)
+    assert "COMMIT" in executed
 
 
 def test_load_category_stats_none_when_empty():
@@ -135,3 +139,114 @@ def test_sync_returns_none_when_unreachable():
             return None
 
     assert sync_public_history(FakeConn(), DeadClient()) is None
+
+
+# ── reconciliation: superseded-id cleanup + review-queue auto-resolve ─────────
+
+import sqlite3
+
+
+def _sqlite_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE strategy_history (
+            strategy_id TEXT PRIMARY KEY, account_id TEXT, underlying TEXT,
+            category TEXT, status TEXT, close_reason TEXT, opened_at TEXT,
+            closed_at TEXT, expiration TEXT, dte_at_open INTEGER,
+            n_legs INTEGER, legs_json TEXT, realized_pnl REAL, fees REAL,
+            opened_via TEXT, rolled_from TEXT, grouping_version INTEGER,
+            updated_at TEXT)
+    """)
+    conn.execute("""
+        CREATE TABLE fill_review_queue (
+            txn_id TEXT PRIMARY KEY, account_id TEXT, symbol TEXT,
+            underlying TEXT, ts TEXT, reason TEXT, context TEXT,
+            resolved INTEGER, updated_at TEXT)
+    """)
+    return conn
+
+
+def test_delete_superseded_strategies_removes_id_churn_orphans():
+    from public_api.store import delete_superseded_strategies
+    conn = _sqlite_conn()
+    for sid in ("old_vertical", "current_condor", "other_current"):
+        conn.execute(
+            "INSERT INTO strategy_history (strategy_id, account_id, status) "
+            "VALUES (?, ?, 'open')", (sid, "ACCT"))
+    # 'old_vertical' predates a leg-in merge — the fresh full sync only
+    # regenerated the two current ids.
+    removed = delete_superseded_strategies(
+        conn, "ACCT", ["current_condor", "other_current"])
+    assert removed == 1
+    left = {r[0] for r in conn.execute(
+        "SELECT strategy_id FROM strategy_history").fetchall()}
+    assert left == {"current_condor", "other_current"}
+
+
+def test_delete_superseded_refuses_empty_keep_set():
+    from public_api.store import delete_superseded_strategies
+    conn = _sqlite_conn()
+    conn.execute(
+        "INSERT INTO strategy_history (strategy_id, account_id, status) "
+        "VALUES ('x', 'ACCT', 'open')", ())
+    assert delete_superseded_strategies(conn, "ACCT", []) == 0
+    assert conn.execute("SELECT COUNT(*) FROM strategy_history").fetchone()[0] == 1
+
+
+def test_delete_superseded_scoped_to_account():
+    from public_api.store import delete_superseded_strategies
+    conn = _sqlite_conn()
+    conn.execute("INSERT INTO strategy_history (strategy_id, account_id) "
+                 "VALUES ('mine_old', 'ACCT')", ())
+    conn.execute("INSERT INTO strategy_history (strategy_id, account_id) "
+                 "VALUES ('theirs', 'OTHER')", ())
+    delete_superseded_strategies(conn, "ACCT", ["mine_new"])
+    left = {r[0] for r in conn.execute(
+        "SELECT strategy_id FROM strategy_history").fetchall()}
+    assert left == {"theirs"}
+
+
+def test_resolve_stale_review_items_drains_grouped_fills():
+    from public_api.store import resolve_stale_review_items
+    conn = _sqlite_conn()
+    for txn in ("t_still_odd", "t_now_grouped", "t_already_done"):
+        conn.execute(
+            "INSERT INTO fill_review_queue (txn_id, account_id, resolved) "
+            "VALUES (?, 'ACCT', ?)",
+            (txn, 1 if txn == "t_already_done" else 0))
+    # Latest complete sync still flags only t_still_odd as ambiguous.
+    n = resolve_stale_review_items(conn, "ACCT", ["t_still_odd"])
+    assert n == 1
+    rows = dict(conn.execute(
+        "SELECT txn_id, resolved FROM fill_review_queue").fetchall())
+    assert rows == {"t_still_odd": 0, "t_now_grouped": 1, "t_already_done": 1}
+
+
+def test_sync_reconciles_superseded_rows_end_to_end():
+    """Leg-in id churn scenario through the real sync: a pre-merge vertical
+    row sits in the DB; after a full sync whose grouping merged everything
+    into one condor, the orphan is gone and the condor row remains."""
+    from public_api.sync import sync_public_history
+    conn = _sqlite_conn()
+    conn.execute(
+        "INSERT INTO strategy_history (strategy_id, account_id, status) "
+        "VALUES ('stale_pre_merge_id', 'TESTACCT', 'open')", ())
+    # Columns mirror public_api.stats._STATS_COLS so the real upsert lands.
+    conn.execute("""
+        CREATE TABLE trade_category_stats (
+            account_id TEXT, category TEXT, n_trades INTEGER,
+            n_wins INTEGER, win_rate REAL, total_pnl REAL,
+            avg_pnl REAL, avg_win REAL, avg_loss REAL, worst_loss REAL,
+            best_trade REAL, avg_hold_days REAL,
+            first_trade_date TEXT, last_trade_date TEXT,
+            last_computed_at TEXT, updated_at TEXT,
+            PRIMARY KEY (account_id, category))
+    """)
+    res = sync_public_history(conn, FakeClient(condor_open()),
+                              as_of="2026-07-20")
+    assert res is not None and res.errors == []
+    assert res.superseded_removed == 1
+    ids = {r[0] for r in conn.execute(
+        "SELECT strategy_id FROM strategy_history").fetchall()}
+    assert "stale_pre_merge_id" not in ids
+    assert len(ids) == 1                       # the freshly-synced condor

@@ -160,15 +160,36 @@ def _fetch_week_ohlc(conn, week_start: str,
     Source order: weekly_spx first (zero network, and it IS the series the
     HAR model trains on — exactly what PI coverage should be measured
     against), then Tradier /markets/history, then yfinance ^GSPC.
+
+    The weekly_spx row is trusted ONLY when its updated_at postdates the
+    scored week's Friday. The Monday cron writes the current week's row at
+    ~9:31 with a minutes-old partial bar; it normally gets refreshed the
+    NEXT Monday before scoring, but if that refresh fails, scoring against
+    the stale row records a Monday-morning "range" for a week that may have
+    breached a strike — permanently corrupting outcome and coverage stats
+    (a breach week scored full_profit). A stale row falls through to the
+    network sources, which fetch the completed daily bars directly.
     """
     try:
         row = conn.execute(
-            "SELECT spx_open, spx_high, spx_low FROM weekly_spx "
+            "SELECT spx_open, spx_high, spx_low, updated_at FROM weekly_spx "
             "WHERE week_start = ?",
             (week_start,),
         ).fetchone()
         if row and row[1] is not None and row[2] is not None:
-            return float(row[1]), float(row[2]), (float(row[0]) if row[0] else None)
+            updated_at = str(row[3] or "")
+            # ISO timestamps compare lexicographically: any update dated
+            # after the week's Friday (i.e. Saturday or later) was written
+            # from completed bars. The normal next-Monday refresh passes;
+            # the partial Monday-of-the-scored-week write does not.
+            if updated_at[:10] > friday_str:
+                return (float(row[1]), float(row[2]),
+                        (float(row[0]) if row[0] else None))
+            log.warning(
+                f"weekly_spx row for {week_start} was last updated "
+                f"{updated_at[:10] or 'unknown'} (needed > {friday_str}) — "
+                f"possibly a partial-week bar; fetching completed bars from "
+                f"the network instead")
     except Exception as e:
         log.warning(f"weekly_spx lookup failed for {week_start}: {e}")
 
@@ -263,11 +284,14 @@ def update_expiration_outcome(week_start: str, conn, ticker: str = "SPX") -> str
     else:
         outcome = "full_profit"
 
-    # Conservative PnL estimate (actual credit not always available)
+    # Conservative PnL estimate (actual credit not always available).
+    # Cash-settled European condor: the index expires at ONE price, so at
+    # most ONE side can finish ITM — the worst realizable loss is a single
+    # wing width (minus credit, unknown here), even when BOTH strikes were
+    # touched intraweek. The old -2*width for "max_loss" was an impossible
+    # loss that inflated every downstream loss statistic.
     if outcome == "full_profit":
         pnl_pts = None
-    elif outcome == "max_loss":
-        pnl_pts = -2 * width if width else None
     else:
         pnl_pts = -width if width else None
 

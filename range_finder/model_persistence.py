@@ -4,6 +4,7 @@
 # on-disk pickle fallback if the DB save fails transiently).
 # =============================================================================
 
+import io
 import logging
 import pickle
 import sys
@@ -13,6 +14,42 @@ from pathlib import Path
 import statsmodels.api as sm
 
 log = logging.getLogger(__name__)
+
+
+# ── Restricted unpickling ────────────────────────────────────────────────────
+#
+# pickle.loads on a blob from Postgres (or a file on disk) executes whatever
+# callables the stream names — a poisoned saved_models row is an RCE
+# primitive for anyone who obtains DATABASE_URL. Model payloads only ever
+# contain statsmodels results + numpy/pandas containers + stdlib scalars, so
+# unpickling is restricted to those module roots. Anything else (os.system,
+# subprocess.Popen, builtins.eval, ...) raises UnpicklingError instead of
+# executing.
+
+_ALLOWED_MODULE_ROOTS = (
+    "statsmodels", "numpy", "pandas", "scipy", "pyarrow",
+    "datetime", "dateutil", "pytz", "zoneinfo",
+    "collections", "builtins", "copyreg", "_codecs",
+)
+
+_BUILTIN_DENYLIST = {"eval", "exec", "compile", "open", "__import__",
+                     "getattr", "setattr", "delattr", "input", "breakpoint"}
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        root = module.split(".")[0]
+        if root not in _ALLOWED_MODULE_ROOTS:
+            raise pickle.UnpicklingError(
+                f"Blocked unpickle of {module}.{name} — model payloads may "
+                f"only reference {_ALLOWED_MODULE_ROOTS}")
+        if root == "builtins" and name in _BUILTIN_DENYLIST:
+            raise pickle.UnpicklingError(f"Blocked unpickle of builtins.{name}")
+        return super().find_class(module, name)
+
+
+def _restricted_loads(blob: bytes):
+    return _RestrictedUnpickler(io.BytesIO(blob)).load()
 
 # Pickle fallback path — used only if the DB save raises
 MODEL_DIR = Path(__file__).parent / "models"
@@ -169,7 +206,7 @@ def load_model(model_name: str, conn=None, ticker: str = "SPX") -> dict:
                 blob = row[0]
                 if isinstance(blob, memoryview):
                     blob = bytes(blob)
-                payload = pickle.loads(blob)
+                payload = _restricted_loads(blob)
                 _validate_payload(payload, f"DB:{ticker}/{model_name}")
                 log.info(f"Model loaded from database: {ticker}/{model_name}  (fitted {payload['fitted_at']})")
                 return payload
@@ -190,7 +227,7 @@ def load_model(model_name: str, conn=None, ticker: str = "SPX") -> dict:
         raise FileNotFoundError(f"No saved model found for {ticker}/{model_name}")
 
     with open(path, "rb") as f:
-        payload = pickle.load(f)
+        payload = _restricted_loads(f.read())
 
     _validate_payload(payload, f"disk:{path}")
     log.info(f"Model loaded from disk: {path}  (fitted {payload['fitted_at']})")

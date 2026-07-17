@@ -418,6 +418,35 @@ def build_features(conn, exclude_covid: bool = True,
     ).tz_localize("America/New_York")
     last_bar_is_complete = _ny_now() >= _last_bar_friday_close
 
+    # --- Partial-bar quarantine for lagged PATH statistics ---
+    # The scaffold row's har_d1 is shift(1) of range_pct — i.e. the LAST bar's
+    # range. On the Monday 9:31 cron that bar is minutes old: its high-low is
+    # a running max-min that has had no time to accumulate, so its range_pct
+    # (~0.3% after two minutes vs ~2% for a typical full week) is not "fresh
+    # information", it is a structurally biased-low observation. Fed to the
+    # scaffold it poisons har_d1 (100% of the value), har_w (1/5) and har_m
+    # (1/20), and the too-narrow W+1 forecast is then served all week to the
+    # Fri-Sun Cockpit plan. The same bias applies to spx_return (a partial
+    # |return| is systematically smaller). LEVEL observations (vix_close =
+    # the latest VIX print) are genuinely fresh and stay live — only path
+    # statistics get proxied by the prior COMPLETED week's values.
+    # When the last bar is complete, har_source IS weekly and the output is
+    # byte-identical — historical builds and walk-forward runs are untouched.
+    har_source = weekly
+    if not last_bar_is_complete:
+        _prior_weeks = weekly.index[weekly.index < last_bar_week]
+        if len(_prior_weeks) > 0:
+            har_source = weekly.copy()
+            _prior_week = _prior_weeks.max()
+            for _col in ("range_pct", "log_range", "spx_return"):
+                if _col in har_source.columns:
+                    har_source.loc[last_bar_week, _col] = weekly.loc[_prior_week, _col]
+            log.info(
+                f"Partial-bar quarantine: {last_bar_week.date()} path stats "
+                f"proxied by {_prior_week.date()} in the HAR lag source "
+                f"(bar covers a fraction of the week)"
+            )
+
     # --- Fetch supplemental data (depth follows history_years so the 10y
     # history experiment can build a full-depth matrix; production callers
     # leave the default 6) ---
@@ -428,8 +457,8 @@ def build_features(conn, exclude_covid: bool = True,
     # experiment asks for is available (yfinance stays the fallback).
     vix_ts    = fetch_vix_term_structure(years=history_years)
 
-    # --- HAR components ---
-    har = compute_har_features(weekly)
+    # --- HAR components (from the quarantined lag source) ---
+    har = compute_har_features(har_source)
 
     # --- HV windows ---
     hv = compute_hv_windows(daily_underlying)
@@ -457,7 +486,9 @@ def build_features(conn, exclude_covid: bool = True,
     )
 
     # --- Underlying return lags (column kept as spx_return_lag1 for SQL stability) ---
-    weekly["spx_return_lag1"] = weekly["spx_return"].shift(1)
+    # Shifted from har_source so the scaffold's lag-1 return is the prior
+    # COMPLETED week's, never a partial-week return (see quarantine above).
+    weekly["spx_return_lag1"] = har_source["spx_return"].shift(1)
     weekly["abs_return_lag1"] = weekly["spx_return_lag1"].abs()
 
     # --- Assemble ---

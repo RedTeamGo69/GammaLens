@@ -10,6 +10,10 @@ new behavior:
     the latest bar and a NULL target,
   * the in-progress week's PARTIAL target is nulled so fits never train on
     a half-week "weekly range",
+  * mid-week, the scaffold's PATH-statistic lags (har_d1, spx_return_lag1)
+    are proxied by the prior COMPLETED week — a partial bar's high-low is a
+    running max-min with structural downward bias, not fresh information —
+    while LEVEL lags (vix_close) stay live from the latest print,
   * historical rows are value-for-value unchanged by the freq-based lag
     refactor,
   * fits exclude all NULL-target rows automatically.
@@ -184,11 +188,33 @@ def test_partial_week_target_is_nulled_midweek(patched_builder, monkeypatch):
     assert df.loc[LAST_MONDAY, "har_d1"] == pytest.approx(
         weekly.loc[LAST_MONDAY - pd.Timedelta(days=7), "range_pct"])
 
-    # Forecast row still appends, lagged from the (partial) latest bar —
-    # the freshest information available mid-week.
+    # Forecast row still appends — but its PATH-statistic lags must come from
+    # the prior COMPLETED week, never the in-progress bar: a partial week's
+    # high-low is a running max-min (a Monday bar shows ~0.3% "weekly range"
+    # after minutes of trading vs ~2% typical), so lagging it into har_d1
+    # would bias the served W+1 forecast far too narrow for the whole week.
     assert FORECAST_MONDAY in df.index
+    prior_week = LAST_MONDAY - pd.Timedelta(days=7)
     assert df.loc[FORECAST_MONDAY, "har_d1"] == pytest.approx(
-        weekly.loc[LAST_MONDAY, "range_pct"])
+        weekly.loc[prior_week, "range_pct"])
+    assert df.loc[FORECAST_MONDAY, "spx_return_lag1"] == pytest.approx(
+        weekly.loc[prior_week, "spx_return"])
+
+    # har_w = mean of lags 1..5 with the partial week proxied by prior week:
+    # [r(W-1), r(W-1), r(W-2), r(W-3), r(W-4)].
+    r = weekly["range_pct"]
+    expected_har_w = np.mean([
+        r.loc[prior_week], r.loc[prior_week],
+        r.loc[LAST_MONDAY - pd.Timedelta(days=14)],
+        r.loc[LAST_MONDAY - pd.Timedelta(days=21)],
+        r.loc[LAST_MONDAY - pd.Timedelta(days=28)],
+    ])
+    assert df.loc[FORECAST_MONDAY, "har_w"] == pytest.approx(expected_har_w)
+
+    # LEVEL lags stay live: the partial week's vix_close is the latest VIX
+    # print — genuinely fresh information, unlike a partial range.
+    assert df.loc[FORECAST_MONDAY, "vix_close"] == pytest.approx(
+        weekly.loc[LAST_MONDAY, "vix_close"])
 
 
 def test_fit_excludes_null_target_rows(patched_builder, monkeypatch):

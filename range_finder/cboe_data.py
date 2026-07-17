@@ -14,11 +14,22 @@
 
 import io
 import logging
+from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import requests
 
 log = logging.getLogger(__name__)
+
+# A parseable Cboe file whose newest session is older than this many business
+# days is flagged as possibly-stale (see fetch_cboe_index_history).
+STALE_TRADING_DAYS = 4
+
+
+def _today_utc():
+    return datetime.now(timezone.utc)
+
 
 CBOE_INDEX_HISTORY_URL = (
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/{index}_History.csv"
@@ -77,6 +88,25 @@ def fetch_cboe_index_history(index: str, timeout: int = 30) -> pd.DataFrame:
         df = df[~df.index.isna()]
 
     df = df.sort_index()
+
+    # Freshness guard: the Cboe CDN occasionally serves a cached file that is
+    # parseable but days stale. That is invisible to callers (a well-formed
+    # frame) yet feeds the VIX-family term-structure features a lagged read.
+    # Warn when the newest session is older than STALE_TRADING_DAYS business
+    # days before today — enough slack for weekends/holidays and the ~1-day
+    # publish lag, but tight enough to catch a genuinely frozen endpoint.
+    if len(df):
+        newest = df.index.max()
+        try:
+            age_bdays = int(np.busday_count(newest.date(), _today_utc().date()))
+            if age_bdays > STALE_TRADING_DAYS:
+                log.warning(
+                    f"Cboe {index}: newest session {newest.date()} is "
+                    f"{age_bdays} business days old — the CDN may be serving a "
+                    f"stale file (threshold {STALE_TRADING_DAYS})")
+        except Exception:
+            pass
+
     log.info(
         f"Cboe {index}: {len(df)} rows "
         f"({df.index.min().date()} -> {df.index.max().date()})"

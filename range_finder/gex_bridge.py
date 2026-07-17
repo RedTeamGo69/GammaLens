@@ -166,10 +166,20 @@ def save_gex_to_range_finder(
         conn = init_db()
         create_gex_table(conn)
 
-    # Determine current week start (Monday)
-    today = datetime.now(timezone.utc)
-    days_since_monday = today.weekday()
-    monday = today - timedelta(days=days_since_monday)
+    # Determine the PLANNING week's Monday — on the EXCHANGE clock, not UTC.
+    # A Sunday-19:00-ET run is already Monday in UTC part of the year (and a
+    # Friday-21:00-ET run is UTC Saturday), so UTC bucketing filed weekend
+    # GEX saves under the wrong week permanently. ET weekday is authoritative;
+    # weekend runs (and Friday after the 16:00 close) describe positioning
+    # INTO the upcoming week, matching the Spread Finder's Fri-Sun
+    # next-week planning convention.
+    from phase1.config import NY_TZ
+    now_et = datetime.now(timezone.utc).astimezone(NY_TZ)
+    wd = now_et.weekday()
+    if wd >= 5 or (wd == 4 and now_et.hour >= 16):
+        monday = now_et + timedelta(days=7 - wd)     # upcoming Monday
+    else:
+        monday = now_et - timedelta(days=wd)         # this week's Monday
     week_start = monday.strftime("%Y-%m-%d")
 
     gex_dollars = regime_to_gex_dollars(gex_ctx)

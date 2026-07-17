@@ -153,3 +153,20 @@ def test_events_for_week_empty_week():
     # Week of 2016-08-22: CPI was 8/16 and OpEx 8/19 (both the prior week),
     # NFP was 8/5, no August-2016 FOMC, and tier-2 lists don't reach 2016.
     assert events_for_week("2016-08-22") == []
+
+
+# ── third-Friday holiday roll (audit E59) ────────────────────────────────────
+
+def test_third_friday_good_friday_rolls_to_thursday():
+    """April 2026: the 3rd Friday is 2026-04-17 (not Good Friday that year),
+    but any 3rd Friday that IS a market holiday must roll back to the prior
+    session. Use a known Good Friday OpEx: April 2003's 3rd Friday was
+    2003-04-18 = Good Friday → rolls to Thursday 2003-04-17."""
+    from range_finder.event_calendars import _third_friday
+    assert _third_friday(2003, 4) == "2003-04-17"
+
+
+def test_third_friday_normal_month_unchanged():
+    from range_finder.event_calendars import _third_friday
+    # 2026-01-16 is the 3rd Friday of Jan 2026, a normal trading day.
+    assert _third_friday(2026, 1) == "2026-01-16"

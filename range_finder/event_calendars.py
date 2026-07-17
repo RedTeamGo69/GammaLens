@@ -232,10 +232,48 @@ class EventInfo:
 
 
 def _third_friday(year: int, month: int) -> str:
-    """Monthly OpEx date: the 3rd Friday of the given month, ISO string."""
+    """Monthly OpEx date: the 3rd Friday of the given month, ISO string.
+
+    When the 3rd Friday is an exchange holiday (Good Friday is the recurring
+    case — April OpEx has landed on it), index options roll to the prior
+    trading session, so the effective OpEx is Thursday. Rolls back off any
+    NYSE holiday; degrades to the raw 3rd Friday if the calendar is
+    unavailable (offline / import failure)."""
     first_day = datetime(year, month, 1)
     first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)
-    return (first_friday + timedelta(weeks=2)).strftime("%Y-%m-%d")
+    third = first_friday + timedelta(weeks=2)
+    try:
+        import pandas_market_calendars as mcal
+        nyse = mcal.get_calendar("XNYS")
+        sched = nyse.schedule(
+            start_date=(third - timedelta(days=4)).strftime("%Y-%m-%d"),
+            end_date=third.strftime("%Y-%m-%d"))
+        sessions = [d.date() for d in sched.index]
+        if sessions and third.date() not in sessions:
+            return sessions[-1].strftime("%Y-%m-%d")  # last session ≤ 3rd Fri
+    except Exception:
+        pass
+    return third.strftime("%Y-%m-%d")
+
+
+def calendar_staleness_warnings(horizon_days: int = 45) -> list[str]:
+    """UI-facing companion to _warn_if_calendar_stale: return one message per
+    hardcoded macro calendar that runs out within horizon_days, so a banner
+    can surface what the log-only warning hides on Streamlit Cloud. Empty
+    list == every calendar has runway."""
+    out: list[str] = []
+    today = pd.Timestamp(datetime.today().date())
+    for name, dates in _EVENT_SOURCES.items():
+        if not dates:
+            continue
+        last = pd.to_datetime(max(dates))
+        days_left = (last - today).days
+        if days_left < horizon_days:
+            out.append(
+                f"{name.upper()} calendar ends {last.date()} ({days_left}d away) — "
+                f"upcoming {name.upper()} weeks will flag as event-free until "
+                f"range_finder/event_calendars.py is extended.")
+    return out
 
 
 _EVENT_SOURCES = {  # name → hardcoded date list (opex is computed, not listed)

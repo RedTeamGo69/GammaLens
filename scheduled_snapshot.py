@@ -112,6 +112,39 @@ def capture_snapshot():
         )
         sys.exit(0)
 
+    # ── Already-captured-today guard (backup-cron dedup) ──
+    # The workflow has TWO triggers: cron-job.org at 9:28 ET (primary, DST-
+    # aware) and a GitHub `schedule:` backup pair (UTC, one lands ~9:45 ET in
+    # each DST half — the other half's fire exits green at the window guard
+    # above). When the primary already captured today, the backup finds the
+    # em_snapshots row it wrote and exits green here, before any Tradier or
+    # FRED call. When cron-job.org silently dies (expired PAT, service
+    # outage), no row exists and the backup performs the day's capture —
+    # that's the dead-man's switch. A DB hiccup during the check proceeds
+    # with capture (idempotent ON CONFLICT writes make a duplicate harmless);
+    # skipping on error would be the dangerous direction.
+    if not force_weekly_setup:
+        try:
+            from phase1.gex_history import get_em_snapshot, get_weekly_em_date_key
+            _is_stock = _get_cfg(ticker).get("category") == "stock"
+            _daily_done = True if _is_stock else (
+                get_em_snapshot(today_str, ticker=ticker, em_type="daily") is not None)
+            _weekly_done = True
+            if is_week_first_trading_day:
+                _weekly_key = get_weekly_em_date_key(run_now)
+                _weekly_done = get_em_snapshot(
+                    _weekly_key, ticker=ticker, em_type="weekly") is not None
+            if _daily_done and _weekly_done:
+                _logger.info(
+                    f"{ticker}: today's snapshot artifacts already exist "
+                    f"(daily={_daily_done}, weekly_checked={is_week_first_trading_day}) "
+                    f"— duplicate/backup fire, exiting green")
+                sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as _e:
+            _logger.warning(f"Dedup guard check failed ({_e}) — proceeding with capture")
+
     # ── Pre-open warm-up ──
     # The cron fires slightly before 9:30 so the runner is already booted by
     # the bell. Anything that doesn't require the opening tick runs HERE,
@@ -215,6 +248,7 @@ def capture_snapshot():
                 "put_wall": round(spot * 0.99, 2),
                 "put_wall_gex": 0.0,
                 "put_wall_cluster": None,
+                "net_gex": 0.0,
                 "per_exp_zero_gamma": {},
             }
             regime_info = {
@@ -228,8 +262,9 @@ def capture_snapshot():
             _logger.error("GEX calculation returned empty — no data to save")
             sys.exit(1)
     else:
-        levels = gex_engine.find_key_levels(gex_df, spot, all_options=all_options, r=rfr,
-                                             r_curve=rfr_curve)
+        levels = gex_engine.find_key_levels(
+            gex_df, spot, all_options=all_options, r=rfr, r_curve=rfr_curve,
+            q=float(_get_cfg(ticker).get("dividend_yield", 0.0) or 0.0))
         regime_info = gex_engine.get_gamma_regime_text(spot, levels["zero_gamma"])
     has_0dte = any(e == today_str for e in target_exps)
     staleness_info = build_staleness_info(calendar_snapshot, spot_info, stats, has_0dte=has_0dte)
@@ -405,6 +440,17 @@ def capture_snapshot():
                 res = sync_public_history(sync_conn, PublicClient(secret, account))
                 if res is None:
                     _logger.warning("Public fill sync skipped — API unreachable/unauthorized")
+                elif res.errors:
+                    # sync_public_history returns a truthy result even when the
+                    # persistence step raised (it records the failure in
+                    # res.errors and returns pre-persist counts). Logging that
+                    # as a success summary hid completely-failed writes — surface
+                    # it as a warning instead.
+                    _logger.warning(
+                        f"Public fill sync completed WITH ERRORS "
+                        f"({len(res.errors)}): {'; '.join(res.errors)} — "
+                        f"grouped {res.strategies} strategies but persistence "
+                        f"may be incomplete")
                 else:
                     _logger.info(
                         f"Public fill sync: {res.strategies} strategies "
@@ -557,30 +603,34 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         except Exception as e:
             _logger.warning(f"  Outcome scoring step failed: {e} (continuing)")
 
-    # ── Step 2: Rebuild features ──
+    # ── Step 2: Save GEX to model (BEFORE the feature rebuild) ──
     #
-    # IMPORTANT — the order below is load-bearing.  build_features runs
-    # BEFORE save_gex_to_range_finder on purpose: the HAR model is a
-    # strictly lag-1 autoregressive structure (VIX, HV ratios, yield
-    # spread, event flags are all time-aligned to "last Friday's close"
-    # as the information set used to predict THIS week).  If we saved
-    # this-Monday-morning's live GEX first and then rebuilt features,
-    # the current week's `gex_normalized` would reflect an information
-    # timestamp 1 week later than every other feature in the row — a
-    # temporal alignment mismatch that the fitted coefficients weren't
-    # trained for, with all the usual look-ahead-bias and noise-driven
-    # buffer-widening consequences.
-    #
-    # The consequence of the lag is that the current week's
-    # `gex_normalized` stays NaN (or last week's value) until NEXT
-    # Monday's rebuild — that's intentional.  Live GEX is still surfaced
-    # on the plan via adjust_spread_with_gex's display-side annotations;
-    # it just doesn't get baked into strike placement until it's been
-    # lagged one week, matching the rest of the HAR features.
-    #
-    # Do NOT reorder these steps without updating the HAR model's
-    # training pipeline to match.
-    _logger.info(f"  2/4 Rebuilding feature matrix ({ticker})...")
+    # ORDER (corrected after the 2026-07 audit): save_gex_to_range_finder
+    # runs BEFORE build_features. feature_builder joins gex_inputs
+    # same-week with NO lag ("GEX (Monday open — same week, no lag
+    # needed)") — every TRAINING row's gex_normalized is that week's own
+    # Monday-9:31 capture, written by that week's cron. Rebuilding
+    # features before saving this Monday's GEX therefore left the one row
+    # being SERVED (the current week) with gex_normalized = NaN, which
+    # forecast_next_week silently fills with the training mean — a
+    # train/serve skew where the live forecast used a mean while every
+    # training observation used a real Monday reading. Saving first gives
+    # the current week's row the exact same information timestamp
+    # (Monday 9:31) as the training rows. The lag-1 features (VIX, HV,
+    # macro) are shifted inside build_features and are unaffected by this
+    # ordering.
+    _logger.info("  2/4 Saving GEX to range finder...")
+    _gex_saved = False
+    try:
+        gex_ctx = extract_gex_context(levels, spot, regime_info)
+        save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
+        _gex_saved = True
+    except Exception as e:
+        _logger.warning(f"  GEX save failed ({e}) — features will rebuild "
+                        "without this week's GEX row (train mean fills in)")
+
+    # ── Step 3: Rebuild features ──
+    _logger.info(f"  3/4 Rebuilding feature matrix ({ticker})...")
     try:
         # A scaled mini (XSP→SPX) and SPX itself feed off the parent's
         # feature rows; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) get their own build.
@@ -589,14 +639,6 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     except Exception as e:
         _logger.error(f"  Feature rebuild failed: {e}")
         return
-
-    # ── Step 3: Save GEX to model ──
-    _logger.info("  3/4 Saving GEX to range finder...")
-    try:
-        gex_ctx = extract_gex_context(levels, spot, regime_info)
-        save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
-    except Exception as e:
-        _logger.warning(f"  GEX save failed: {e}")
 
     # ── Step 4: Fit every model spec and save them all ──
     # Fitting every spec Monday (not just M3_extended) means a user who
@@ -684,8 +726,30 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         monday = run_now - timedelta(days=days_since_monday)
         week_start = monday.strftime("%Y-%m-%d")
 
+        # Anchor to the week's FIRST TRADING SESSION, not run_now.date().
+        # On a normal Monday (or Tuesday-after-holiday) cron those are the
+        # same day, so behavior is unchanged — but a FORCE_WEEKLY_SETUP
+        # dispatch is allowed on any weekday ("refresh after a code change"),
+        # and passing run_now.date() there would persist e.g. Wednesday's open
+        # as this week's frozen Monday anchor via save_weekly_setup's
+        # ON CONFLICT DO UPDATE, silently re-snapping every ticker's strikes
+        # mid-week. Resolving the first session off the exchange calendar keeps
+        # the anchor pinned to Monday (or the true first trading day) regardless
+        # of when the job runs.
+        anchor_date = monday.date()
+        try:
+            from phase1.market_clock import get_schedule
+            from phase1.config import CASH_CALENDAR
+            _friday = (monday + timedelta(days=4)).strftime("%Y-%m-%d")
+            _week_sched = get_schedule(CASH_CALENDAR, week_start, _friday)
+            if not _week_sched.empty:
+                anchor_date = _week_sched.index[0].date()
+        except Exception as _e:
+            _logger.warning(f"  Anchor-date calendar lookup failed ({_e}); "
+                            f"using Monday {anchor_date}")
+
         monday_open, monday_vix, open_source = capture_and_save_monday_anchor(
-            conn, ticker, week_start, run_now.date(),
+            conn, ticker, week_start, anchor_date,
             spot_fallback=spot, live_vix_fallback=_vix_fallback, cfg=cfg,
         )
         _logger.info(
@@ -715,13 +779,33 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
                                 "logging plan off the latest available row")
 
             spx_ref = monday_open or spot
-            forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref)
+
+            # Per-side band share from completed weekly history (falls back
+            # to the legacy /2 when history is thin/unavailable). The logged
+            # strikes therefore reflect the SAME placement the UI shows, and
+            # the calibration audit scores the placement actually used.
+            _side_q = None
+            try:
+                from range_finder.feature_builder import _load_weekly_for_ticker
+                from range_finder.har_model import estimate_side_share_quantile
+                _q_est = estimate_side_share_quantile(
+                    _load_weekly_for_ticker(conn, "SPX"))
+                _side_q = _q_est["q"]
+                _logger.info(f"  Side-share quantile: q={_side_q} "
+                             f"(n={_q_est['n']}, beta={_q_est['beta']})")
+            except Exception as _e:
+                _logger.warning(f"  Side-share estimate failed ({_e}) — "
+                                f"using legacy /2 split")
+
+            forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref,
+                                          side_share_q=_side_q)
             plan = build_spread_plan(
                 forecast, feature_row,
                 week_start=week_start,
                 vix_level=monday_vix,
                 spx_open=monday_open,
                 ticker="SPX",
+                side_share_q=_side_q,
             )
             log_spread_plan(
                 conn, plan,

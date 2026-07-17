@@ -27,6 +27,9 @@ on:
         required: false
         default: "6"
 
+permissions:
+  contents: read
+
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
@@ -50,5 +53,18 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          # Without this the weekly-bar backfill silently falls through to the
+          # yfinance fallback (dividend-adjusted ^GSPC) instead of Tradier's
+          # unadjusted bars — a subtly different price basis for the HAR
+          # training data than production serves. Absent secret still works
+          # (fallback), it's just no longer SILENT — bar_sources logs the source.
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+          # Pass workflow inputs through the environment, never interpolated
+          # directly into the run script — a free-text input spliced into the
+          # shell line is a command-injection vector. `weekly_model` is a
+          # constrained choice, but `years` is free text, so both go via env
+          # and are quoted below.
+          WEEKLY_MODEL: ${{ inputs.weekly_model }}
+          YEARS: ${{ inputs.years }}
         run: |
-          python bootstrap_range_finder.py --model ${{ inputs.weekly_model }} --years ${{ inputs.years }}
+          python bootstrap_range_finder.py --model "$WEEKLY_MODEL" --years "$YEARS"

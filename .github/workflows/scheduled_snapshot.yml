@@ -1,13 +1,28 @@
 name: Scheduled GEX Snapshot
 
 on:
-  # Triggered externally by cron-job.org at 9:28 AM ET (Mon-Fri), two minutes
-  # before the bell. The early fire gives the Actions runner time to boot +
-  # pip install so Python is already running pre-open work (FRED rate,
-  # expirations, table init) during the idle window; scheduled_snapshot.py
-  # then parks in its wait loop until 9:30:00 ET before fetching spot +
-  # chains. cron-job.org handles DST automatically via America/New_York.
-  # Can also be triggered manually from the GitHub Actions UI.
+  # PRIMARY: triggered externally by cron-job.org at 9:28 AM ET (Mon-Fri),
+  # two minutes before the bell. The early fire gives the Actions runner
+  # time to boot + pip install so Python is already running pre-open work
+  # (FRED rate, expirations, table init) during the idle window;
+  # scheduled_snapshot.py then parks in its wait loop until 9:30:00 ET
+  # before fetching spot + chains. cron-job.org handles DST automatically
+  # via America/New_York. Can also be triggered manually from the UI.
+  #
+  # BACKUP (dead-man's switch): the schedule pair below. GitHub cron is UTC
+  # and does NOT shift with US DST, so each entry lands at ~9:45 ET in one
+  # DST half and ~8:45/10:45 ET in the other — the out-of-window fire exits
+  # green at the script's 9:20-10:15 ET window guard in seconds. When the
+  # primary already ran, the in-window backup hits the already-captured
+  # guard (em_snapshots row exists) and exits green without touching
+  # Tradier. When cron-job.org silently dies (expired PAT, account lapse,
+  # outage), NO run would otherwise exist — GitHub failure e-mails only
+  # fire for runs that exist — so the backup both performs the capture
+  # (~15 min late, from real daily-open bars where it matters) and restores
+  # failure notifications.
+  schedule:
+    - cron: "45 13 * * 1-5"   # 9:45 ET during EDT (Mar-Nov)
+    - cron: "45 14 * * 1-5"   # 9:45 ET during EST (Nov-Mar)
   workflow_dispatch:
     inputs:
       force_weekly_setup:
@@ -18,6 +33,9 @@ on:
         options:
           - "false"
           - "true"
+
+permissions:
+  contents: read
 
 jobs:
   capture:

@@ -245,8 +245,43 @@ def get_connection():
     return wrapped
 
 
+# Arbitrary 64-bit key so every job serializes on the SAME advisory lock.
+_INIT_ADVISORY_LOCK_KEY = 776699
+
 def init_all_tables(conn) -> None:
-    """Create all range finder tables if they don't exist (Postgres DDL)."""
+    """Create all range finder tables if they don't exist (Postgres DDL).
+
+    Serialized behind a session-level Postgres advisory lock. Eight matrix
+    jobs fire this concurrently every Monday; without serialization their
+    CREATE / ALTER / migration DDL raced on Neon's throttled free tier,
+    where the pile-up stretched a normally-instant init to 15+ minutes and
+    delayed the 9:30 snapshot. pg_advisory_lock makes the others wait for
+    the first to finish (after which every statement is a cheap no-op via
+    IF NOT EXISTS / duplicate-column guards). The lock is best-effort — a
+    backend that doesn't support it (sqlite in tests) just proceeds.
+    """
+    _locked = False
+    try:
+        cur0 = conn.cursor()
+        cur0.execute("SELECT pg_advisory_lock(?)", (_INIT_ADVISORY_LOCK_KEY,))
+        cur0.fetchone()
+        _locked = True
+    except Exception:
+        pass
+    try:
+        _init_all_tables_body(conn)
+    finally:
+        if _locked:
+            try:
+                cur1 = conn.cursor()
+                cur1.execute("SELECT pg_advisory_unlock(?)", (_INIT_ADVISORY_LOCK_KEY,))
+                cur1.fetchone()
+            except Exception:
+                pass
+
+
+def _init_all_tables_body(conn) -> None:
+    """The actual DDL body — see init_all_tables for the locking wrapper."""
     cur = conn.cursor()
 
     # --- weekly_spx ---

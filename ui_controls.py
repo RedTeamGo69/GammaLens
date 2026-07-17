@@ -62,6 +62,17 @@ def _cb_refresh_no_deselect() -> None:
         st.session_state["refresh_seg"] = st.session_state.get("_refresh_last", "off")
 
 
+def _make_no_deselect_cb(widget_key: str, last_key: str, fallback: str):
+    """Factory for a single-select 'snap back' callback: when the user clears
+    a segmented_control/pills selection (Streamlit allows it), restore the
+    last committed value so the control never renders with nothing active
+    while the app keeps rendering the prior selection's content."""
+    def _cb() -> None:
+        if st.session_state.get(widget_key) is None:
+            st.session_state[widget_key] = st.session_state.get(last_key, fallback)
+    return _cb
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Small HTML label helper (eyebrows match the .card-eyebrow look)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,13 +134,18 @@ def render_settings_controls(ticker: str, ticker_type: str,
     _exp_default = st.session_state.get("_exp_last", "0dte")
     if _exp_default not in _EXP_TOKENS:
         _exp_default = "0dte"
-    exp_sel = st.pills(
+    # Seed via session_state (not default=) so the no-deselect callback owns
+    # the value and a click-to-clear snaps back instead of rendering an
+    # empty control over live spread content.
+    if "exp_pills" not in st.session_state or st.session_state["exp_pills"] not in _EXP_TOKENS:
+        st.session_state["exp_pills"] = _exp_default
+    st.pills(
         "Expiration", _EXP_TOKENS, selection_mode="single",
-        default=_exp_default,
         format_func=lambda t: _EXP_LABELS[t],
         key="exp_pills", label_visibility="collapsed",
+        on_change=_make_no_deselect_cb("exp_pills", "_exp_last", "0dte"),
     )
-    exp_token = exp_sel or _exp_default
+    exp_token = st.session_state["exp_pills"] or _exp_default
     st.session_state["_exp_last"] = exp_token
 
     # ── Custom date range (only when expiration == Custom) ──
@@ -164,9 +180,28 @@ def render_settings_controls(ticker: str, ticker_type: str,
 
 
 def render_refresh_button() -> None:
-    """A native 'refresh data' button — clears the cache and reruns in place."""
+    """A native 'refresh data' button — refreshes market data and reruns.
+
+    Clears the cheap ``cache_data`` market fetches (quotes, expirations, FRED
+    rate, features) and the GEX-engine pipeline (``fetch_all_data``, itself a
+    ``cache_resource`` because it returns unpicklable objects), but NOT the
+    global ``st.cache_resource`` namespace. A blanket ``cache_resource.clear()``
+    also evicts the pooled Neon connection (whose 1-hour TTL exists so Neon can
+    auto-suspend) and the multi-MB fitted-model BYTEA blobs — so every tap
+    re-opened Postgres, re-ran init_all_tables, and re-downloaded every model,
+    burning Neon CU-hours for nothing. Targeting the two data caches refreshes
+    exactly what the button promises while leaving those expensive resources
+    warm.
+    """
     if st.button("⟳ Refresh data", key="refresh_now_btn", use_container_width=True):
-        st.cache_resource.clear()
+        st.cache_data.clear()
+        try:
+            from streamlit_app import fetch_all_data
+            fetch_all_data.clear()
+        except Exception:
+            # If the GEX pipeline cache can't be reached for any reason, the
+            # cache_data clear + rerun still refreshes the bulk of the view.
+            pass
         st.rerun()
 
 
@@ -182,12 +217,17 @@ def render_tab_control() -> str:
     _last = st.session_state.get("_tab_last", "gex")
     if _last not in _TAB_TOKENS:
         _last = "gex"
-    sel = st.segmented_control(
+    # Seed via session_state so the no-deselect callback can snap a
+    # click-to-clear back to the active tab instead of rendering the
+    # selector empty while tab content still shows.
+    if "tab_seg" not in st.session_state or st.session_state["tab_seg"] not in _TAB_TOKENS:
+        st.session_state["tab_seg"] = _last
+    st.segmented_control(
         "View", _TAB_TOKENS, selection_mode="single",
-        default=_last,
         format_func=lambda t: _TAB_LABELS[t],
         key="tab_seg", label_visibility="collapsed",
+        on_change=_make_no_deselect_cb("tab_seg", "_tab_last", "gex"),
     )
-    tab = sel or _last
+    tab = st.session_state["tab_seg"] or _last
     st.session_state["_tab_last"] = tab
     return tab

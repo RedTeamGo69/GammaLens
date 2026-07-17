@@ -9,7 +9,6 @@ from datetime import date as date_cls, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from theme import COLORS
@@ -40,6 +39,7 @@ from range_finder.har_model import (
     time_series_split as rf_time_series_split,
     fit_model as rf_fit_model, evaluate_oos as rf_evaluate_oos,
     forecast_next_week as rf_forecast_next_week,
+    estimate_side_share_quantile as rf_estimate_side_share_quantile,
     save_model as rf_save_model, load_model as rf_load_model,
 )
 from range_finder.spread_levels import (
@@ -87,6 +87,41 @@ def _cached_pi_coverage(ticker: str) -> dict:
     """
     from range_finder.calibration import weekly_pi_coverage
     return weekly_pi_coverage(_get_rf_conn(), ticker=ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_side_share_q(ticker: str) -> "float | None":
+    """Empirical side-share quantile for per-side band placement, cached 1h
+    (the weekly OHLC it derives from changes once a week). None → callers
+    keep the legacy symmetric /2 split, so a DB hiccup degrades gracefully
+    to pre-side-share behavior instead of erroring the tab."""
+    try:
+        from range_finder.feature_builder import _load_weekly_for_ticker
+        est = rf_estimate_side_share_quantile(
+            _load_weekly_for_ticker(_get_rf_conn(), ticker))
+        return est["q"]
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _live_vol_close(proxy: str) -> float | None:
+    """Latest vol-proxy (VIX/VXN) close, refreshed every 5 minutes.
+
+    Returns None on an empty/failed fetch — the caller must treat None as
+    "no live VIX" and NOT fabricate a number, because this value drives the
+    VIX regime-shift circuit breaker: a stale or invented VIX silently
+    disables the breaker exactly when a live spike should trip it. A 5-min
+    TTL (vs the old cache-once-per-session behavior) means a mid-session
+    spike is actually seen while still sparing yfinance on every rerun.
+    """
+    try:
+        vp_hist = yf.Ticker(proxy).history(period="5d")
+        if not vp_hist.empty:
+            return round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -229,7 +264,17 @@ def _chain_entry_to_quotes(entry: dict) -> dict:
     TradierDataClient.get_chain_once or held in data.chain_cache) into the
     strike -> {call_bid, call_ask, put_bid, put_ask} lookup that
     build_spread_side / _snap_to_chain_strike expect. A $0.00 bid is a valid
-    quote (option worthless), so every listed strike is kept."""
+    quote (option worthless), so every listed strike is kept.
+
+    Filtered to a single OCC root first (SPXW over SPX on 3rd Fridays) so a
+    stale AM-settled monthly row can never overwrite the live PM-settled
+    weekly quote at the same strike — the spread quoted here must be one
+    tradeable contract."""
+    from phase1.quote_filters import filter_to_preferred_root
+    calls, puts, _root = filter_to_preferred_root(
+        entry.get("calls", []), entry.get("puts", []))
+    entry = {"calls": calls, "puts": puts}
+
     quotes: dict = {}
     for opt in entry.get("calls", []):
         K = opt["strike"]
@@ -425,15 +470,47 @@ def _default_model_for_ticker(ticker: str) -> str:
     return "M2_vix" if _ft_class(ticker) == "Stock" else "M3_extended"
 
 
+import re as _re
+
+# A valid exchange/OCC ticker root: 1-6 chars, A-Z 0-9 and a dot only. This
+# is the primary defense against spreadsheet formula injection — the export
+# tickers can arrive via URL state (ui_url_state), so a value like
+# ``=cmd|'/c calc'!A1`` or ``@SUM(...)`` must never reach a cell. Anything
+# outside this charset is rejected at the door.
+_TICKER_RE = _re.compile(r"^[A-Z0-9.]{1,6}$")
+
+
+def _valid_ticker_symbol(ticker: str) -> bool:
+    return bool(_TICKER_RE.match((ticker or "").upper()))
+
+
+def _xlsx_safe_cell(text) -> str:
+    """Neutralize a leading spreadsheet formula trigger on any string cell.
+
+    Defense in depth behind _valid_ticker_symbol: Excel/Sheets treat a cell
+    beginning with = + - @ (or tab/CR) as a formula. Prefix such a value with
+    an apostrophe so it renders literally. Non-strings pass through unchanged.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    return "'" + text if text[0] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 def _xlsx_extra_list() -> list:
-    """User-added export tickers (session-state; deduped, defaults excluded)."""
-    return st.session_state.setdefault(_FT_XLSX_EXTRA_KEY, [])
+    """User-added export tickers (session-state; deduped, defaults excluded).
+
+    Filtered through _valid_ticker_symbol on the way out so a tampered
+    session/URL value can never reach the workbook builder even if it was
+    persisted before validation tightened."""
+    raw = st.session_state.setdefault(_FT_XLSX_EXTRA_KEY, [])
+    return [t for t in raw if _valid_ticker_symbol(t)]
 
 
 def _xlsx_add_extra(ticker: str) -> None:
-    """Append a ticker to the export list (no-op for defaults / duplicates)."""
+    """Append a ticker to the export list (no-op for defaults / duplicates /
+    anything that isn't a valid exchange symbol)."""
     t = (ticker or "").upper()
-    if not t or t in _FT_DEFAULT_TICKERS:
+    if not t or t in _FT_DEFAULT_TICKERS or not _valid_ticker_symbol(t):
         return
     lst = st.session_state.setdefault(_FT_XLSX_EXTRA_KEY, [])
     if t not in lst:
@@ -610,13 +687,15 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             ticker, pd.Timestamp(week_start).date()
         )
 
+        _side_q = _cached_side_share_q(ticker)
         forecast = rf_forecast_next_week(
             payload["result"], feature_row, payload["feature_cols"],
-            ref, alpha=RF_PI_ALPHA,
+            ref, alpha=RF_PI_ALPHA, side_share_q=_side_q,
         )
         plan = rf_build_spread_plan(
             forecast=forecast, feature_row=feature_row, week_start=week_start,
             vix_level=vix, ticker=ticker, chain_quotes=None,
+            side_share_q=_side_q,
         )
         tiers = rf_build_spread_tiers(
             forecast=forecast, plan=plan, spx_ref=ref, vix_level=vix,
@@ -819,7 +898,7 @@ def _write_ft_scoreboard(sb, week_start: str, tickers: list[str]) -> None:
         r = _FT_SB_FIRST_ROW + idx
         tick = f"$A{r}"
         if idx < len(tickers):
-            sb[f"A{r}"] = tickers[idx]
+            sb[f"A{r}"] = _xlsx_safe_cell(tickers[idx])
             sb[f"A{r}"].font = Font(bold=True)
         sb[f"A{r}"].protection = Protection(locked=False)
         sb[f"B{r}"] = (f'=IF({tick}="","",SUMPRODUCT('
@@ -985,7 +1064,7 @@ def _write_ft_week_sheet(wb, week_start: str, rows: list[dict]):
             t = row.get("ticker", "?")
             ws[f"A{r}"] = _week_date or week_start
             ws[f"A{r}"].number_format = "yyyy-mm-dd"
-            ws[f"B{r}"] = t
+            ws[f"B{r}"] = _xlsx_safe_cell(t)
             ws[f"B{r}"].font = Font(bold=True)
             ws[f"C{r}"] = _ft_class(t)
             if row.get("ref") is not None:
@@ -1249,14 +1328,21 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     from phase1.ticker_config import has_single_name_earnings as _has_sne
     if _has_sne(ticker):
         try:
-            from datetime import timedelta as _td_e, datetime as _dt_e
+            from datetime import timedelta as _td_e
+            from phase1.market_clock import now_ny as _now_ny_e
             # Check the SAME week the spread finder is planning for —
             # this week's Monday on Mon-Thu, next Monday on Fri-Sun
             # (mirrors _spread_finder_target_friday / week_start below).
             # The old check always looked at NEXT Monday, so a Tuesday
             # user planning this week's spreads never saw the warning
             # for earnings landing on Wednesday.
-            _today = _dt_e.now().date()
+            #
+            # Use the EXCHANGE clock (now_ny), not server-local: a UTC-hosted
+            # Streamlit Cloud instance rolls to the next calendar day at
+            # 20:00 ET, so a late-evening ET user would otherwise be shown
+            # the wrong planning week (and miss/false-fire the warning) for
+            # 4 hours every day. Everything else in the tab keys off ET.
+            _today = _now_ny_e().date()
             _wd_e = _today.weekday()
             if _wd_e <= 3:
                 _plan_monday = _today - _td_e(days=_wd_e)
@@ -1285,20 +1371,16 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             # Don't let an earnings-flag query failure block the tab render.
             pass
 
-    # ── Fetch latest vol-proxy close (cached for the session) ──
+    # ── Fetch latest vol-proxy close (5-min TTL, refreshed across reruns) ──
     # Per-ticker vol proxy: VIX for SPX/XSP/AMZN/AMD, VXN for QQQ.
+    #   live_vix_raw : the genuine live close, or None when unavailable. This
+    #                  is the ONLY value the regime-shift breaker may read — a
+    #                  fabricated fallback would silently disable it.
+    #   live_vix     : display/default fallback for the VIX input, where a
+    #                  concrete number is required so the widget renders.
     _vol_proxy = ticker_cfg.get("vol_proxy_yf", "^VIX")
-    _vol_cache_key = f"_sf_live_vol_{_vol_proxy}"
-    if _vol_cache_key not in st.session_state:
-        try:
-            vp_hist = yf.Ticker(_vol_proxy).history(period="5d")
-            if not vp_hist.empty:
-                st.session_state[_vol_cache_key] = round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
-            else:
-                st.session_state[_vol_cache_key] = 18.0
-        except Exception:
-            st.session_state[_vol_cache_key] = 18.0
-    live_vix = st.session_state[_vol_cache_key]
+    live_vix_raw = _live_vol_close(_vol_proxy)
+    live_vix = live_vix_raw if live_vix_raw is not None else 18.0
 
     # ── Monday open freeze logic ──
     # On the weekly freeze day (Monday or Tue after holiday) at market open,
@@ -1548,6 +1630,18 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         st.warning(ref_guard_msg)
     if self_heal_msg:
         st.caption(self_heal_msg)
+
+    # Hardcoded macro calendars (FOMC/CPI/NFP/…) lapse yearly; when they do,
+    # event weeks silently flag event-free and the buffer stops widening.
+    # The log-only warning is invisible on Streamlit Cloud, so surface it.
+    try:
+        from range_finder.event_calendars import calendar_staleness_warnings
+        _cal_warnings = calendar_staleness_warnings()
+        if _cal_warnings:
+            st.warning("⚠ Event calendar maintenance needed:\n\n"
+                       + "\n\n".join(f"• {m}" for m in _cal_warnings))
+    except Exception:
+        pass
 
     # ── Extract GEX context from current dashboard data ──
     gex_ctx = extract_gex_context(levels, spot, regime)
@@ -2008,6 +2102,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # Detect the shift by comparing the live VIX to the trailing VIX
     # already in the feature row. Ratio > 1.5 is the threshold — that's
     # roughly a 2σ move on the weekly VIX change distribution.
+    #
+    # Use live_vix_raw (the genuine fetched value), NOT live_vix — the latter
+    # falls back to a fabricated 18.0 when the fetch fails, and comparing a
+    # made-up number against the trailing VIX would either miss a real spike
+    # or invent a phantom one. If we have no live VIX, we simply can't judge
+    # a regime shift, so the breaker stays silent.
     _trailing_vix = None
     try:
         _trailing_vix_raw = feature_row.get("vix_close")
@@ -2017,12 +2117,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         pass
 
     regime_shift = None
-    if _trailing_vix and _trailing_vix > 0 and live_vix and live_vix > 0:
-        _vix_ratio = live_vix / _trailing_vix
+    if _trailing_vix and _trailing_vix > 0 and live_vix_raw and live_vix_raw > 0:
+        _vix_ratio = live_vix_raw / _trailing_vix
         if _vix_ratio >= 1.5:
             regime_shift = {
                 "severity": "extreme" if _vix_ratio >= 2.0 else "elevated",
-                "live_vix": live_vix,
+                "live_vix": live_vix_raw,
                 "trailing_vix": _trailing_vix,
                 "ratio": _vix_ratio,
             }
@@ -2082,9 +2182,13 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # below is wrapped in @st.fragment and only re-reads the spread_tiers
     # we stash in session_state — the outer recompute doesn't happen on
     # tier toggles.
+    # Per-side band share: empirical side-share quantile (falls back to the
+    # legacy /2 split when weekly history is unavailable). Cached 1h.
+    side_share_q = _cached_side_share_q(ticker)
+
     forecast = rf_forecast_next_week(
         result, feature_row, feat_cols,
-        spx_close_input, alpha=RF_PI_ALPHA,
+        spx_close_input, alpha=RF_PI_ALPHA, side_share_q=side_share_q,
     )
 
     # Optional conformal interval correction — a NO-OP unless
@@ -2108,6 +2212,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         vix_level   = vix_input,
         ticker      = ticker,
         chain_quotes= chain_quotes,
+        side_share_q= side_share_q,
     )
 
     spread_tiers = rf_build_spread_tiers(
@@ -2280,9 +2385,22 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 for t in _export_tickers
             ]
 
-            _xlsx_bytes = _build_forward_test_workbook(
-                week_start=week_start, model_choice=active_model, rows=_ft_rows,
-            )
+            # Memoize the workbook on a content signature so an unrelated
+            # widget rerun (ticker chip toggle, tier switch, auto-refresh
+            # tick) doesn't rebuild the whole openpyxl workbook + formula
+            # grid every pass — only an actual change to the rows/bands does.
+            import hashlib as _hl, json as _json
+            _sig = _hl.sha1(
+                _json.dumps(_ft_rows, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            _xlsx_sig_key = f"_sf_xlsx_sig_{week_start}_{active_model}"
+            _xlsx_bytes_key = f"_sf_xlsx_bytes_{week_start}_{active_model}"
+            if st.session_state.get(_xlsx_sig_key) != _sig:
+                st.session_state[_xlsx_bytes_key] = _build_forward_test_workbook(
+                    week_start=week_start, model_choice=active_model, rows=_ft_rows,
+                )
+                st.session_state[_xlsx_sig_key] = _sig
+            _xlsx_bytes = st.session_state[_xlsx_bytes_key]
             st.download_button(
                 label       = "Export weekly workbook",
                 data        = _xlsx_bytes,
@@ -2641,98 +2759,6 @@ def _render_sf_range_gauge(
         '</div>'
         '</div>'
     )
-
-
-def _render_sf_strike_map(plan: SpreadPlan, spx_ref: float, gex_ctx: GEXContext, selected_width: float = 25, ticker: str = "SPX"):
-    """Horizontal price map showing reference, effective range, strikes, and GEX walls."""
-    import plotly.graph_objects as go
-
-    call_short = plan.call_spreads[0].short_strike if plan.call_spreads else plan.effective_upper_px + 10
-    call_long  = plan.call_spreads[0].long_strike  if plan.call_spreads else call_short + 25
-    put_short  = plan.put_spreads[0].short_strike  if plan.put_spreads  else plan.effective_lower_px - 10
-    put_long   = plan.put_spreads[0].long_strike   if plan.put_spreads  else put_short - 25
-
-    # Use user-selected width spreads
-    for s in plan.call_spreads:
-        if s.wing_width == selected_width:
-            call_short, call_long = s.short_strike, s.long_strike
-    for s in plan.put_spreads:
-        if s.wing_width == selected_width:
-            put_short, put_long = s.short_strike, s.long_strike
-
-    fig = go.Figure()
-
-    # ── Horizontal layout: each level gets its own Y row ──
-    # Sort all levels and assign Y positions to avoid overlap
-    levels = [
-        (put_long,               "Put Long",    SF_BEAR,              "triangle-left",  8),
-        (put_short,              "Put Short",   SF_BEAR,              "diamond",        10),
-        (plan.effective_lower_px, "Eff Lower",  SF_WARN,              "triangle-up",     9),
-        (gex_ctx.put_wall,       "Put Wall",    COLORS["put_wall"],   "square",          9),
-        (gex_ctx.zero_gamma,     "Zero-G",      COLORS["zero_gamma"], "x",              10),
-        (spx_ref,                f"{ticker} Ref", COLORS["spot"],     "star",           12),
-        (gex_ctx.call_wall,      "Call Wall",   COLORS["call_wall"],  "square",          9),
-        (plan.effective_upper_px, "Eff Upper",  SF_WARN,              "triangle-up",     9),
-        (call_short,             "Call Short",  SF_BEAR,              "diamond",        10),
-        (call_long,              "Call Long",   SF_BEAR,              "triangle-right",  8),
-    ]
-
-    # Sort by price for clean left-to-right layout
-    levels.sort(key=lambda x: x[0])
-
-    # Effective range band (horizontal)
-    fig.add_shape(type="rect",
-        x0=plan.effective_lower_px, x1=plan.effective_upper_px,
-        y0=-0.5, y1=len(levels) - 0.5,
-        fillcolor=SF_BULL, opacity=0.10, line_width=0,
-    )
-
-    # Call spread zone
-    fig.add_shape(type="rect",
-        x0=min(call_short, call_long), x1=max(call_short, call_long),
-        y0=-0.5, y1=len(levels) - 0.5,
-        fillcolor=SF_BEAR, opacity=0.15, line_width=0,
-    )
-
-    # Put spread zone
-    fig.add_shape(type="rect",
-        x0=min(put_long, put_short), x1=max(put_long, put_short),
-        y0=-0.5, y1=len(levels) - 0.5,
-        fillcolor=SF_BEAR, opacity=0.15, line_width=0,
-    )
-
-    # Plot each level as a scatter point on its own row
-    for i, (price, label, color, symbol, size) in enumerate(levels):
-        fig.add_trace(go.Scatter(
-            x=[price], y=[i],
-            mode="markers+text",
-            marker=dict(color=color, size=size, symbol=symbol, line=dict(width=1, color="#fff")),
-            text=[f"{label}  {price:,.0f}"],
-            textposition="middle right" if price <= spx_ref else "middle left",
-            textfont=dict(size=11, color=color),
-            showlegend=False,
-            hovertemplate=f"{label}: {price:,.0f}<extra></extra>",
-        ))
-
-    # Reference price vertical line
-    fig.add_vline(
-        x=spx_ref, line_dash="solid", line_color=COLORS["spot"],
-        line_width=2, opacity=0.4,
-    )
-
-    all_prices = [l[0] for l in levels]
-    margin_px = (max(all_prices) - min(all_prices)) * 0.15
-
-    fig.update_layout(
-        plot_bgcolor=SF_BG, paper_bgcolor=SF_BG, font_color="#e0e0e0",
-        xaxis_title=f"{ticker} Price Level",
-        xaxis_range=[min(all_prices) - margin_px, max(all_prices) + margin_px],
-        yaxis_visible=False,
-        showlegend=False,
-        margin=dict(t=10, b=30, l=10, r=10),
-        height=380, dragmode=False,
-    )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
 
 
 def _render_sf_strike_map_tier(

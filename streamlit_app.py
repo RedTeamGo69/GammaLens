@@ -177,8 +177,10 @@ def fetch_all_data(tradier_token: str, fred_key: str, selected_exps: tuple, _run
                                  r_curve=rfr_curve)
     )
 
+    from phase1.ticker_config import get_config as _tk_cfg
     levels = gex_engine.find_key_levels(gex_df, spot, all_options=all_options, r=rfr,
-                                         r_curve=rfr_curve)
+                                         r_curve=rfr_curve,
+                                         q=float(_tk_cfg(ticker).get("dividend_yield", 0.0) or 0.0))
     has_0dte = any(e == today_str for e in target_exps)
     staleness_info = build_staleness_info(calendar_snapshot, spot_info, stats, has_0dte=has_0dte)
     confidence_info = build_run_confidence(stats, spot_info, staleness_info=staleness_info)
@@ -323,12 +325,22 @@ def _build_em_strip(display_em, display_em_label, on_label, on_pts, on_pct,
         return (f'<div class="cell"><div class="cl">{esc(label)}</div>'
                 f'<div class="cv" style="color:{color};">{value}</div></div>')
 
+    # When the expected move is unavailable the straddle inputs come through
+    # as 0 — rendering "±0 pts" / "EM RANGE 0–0" reads as a real, extremely
+    # tight forecast (the most dangerous possible misread for strike
+    # placement). Show an explicit unavailable dash instead.
+    _em_available = em_pts and em_pts > 0 and lo > 0 and hi > 0
+    em_cell_val = f"±{em_pts:.0f} pts" if _em_available else "—"
+    range_cell_val = f"{fmt_commas(lo,0)}–{fmt_commas(hi,0)}" if _em_available else "unavailable"
+    em_color = COLORS["em_level"] if _em_available else COLORS["text_muted"]
+    range_color = COLORS["text_white"] if _em_available else COLORS["text_muted"]
+
     on_val = (f'{on_arrow} {on_pts:+.1f} <span style="font-size:11px;color:var(--text-dim);">{(on_pct or 0):+.2f}%</span>'
               if on_pts is not None else "—")
     return (
         '<div class="em-strip">'
-        + cell(display_em_label.upper(), f"±{em_pts:.0f} pts", COLORS["em_level"])
-        + cell("EM RANGE", f"{fmt_commas(lo,0)}–{fmt_commas(hi,0)}", COLORS["text_white"])
+        + cell(display_em_label.upper(), em_cell_val, em_color)
+        + cell("EM RANGE", range_cell_val, range_color)
         + cell("TODAY'S MOVE", on_val, on_color)
         + cell("VOL BUDGET", ratio_pct, COLORS["warning"])
         + cell("SESSION", esc(cls_name), cls_color)

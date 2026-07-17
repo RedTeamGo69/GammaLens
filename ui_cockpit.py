@@ -136,7 +136,10 @@ def _cached_cockpit_bundle(tradier_token: str, run_key: str, rfr: float) -> dict
             gex_df, _stats, all_options, *_ = gex_engine.calculate_all(
                 client, COCKPIT_TICKER, [friday_exp], spot, r=rfr)
             if gex_df is not None and not gex_df.empty and all_options:
-                levels = find_key_levels(gex_df, spot, all_options=all_options, r=rfr)
+                from phase1.ticker_config import get_config as _tk_cfg
+                levels = find_key_levels(
+                    gex_df, spot, all_options=all_options, r=rfr,
+                    q=float(_tk_cfg(COCKPIT_TICKER).get("dividend_yield", 0.0) or 0.0))
                 out["gex_levels"] = levels
                 zg = levels.get("zero_gamma")
                 if zg:
@@ -194,7 +197,15 @@ def _resolve_anchor(conn, week_start: str, monday, run_now) -> tuple[float | Non
     """Frozen Monday-open anchor for XSP: session freeze → weekly_setup row →
     retroactive self-heal capture. Never a live price — mid-week drift is the
     exact failure mode the Monday lock exists to prevent."""
-    if st.session_state.get(f"sf_monday_open_week_{COCKPIT_TICKER}") == run_now.isocalendar()[1]:
+    # Match the freeze against the PLANNING week (Fri–Sun this is NEXT week),
+    # not run_now's calendar week. Keying on run_now let a Friday session
+    # reuse THIS week's frozen Monday open as the anchor for NEXT week's plan
+    # — a full week of drift on exactly the weekend the planner rolls forward.
+    # On Fri–Sun the planning-week freeze won't exist yet, so this correctly
+    # falls through to the DB (miss) and self-heal (skipped, next Monday is in
+    # the future) → "unavailable", which is the honest answer.
+    _planning_week_num = monday.isocalendar()[1]
+    if st.session_state.get(f"sf_monday_open_week_{COCKPIT_TICKER}") == _planning_week_num:
         v = st.session_state.get(f"sf_monday_open_{COCKPIT_TICKER}")
         if v:
             return float(v), "Mon open (session freeze)"

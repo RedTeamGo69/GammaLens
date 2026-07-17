@@ -658,6 +658,16 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
   [class*="st-key-sf_risk_tier_"] [data-testid="stButtonGroup"] {{ flex-wrap:wrap !important; }}
   [class*="st-key-sf_risk_tier_"] [data-testid^="stBaseButton-segmented_control"] {{ flex:1 1 45% !important; }}
 
+  /* 4-tab main selector ("Strike GEX / Spread Finder / Monday Cockpit /
+     Pre-Flight") was sized for the old 3-tab row and clipped labels below
+     ~380px. Keep the four on one row but tighten padding + font and let long
+     labels wrap to two lines instead of truncating. */
+  .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"] {{
+    font-size:12px !important; padding:9px 3px !important;
+    white-space:normal !important; line-height:1.15 !important;
+    text-align:center !important; hyphens:auto;
+  }}
+
   /* c. tighten page chrome + honour safe-area insets (notch / home indicator) */
   [data-testid="stAppViewBlockContainer"], .block-container {{
     padding-left:max(10px, env(safe-area-inset-left)) !important;

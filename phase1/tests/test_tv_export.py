@@ -7,6 +7,8 @@ file has to change, the GL1 version (and the Pine template) must be
 re-checked for compatibility.
 """
 
+import re
+
 import pytest
 
 from phase1.tv_export import (
@@ -272,3 +274,85 @@ def test_pine_template_never_wraps_statements():
                                  '"emd"', '"emw"', '"emm"', '"pi"'])
 def test_pine_template_parses_every_token_key(key):
     assert key in PINE_INDICATOR_SOURCE
+
+
+# ── Pine status table: gamma regime + user-placed table ──────────────────
+
+def test_pine_template_has_regime_and_table_controls():
+    src = PINE_INDICATOR_SOURCE
+    assert '"Gamma regime"' in src
+    assert '"Table position"' in src
+    assert '"Table text size"' in src
+    # The dropdown only works if position is re-applied on every last-bar
+    # pass: an input edit does not reliably re-run the var initializer.
+    assert "table.set_position(wtab, tblPos)" in src
+    for corner in ("top_left", "top_center", "top_right",
+                   "middle_left", "middle_center", "middle_right",
+                   "bottom_left", "bottom_center", "bottom_right"):
+        assert f"position.{corner}" in src
+
+
+def test_pine_regime_wording_matches_dashboard():
+    """The indicator speaks the dashboard's own regime vocabulary.
+
+    Both surfaces read the same levels, so they must never label the same
+    state differently; this fails if either side renames a regime.
+    """
+    # Via gex_engine's re-export: the entry point streamlit_app actually
+    # calls, and importing phase1.key_levels first trips a circular import.
+    import phase1.gex_engine as gex_engine
+
+    get_gamma_regime_text = gex_engine.get_gamma_regime_text
+
+    for spot, zero_gamma in ((6360.0, 6350.0),   # above  -> Positive Gamma
+                             (6340.0, 6350.0),   # below  -> Negative Gamma
+                             (6350.0, 6350.0)):  # equal  -> At Zero Gamma
+        label = get_gamma_regime_text(spot, zero_gamma)["regime"]
+        assert label.upper() in PINE_INDICATOR_SOURCE, label
+
+
+def test_pine_regime_colors_match_theme_palette():
+    from theme import COLORS
+
+    assert f"color COL_POS = {COLORS['positive']}" in PINE_INDICATOR_SOURCE
+    assert f"color COL_NEG = {COLORS['negative']}" in PINE_INDICATOR_SOURCE
+
+
+def test_pine_regime_is_withheld_never_guessed():
+    """Missing zero gamma or a foreign chart symbol must not yield a verdict.
+
+    A green/red call taken off the wrong underlying is the worst misread the
+    indicator could produce, and v6's strict booleans make a na-valued
+    comparison a runtime error rather than a silent false - so the compare
+    lives behind both guards, never in a ternary that na could reach.
+    """
+    src = PINE_INDICATOR_SOURCE
+    assert "if na(gZg)" in src
+    assert "else if not tkrOk" in src
+    # syminfo.ticker still matches on a Heikin Ashi / Renko chart, but close
+    # there is the synthetic bar's price, not the traded one - the levels are
+    # drawn at true prices, so an unguarded verdict contradicts its own lines.
+    assert "else if not chart.is_standard" in src
+    assert "float zgDist = close - gZg" in src
+
+
+def test_pine_table_indices_stay_within_declared_size():
+    """Declared table size must cover every index the script touches.
+
+    The v6 reference documents no behaviour for out-of-bounds table.cell or
+    table.clear indices, so this is pinned rather than assumed.
+    """
+    src = PINE_INDICATOR_SOURCE
+    created = re.search(r"table\.new\(position\.\w+,\s*(\d+),\s*(\d+)\)", src)
+    cleared = re.search(r"table\.clear\(wtab,\s*0,\s*0,\s*(\d+),\s*(\d+)\)", src)
+    assert created and cleared
+    cols, rows = int(created.group(1)), int(created.group(2))
+    assert (int(cleared.group(1)), int(cleared.group(2))) == (cols - 1, rows - 1)
+    # Busiest pass writes regime, status, symbol mismatch, stale date.
+    assert cols == 1 and rows >= 4
+
+
+def test_pine_table_cells_all_honour_the_size_input():
+    for line in PINE_INDICATOR_SOURCE.splitlines():
+        if "table.cell(" in line:
+            assert "text_size=tblSize" in line, line

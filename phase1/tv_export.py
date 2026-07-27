@@ -262,8 +262,17 @@ PINE_INDICATOR_SOURCE = '''//@version=6
 //
 // SETUP (once)
 //   TradingView → Pine Editor → paste this whole script → Add to chart.
-//   An orange prompt appears in the chart's top-right corner until a level
-//   string is pasted; after pasting it becomes a small gray status line.
+//   An orange prompt appears in the status table until a level string is
+//   pasted; after pasting it becomes the gamma regime plus a gray status line.
+//   Settings → Inputs moves that table to any of the nine chart positions and
+//   sizes its text.
+//
+// GAMMA REGIME
+//   Live chart price above the zero gamma level reads POSITIVE GAMMA (green),
+//   below it reads NEGATIVE GAMMA (red) — the same rule and wording the Gamma
+//   Lens dashboard uses (spot vs zero gamma, not the sign of net GEX). It is
+//   withheld, never guessed, when the string carries no zero gamma or the
+//   chart symbol isn't the one the levels were computed for.
 //
 // UPDATE (whenever you want fresh levels)
 //   Gamma Lens → Strike GEX tab → TradingView export → copy the level
@@ -304,7 +313,14 @@ bool showPI = input.bool(true, "HAR model PI")
 bool showLabels = input.bool(true, "Level labels")
 bool showSpot = input.bool(false, "Snapshot spot")
 int lineLen = input.int(40, "Line length (bars)", minval=5, maxval=500, tooltip="How many bars back each level line reaches. Lines always stop at the last bar, next to their labels — they never extend right.")
-int labSize = input.int(10, "Label text size", minval=7, maxval=24, tooltip="Point size: 7 ≈ tiny, 10 ≈ small, 12 ≈ normal, 18 ≈ large.")
+int labSize = input.int(10, "Label text size", minval=1, maxval=24, tooltip="Point size: 7 ≈ tiny, 10 ≈ small, 12 ≈ normal, 18 ≈ large.")
+bool showRegime = input.bool(true, "Gamma regime", tooltip="Compares the LIVE chart price to the zero gamma level from the string: above it reads POSITIVE GAMMA (green), below it reads NEGATIVE GAMMA (red). Same rule the Gamma Lens dashboard uses. Suppressed when the string carries no zero gamma or the chart is a different symbol.")
+string posIn = input.string("Bottom center", "Table position", options=["Top left", "Top center", "Top right", "Middle left", "Middle center", "Middle right", "Bottom left", "Bottom center", "Bottom right"])
+int tblSize = input.int(12, "Table text size", minval=1, maxval=36, tooltip="Point size: 8 ≈ tiny, 10 ≈ small, 14 ≈ normal, 20 ≈ large.")
+
+// Human-readable dropdown mapped to the position.* constants. Both table.new
+// and table.set_position take a series string, so an input maps straight through.
+string tblPos = posIn == "Top left" ? position.top_left : posIn == "Top center" ? position.top_center : posIn == "Top right" ? position.top_right : posIn == "Middle left" ? position.middle_left : posIn == "Middle center" ? position.middle_center : posIn == "Middle right" ? position.middle_right : posIn == "Bottom left" ? position.bottom_left : posIn == "Bottom right" ? position.bottom_right : position.bottom_center
 
 // ── Colors (mirror the Gamma Lens palette) ──────────────────────────────
 color COL_ZG = #25d8ef
@@ -315,6 +331,11 @@ color COL_EMW = #a98bff
 color COL_EMM = #f5c542
 color COL_PI = #ffb454
 color COL_SPOT = #9aa7b8
+// Regime pair kept separate from the wall colors even though the hexes match
+// today: these track theme.py's "positive"/"negative" GEX regime entries, the
+// walls track their own, and the two are free to diverge.
+color COL_POS = #2be88a
+color COL_NEG = #ff4d68
 
 // ── Drawing containers + helpers ────────────────────────────────────────
 var array<line> lns = array.new<line>()
@@ -345,7 +366,10 @@ _band(float lo, float hi, color col, string txt) =>
         _lvl(hi, col, txt + " High", line.style_solid)
         _lvl(lo, col, txt + " Low", line.style_solid)
 
-var table wtab = table.new(position.top_right, 1, 3)
+// Four rows is exactly what the busiest pass can use (regime + status +
+// mismatch + stale). The manual documents no behaviour for out-of-bounds cell
+// or clear indices, so the declared size and every index below stay in step.
+var table wtab = table.new(position.bottom_center, 1, 4)
 
 // Everything happens on the last bar: parse → wipe → draw → status. The
 // string is re-read on every pass, so a fresh paste always takes effect;
@@ -432,18 +456,52 @@ if barstate.islast
 
     // Status / warnings — always at least one visible row, so the script
     // can never fail silently: no table at all means it isn't running.
-    table.clear(wtab, 0, 0, 0, 2)
+    // Position is re-applied every pass rather than relying on the var
+    // initializer: an input edit does not reliably re-run bar-zero code, the
+    // same recalculation trap that once left this script drawing nothing.
+    table.set_position(wtab, tblPos)
+    table.clear(wtab, 0, 0, 0, 3)
     int row = 0
+    bool tkrOk = gTkr == str.upper(syminfo.ticker)
     if not gParsed
         string msg = str.length(cleaned) == 0 ? "GL Levels: paste a GL1 string in Settings → Inputs" : "GL Levels: couldn't read the string — recopy it from Gamma Lens"
-        table.cell(wtab, 0, row, msg, text_color=color.orange, text_size=size.small, text_halign=text.align_left)
+        table.cell(wtab, 0, row, msg, text_color=color.orange, text_size=tblSize, text_halign=text.align_left)
         row += 1
     else
+        // Gamma regime — the dashboard's own rule (live price vs zero gamma,
+        // NOT the sign of net GEX; those two can disagree). Evaluated against
+        // the live chart price so the read stays current between pastes.
+        // Withheld rather than guessed when zero gamma is absent, the chart is
+        // another symbol, or the chart type is non-standard: a confident
+        // green/red verdict taken off the wrong price basis is the worst
+        // misread this indicator could produce. The chart-type guard matters
+        // because syminfo.ticker still matches on a Heikin Ashi or Renko SPX
+        // chart, yet close there is the synthetic bar's price, not the traded
+        // one — the drawn levels stay at true prices, so the comparison would
+        // silently contradict the lines beside it.
+        if showRegime
+            if na(gZg)
+                table.cell(wtab, 0, row, "GAMMA REGIME —  no zero gamma in the string", text_color=color.gray, text_size=tblSize, text_halign=text.align_left)
+                row += 1
+            else if not tkrOk
+                table.cell(wtab, 0, row, "GAMMA REGIME —  n/a, chart is not " + gTkr, text_color=color.gray, text_size=tblSize, text_halign=text.align_left)
+                row += 1
+            else if not chart.is_standard
+                table.cell(wtab, 0, row, "GAMMA REGIME —  n/a on a non-standard chart type", text_color=color.gray, text_size=tblSize, text_halign=text.align_left)
+                row += 1
+            else
+                float zgDist = close - gZg
+                string regTxt = zgDist > 0 ? "POSITIVE GAMMA" : zgDist < 0 ? "NEGATIVE GAMMA" : "AT ZERO GAMMA"
+                color regCol = zgDist > 0 ? COL_POS : zgDist < 0 ? COL_NEG : COL_ZG
+                string regGap = (zgDist > 0 ? "+" : "") + str.tostring(zgDist, format.mintick) + " pts from zero Γ"
+                string regNote = gZgFallback ? "  (estimated zero Γ)" : ""
+                table.cell(wtab, 0, row, regTxt + "   " + regGap + regNote, text_color=regCol, text_size=tblSize, text_halign=text.align_left, bgcolor=color.new(regCol, 88))
+                row += 1
         int nLevels = (na(gSpot) ? 0 : 1) + (na(gZg) ? 0 : 1) + (na(gCw) ? 0 : 1) + (na(gPw) ? 0 : 1) + (na(gEmdLo) ? 0 : 1) + (na(gEmwLo) ? 0 : 1) + (na(gEmmLo) ? 0 : 1) + (na(gPiLo) ? 0 : 1)
-        table.cell(wtab, 0, row, "GL " + gTkr + " · " + gDate + " · " + str.tostring(nLevels) + " levels", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(wtab, 0, row, "GL " + gTkr + " · " + gDate + " · " + str.tostring(nLevels) + " levels", text_color=color.gray, text_size=tblSize, text_halign=text.align_left)
         row += 1
-        if gTkr != str.upper(syminfo.ticker)
-            table.cell(wtab, 0, row, "GL Levels: levels are for " + gTkr + " — chart is " + syminfo.ticker, text_color=color.orange, text_size=size.small, text_halign=text.align_left)
+        if not tkrOk
+            table.cell(wtab, 0, row, "GL Levels: levels are for " + gTkr + " — chart is " + syminfo.ticker, text_color=color.orange, text_size=tblSize, text_halign=text.align_left)
             row += 1
         bool stale = false
         array<string> dp = str.split(gDate, "-")
@@ -454,6 +512,6 @@ if barstate.islast
             if not na(yy) and not na(mm) and not na(dd)
                 stale := time >= timestamp("America/New_York", int(yy), int(mm), int(dd), 0, 0, 0) + 86400000
         if stale
-            table.cell(wtab, 0, row, "GL Levels: string dated " + gDate + " — may be stale", text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
+            table.cell(wtab, 0, row, "GL Levels: string dated " + gDate + " — may be stale", text_color=color.yellow, text_size=tblSize, text_halign=text.align_left)
             row += 1
 '''

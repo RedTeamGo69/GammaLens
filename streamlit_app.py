@@ -385,6 +385,7 @@ def main():
     from ui_spread_finder import _render_spread_finder_tab
     from ui_cockpit import _render_cockpit_tab
     from ui_preflight import _render_preflight_tab
+    from ui_tv_export import render_tv_export_section
 
     inject_global_css()
     inject_pwa_head()
@@ -736,6 +737,17 @@ def main():
                 weekly_em=w_em_for_chart, monthly_em=m_em_for_chart,
                 show_daily_em=_show_daily_em, ticker=ticker,
             ))
+            # EM inputs mirror the Key Levels aside card (snap-or-live), not
+            # the chart's expiration gating — the Pine indicator has its own
+            # per-band visibility toggles, so export everything available.
+            render_tv_export_section(
+                ticker=ticker, spot=spot, levels=levels,
+                gex_df_empty=data.gex_df.empty,
+                daily_em=daily_em,
+                weekly_em=(weekly_em_snap or weekly_em_live or {}),
+                monthly_em=(monthly_em_snap or monthly_em_live or {}),
+                run_now=run_now,
+            )
         elif tab == "spread":
             _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
         elif tab == "cockpit":

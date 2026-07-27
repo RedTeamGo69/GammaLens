@@ -348,8 +348,45 @@ def test_pine_table_indices_stay_within_declared_size():
     assert created and cleared
     cols, rows = int(created.group(1)), int(created.group(2))
     assert (int(cleared.group(1)), int(cleared.group(2))) == (cols - 1, rows - 1)
-    # Busiest pass writes regime, status, symbol mismatch, stale date.
-    assert cols == 1 and rows >= 4
+    # Busiest pass writes regime, status, symbol mismatch, the chart-type
+    # alert warning, and the stale-date warning.
+    assert cols == 1 and rows >= 5
+
+
+def test_pine_alerts_use_alert_not_alertcondition():
+    """alert() carries the level's value; alertcondition() structurally cannot.
+
+    alertcondition()'s message argument is a const string, so it could never
+    name a price parsed out of the pasted string at runtime - and it also
+    counts against the script's plot budget. alert()'s message is a series
+    string and the reference explicitly permits it in local scopes.
+    """
+    # Comments discuss alertcondition() by name, so judge the code alone.
+    code = "\n".join(line.split("//")[0]
+                     for line in PINE_INDICATOR_SOURCE.splitlines())
+    assert "alert(" in code
+    assert "alertcondition(" not in code
+    # Frequency is chosen from the builtin constants themselves: alert()'s
+    # freq argument is input-qualified, so it cannot take a computed string.
+    for freq in ("alert.freq_once_per_bar", "alert.freq_once_per_bar_close",
+                 "alert.freq_all"):
+        assert freq in code
+
+
+def test_pine_alerts_are_gated_and_na_safe():
+    """Alerts inherit the regime's honesty gate and never test a na value."""
+    src = PINE_INDICATOR_SOURCE
+    # Same gate as the regime: parsed, right symbol, standard chart type.
+    assert "gAlertOk := gParsed and tkrOk and chart.is_standard" in src
+    # Guards are nested so no na can reach a condition: v6 booleans are
+    # strict, making a na condition a runtime error, not a silent false.
+    assert "if not na(lvl) and not na(close[1])" in src
+    # Every drawn level is armed from the one shared helper.
+    assert "_alarm(y, txt)" in src
+    # A gate that silences every alert must say so on its own row, not only
+    # inside the regime branch - otherwise switching the regime off hides the
+    # only clue that nothing can ever fire.
+    assert "if useAlerts and not chart.is_standard" in src
 
 
 def test_pine_table_cells_all_honour_the_size_input():

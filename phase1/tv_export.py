@@ -267,6 +267,13 @@ PINE_INDICATOR_SOURCE = '''//@version=6
 //   Settings → Inputs moves that table to any of the nine chart positions and
 //   sizes its text.
 //
+// ALERTS (set up once, covers every level)
+//   Add the indicator, then Create Alert (⏰) → Condition: "GL Levels" →
+//   "Any alert() function call" → Create. One alert covers all levels; the
+//   message names which one was crossed and at what price. A level alerts
+//   only while its toggle is on, and alerts are held back entirely unless
+//   the chart is the levels' own symbol on a standard chart type.
+//
 // GAMMA REGIME
 //   Live chart price above the zero gamma level reads POSITIVE GAMMA (green),
 //   below it reads NEGATIVE GAMMA (red) — the same rule and wording the Gamma
@@ -314,9 +321,11 @@ bool showLabels = input.bool(true, "Level labels")
 bool showSpot = input.bool(false, "Snapshot spot")
 int lineLen = input.int(40, "Line length (bars)", minval=5, maxval=500, tooltip="How many bars back each level line reaches. Lines always stop at the last bar, next to their labels — they never extend right.")
 int labSize = input.int(10, "Label text size", minval=1, maxval=24, tooltip="Point size: 7 ≈ tiny, 10 ≈ small, 12 ≈ normal, 18 ≈ large.")
-bool showRegime = input.bool(true, "Gamma regime", tooltip="Compares the LIVE chart price to the zero gamma level from the string: above it reads POSITIVE GAMMA (green), below it reads NEGATIVE GAMMA (red). Same rule the Gamma Lens dashboard uses. Suppressed when the string carries no zero gamma or the chart is a different symbol.")
+bool showRegime = input.bool(true, "Gamma regime", tooltip="Compares the LIVE chart price to the zero gamma level from the string: above it reads POSITIVE GAMMA (green), below it reads NEGATIVE GAMMA (red). Same rule the Gamma Lens dashboard uses. Suppressed when the string carries no zero gamma, the chart is a different symbol, or the chart type is non-standard (Heikin Ashi, Renko and friends report a synthetic price, not the traded one).")
 string posIn = input.string("Bottom center", "Table position", options=["Top left", "Top center", "Top right", "Middle left", "Middle center", "Middle right", "Bottom left", "Bottom center", "Bottom right"])
 int tblSize = input.int(12, "Table text size", minval=1, maxval=36, tooltip="Point size: 8 ≈ tiny, 10 ≈ small, 14 ≈ normal, 20 ≈ large.")
+bool useAlerts = input.bool(true, "Price-cross alerts", tooltip="Fires when price crosses any level that is switched on above — one alert covers every level, and the message names which one. Set it up once: Create Alert (⏰) → Condition: GL Levels → 'Any alert() function call'.")
+string alertFreq = input.string(alert.freq_once_per_bar, "Alert frequency", options=[alert.freq_once_per_bar, alert.freq_once_per_bar_close, alert.freq_all], tooltip="once_per_bar = first cross in each bar; once_per_bar_close = only when the bar closes across (fewest false starts); all = every tick.")
 
 // Human-readable dropdown mapped to the position.* constants. Both table.new
 // and table.set_position take a series string, so an input maps straight through.
@@ -341,6 +350,12 @@ color COL_NEG = #ff4d68
 var array<line> lns = array.new<line>()
 var array<label> lbls = array.new<label>()
 
+// One gate for anything that compares the chart's price to a pasted level:
+// the string parsed, the chart is the levels' own symbol, and the chart type
+// is standard. Set on the last bar before drawing; helper functions can only
+// read globals, which is why it lives out here.
+var bool gAlertOk = false
+
 _wipe() =>
     while array.size(lns) > 0
         line.delete(array.pop(lns))
@@ -351,13 +366,34 @@ _tag(float y, string txt, color col) =>
     if showLabels and not na(y)
         array.push(lbls, label.new(bar_index, y, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=col, size=labSize))
 
+// Cross alert for one level. alert() is the only workable primitive here:
+// its message is a series string, so it can name the level and its price,
+// while alertcondition()'s message is const and could never carry a value
+// parsed at runtime. The manual explicitly permits alert() in local scopes.
+// Detection is a plain close-vs-close[1] straddle rather than ta.crossover:
+// ta.* functions carry per-bar history and this runs inside a conditional
+// block, where the reference documents no guarantee. The guards are NESTED
+// rather than chained with "and" so neither a na level nor a missing prior
+// bar can ever reach a condition — v6 booleans are strict, and na in a
+// condition is a runtime error rather than a silent false.
+_alarm(float lvl, string name) =>
+    if useAlerts and gAlertOk
+        if not na(lvl) and not na(close[1])
+            if close > lvl and close[1] <= lvl
+                alert("GL " + syminfo.ticker + " — price crossed ABOVE " + name + " (" + str.tostring(lvl, format.mintick) + ")", alertFreq)
+            else if close < lvl and close[1] >= lvl
+                alert("GL " + syminfo.ticker + " — price crossed BELOW " + name + " (" + str.tostring(lvl, format.mintick) + ")", alertFreq)
+
 // Lines run lineLen bars back and STOP at the last bar (no right extension),
-// so each one ends exactly where its label sits.
+// so each one ends exactly where its label sits. Alerts hang off the same
+// call, so every drawn level is armed and the visibility toggles double as
+// per-level alert switches.
 _lvl(float y, color col, string txt, string sty) =>
     if not na(y)
         int x1 = math.max(bar_index - lineLen, 0)
         array.push(lns, line.new(x1, y, bar_index, y, extend=extend.none, color=col, style=sty, width=1))
         _tag(y, txt + "  " + str.tostring(y, format.mintick), col)
+        _alarm(y, txt)
 
 // A range is a High/Low pair of plain lines — no fill, so wide ranges
 // (monthly EM, HAR PI) don't paint over the whole chart.
@@ -366,10 +402,11 @@ _band(float lo, float hi, color col, string txt) =>
         _lvl(hi, col, txt + " High", line.style_solid)
         _lvl(lo, col, txt + " Low", line.style_solid)
 
-// Four rows is exactly what the busiest pass can use (regime + status +
-// mismatch + stale). The manual documents no behaviour for out-of-bounds cell
-// or clear indices, so the declared size and every index below stay in step.
-var table wtab = table.new(position.bottom_center, 1, 4)
+// Five rows is exactly what the busiest pass can use (regime + status +
+// symbol mismatch + chart-type alert warning + stale). The manual documents no
+// behaviour for out-of-bounds cell or clear indices, so the declared size and
+// every index below stay in step.
+var table wtab = table.new(position.bottom_center, 1, 5)
 
 // Everything happens on the last bar: parse → wipe → draw → status. The
 // string is re-read on every pass, so a fresh paste always takes effect;
@@ -433,6 +470,10 @@ if barstate.islast
                                 gPiLo := lo
                                 gPiHi := hi
 
+    // Resolved before drawing, because drawing is what arms the alerts.
+    bool tkrOk = gTkr == str.upper(syminfo.ticker)
+    gAlertOk := gParsed and tkrOk and chart.is_standard
+
     _wipe()
 
     // Ranges first, then the single key levels so ZG/walls draw on top.
@@ -460,9 +501,8 @@ if barstate.islast
     // initializer: an input edit does not reliably re-run bar-zero code, the
     // same recalculation trap that once left this script drawing nothing.
     table.set_position(wtab, tblPos)
-    table.clear(wtab, 0, 0, 0, 3)
+    table.clear(wtab, 0, 0, 0, 4)
     int row = 0
-    bool tkrOk = gTkr == str.upper(syminfo.ticker)
     if not gParsed
         string msg = str.length(cleaned) == 0 ? "GL Levels: paste a GL1 string in Settings → Inputs" : "GL Levels: couldn't read the string — recopy it from Gamma Lens"
         table.cell(wtab, 0, row, msg, text_color=color.orange, text_size=tblSize, text_halign=text.align_left)
@@ -502,6 +542,12 @@ if barstate.islast
         row += 1
         if not tkrOk
             table.cell(wtab, 0, row, "GL Levels: levels are for " + gTkr + " — chart is " + syminfo.ticker, text_color=color.orange, text_size=tblSize, text_halign=text.align_left)
+            row += 1
+        // Peer of the mismatch row, NOT nested under the regime toggle: the
+        // chart-type gate also silences every alert, and with the regime row
+        // switched off this would be the only clue that nothing can fire.
+        if useAlerts and not chart.is_standard
+            table.cell(wtab, 0, row, "GL Levels: alerts off — non-standard chart type", text_color=color.orange, text_size=tblSize, text_halign=text.align_left)
             row += 1
         bool stale = false
         array<string> dp = str.split(gDate, "-")

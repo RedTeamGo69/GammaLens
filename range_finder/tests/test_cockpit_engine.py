@@ -90,12 +90,24 @@ def test_trade_verdict_always_has_proposal():
 
 # ── VRP gate + units tripwire ────────────────────────────────────────────────
 
-def test_vrp_thin_skips_but_still_proposes():
+def test_vrp_thin_warns_but_does_not_gate():
+    """Post-2026-08-03 audit: thin VRP is surfaced, not blocking. The ratio has
+    no measured edge on condor survival (see cockpit_config.VRP_MIN_RATIO)."""
     v = run(straddle_em_pts=6.54)         # ratio 1.09 < 1.10
+    assert v.verdict == "TRADE"
+    assert "vrp_thin" in codes(v, "warning")
+    assert "vrp_thin" not in codes(v, "gate")
+    assert v.proposal is not None
+    assert v.vrp["ratio"] == pytest.approx(1.09)
+    assert v.vrp["passes_gate"] is False   # still reported, just not enforced
+
+
+def test_vrp_hard_gate_is_opt_in():
+    """The pre-audit blocking behavior is one config flag away."""
+    v = run(straddle_em_pts=6.54, cfg=CockpitConfig(vrp_hard_gate=True))
     assert v.verdict == "SKIP"
     assert "vrp_thin" in codes(v, "gate")
     assert v.proposal is not None          # SKIP still shows what was skipped
-    assert v.vrp["ratio"] == pytest.approx(1.09)
 
 
 def test_vrp_clears_threshold():
@@ -119,7 +131,7 @@ def test_units_tripwire_high():
 def test_tripwire_boundaries_inclusive():
     v_low = run(straddle_em_pts=3.0)       # ratio exactly 0.5 → inside band
     assert "units_tripwire" not in codes(v_low)
-    assert "vrp_thin" in codes(v_low, "gate")   # 0.5 < 1.10 still gates VRP
+    assert "vrp_thin" in codes(v_low, "warning")  # 0.5 < 1.10 still warns
 
     v_high = run(straddle_em_pts=18.0)     # ratio ~3.0 → inside band, VRP rich
     assert "units_tripwire" not in codes(v_high)
@@ -283,7 +295,8 @@ def test_missing_expiration_gates():
 
 def test_skip_always_has_a_gate_reason():
     scenarios = [
-        run(straddle_em_pts=6.54),
+        run(straddle_em_pts=6.54, cfg=CockpitConfig(vrp_hard_gate=True)),
+        run(straddle_em_pts=2.4),          # units tripwire
         run(events=[FOMC]),
         run(anchor=None),
         run(chain_quotes={}),
@@ -313,6 +326,44 @@ def test_strike_rounding_spx_increment():
     # em_pts = 63 → call 6063 rounds UP to 6065, put 5937 rounds DOWN to 5935
     assert (p.call_short, p.put_short) == (6065, 5935)
     assert (p.call_long, p.put_long) == (6115, 5885)
+
+
+# ── per-side range share (the /2 half-split bug, fixed 2026-08-03) ───────────
+
+def test_side_share_absent_keeps_legacy_half_split():
+    """A forecast with no side_share_q degrades to the symmetric /2 split, so
+    a DB hiccup in the estimator can never silently move strikes."""
+    v = run()                                   # FORECAST carries no side_share_q
+    assert v.inputs["side_share"] == 0.5
+    assert v.proposal.em_pts == pytest.approx(ANCHOR * POINT_PCT / 2)   # 6.0
+    assert (v.proposal.call_short, v.proposal.put_short) == (606, 594)
+
+
+def test_side_share_widens_strikes_to_match_spread_finder():
+    """side_share_q places shorts at anchor ± k·point_pct·q, the convention the
+    Spread Finder and TV export have always used — NOT anchor ± point_pct/2."""
+    fc = dict(FORECAST, side_share_q=0.8357)
+    v = run(forecast=fc)
+    assert v.inputs["side_share"] == pytest.approx(0.8357)
+    # em_pts = 600 × 0.02 × 0.8357 = 10.03 (vs 6.0 under the half-split)
+    assert v.proposal.em_pts == pytest.approx(10.0284)
+    assert (v.proposal.call_short, v.proposal.put_short) == (611, 589)
+    # strictly wider than the legacy geometry on both sides
+    legacy = run().proposal
+    assert v.proposal.call_short > legacy.call_short
+    assert v.proposal.put_short < legacy.put_short
+
+
+def test_side_share_is_clamped():
+    """Below 0.5 would be tighter than the legacy split; above 1.0 would hand
+    one side more than the entire forecast range."""
+    from range_finder.cockpit_config import forecast_side_share
+    assert forecast_side_share({"side_share_q": 0.31}) == 0.5
+    assert forecast_side_share({"side_share_q": 1.4}) == 1.0
+    assert forecast_side_share({"side_share_q": None}) == 0.5
+    assert forecast_side_share({"side_share_q": "nope"}) == 0.5
+    assert forecast_side_share(None) == 0.5
+    assert forecast_side_share({"side_share_q": 0.75}) == 0.75
 
 
 # ── pricing + quote-map plumbing ─────────────────────────────────────────────

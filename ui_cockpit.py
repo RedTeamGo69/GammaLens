@@ -45,6 +45,7 @@ from range_finder.cockpit_config import (
     COCKPIT_MODEL_SPEC,
     COCKPIT_TICKER,
     CockpitConfig,
+    forecast_side_share,
 )
 from range_finder.cockpit_engine import (
     CockpitVerdict,
@@ -61,6 +62,7 @@ from ui_theme import esc
 from ui_spread_finder import (
     _cached_rf_get_features,
     _cached_rf_load_model,
+    _cached_side_share_q,
     _cached_weekly_setup,
     _get_rf_conn,
     _tradier_token,
@@ -314,8 +316,11 @@ def _band_gauge_html(anchor: float, spot: float | None, forecast: dict,
                      gex_levels: dict | None) -> str:
     """Horizontal strike-axis gauge: HAR point/PI bands vs the implied band,
     with the proposal strikes, GEX walls, anchor and spot as positioned divs."""
-    point_half = anchor * float(forecast.get("point_pct") or 0) / 2
-    upper_half = anchor * float(forecast.get("upper_pct") or 0) / 2
+    # Per-side share, not a half-split — the drawn bands must be the same ones
+    # the engine placed strikes off, or the gauge contradicts the proposal.
+    _share = forecast_side_share(forecast)
+    point_half = anchor * float(forecast.get("point_pct") or 0) * _share
+    upper_half = anchor * float(forecast.get("upper_pct") or 0) * _share
     marks = [anchor - upper_half, anchor + upper_half,
              anchor - point_half, anchor + point_half]
     if straddle_em_pts:
@@ -488,7 +493,8 @@ def _proposal_card_html(verdict: CockpitVerdict) -> str:
         f'border-radius:10px;padding:12px 16px;margin:.35rem 0;">'
         f'<div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;color:{_MUT};">'
         f'PROPOSED CONDOR · {esc(p.expiration)} · wing {p.wing_width:g} · '
-        f'k={p.k_used:g} · EM ±{p.em_pts:.2f} pts off anchor {p.anchor:.2f}</div>'
+        f'k={p.k_used:g} · band ±{p.em_pts:.2f} pts off anchor {p.anchor:.2f} '
+        f'(side share {verdict.inputs.get("side_share", 0.5):.3f})</div>'
         f'{stats}'
         f'{side_table}'
         f'<div style="overflow-x:auto;"><table style="border-collapse:collapse;'
@@ -567,8 +573,13 @@ def _render_cockpit_tab(
                              f" — run Weekly Setup on the Spread Finder tab for this week's row")
         ref_for_levels = anchor or xsp_spot or 0.0
         if feature_row is not None and ref_for_levels > 0:
+            # side_share_q keyed to the MODEL's ticker (SPX — XSP shares the
+            # SPX fit per COCKPIT_MODEL_SPEC), so the Cockpit places strikes
+            # on the same per-side convention as the Spread Finder and the TV
+            # export instead of the symmetric half-split it used to hardcode.
             forecast = forecast_next_week(payload["result"], feature_row,
-                                          payload["feature_cols"], ref_for_levels)
+                                          payload["feature_cols"], ref_for_levels,
+                                          side_share_q=_cached_side_share_q("SPX"))
             forecast = maybe_apply_conformal(forecast, conn, "SPX", COCKPIT_MODEL_SPEC)
     except FileNotFoundError:
         st.info(f"No saved **{COCKPIT_MODEL_SPEC}** fit yet — run **Weekly Setup** "

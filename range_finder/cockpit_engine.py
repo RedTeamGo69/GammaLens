@@ -15,9 +15,12 @@ Unit conventions (the silent-bug minefield, spelled out once):
     (feature_builder.vix_implied_range): E[range] = 2·E[|move|], so the
     implied weekly range is `2 × straddle_mid ÷ anchor` — that is what the
     VRP ratio compares against `point_pct`.
-  * "Expected move" for strike placement is the point-forecast HALF-range in
-    points: `anchor × point_pct / 2` (the same ±half-range convention as
-    har_model's pi_upper_px/pi_lower_px price band).
+  * "Expected move" for strike placement is the point-forecast PER-SIDE range
+    in points: `anchor × point_pct × side_share`, where side_share is the
+    forecast's empirical side-share quantile (cockpit_config.forecast_side_share
+    — the same convention as har_model's point_upper_px/pi_upper_px price
+    band, and as the Spread Finder / TV export). It degrades to the legacy
+    symmetric 0.5 half-split when the forecast carries no side_share_q.
 
 Strike discipline (the whole point of the tool):
   * Short strikes base off the frozen Monday anchor, never live spot.
@@ -31,7 +34,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 from phase1.pop import condor_pop, resolve_short_delta
-from range_finder.cockpit_config import CockpitConfig
+from range_finder.cockpit_config import CockpitConfig, forecast_side_share
 from range_finder.spread_levels import (
     _lookup_chain_price,
     _snap_long_strike,
@@ -565,6 +568,7 @@ def evaluate_cockpit(
         reasons.append(VerdictReason(code, "info", text))
 
     point_pct = float((forecast or {}).get("point_pct") or 0.0)
+    side_share = forecast_side_share(forecast)
 
     # 1 — data sufficiency (never guess a missing input)
     if not anchor or anchor <= 0:
@@ -595,11 +599,19 @@ def evaluate_cockpit(
                  f"{cfg.tripwire_low:g}–{cfg.tripwire_high:g} reconcile band — units or "
                  f"data are suspect; refusing to trade on an unreconciled comparison.")
         elif not vrp["passes_gate"]:
-            gate("vrp_thin",
-                 f"VRP thin: implied weekly range {vrp['implied_range_pct'] * 100:.2f}% is "
-                 f"{ratio:.2f}× the HAR forecast {point_pct * 100:.2f}% "
-                 f"(needs ≥ {cfg.vrp_min_ratio:.2f}×) — selling a condor priced below "
-                 f"the model's own vol forecast is negative-edge.")
+            # Warning by default: the 2026-08-03 audit found no edge in this
+            # ratio as a hard gate (see cockpit_config.VRP_MIN_RATIO). It still
+            # says the premium is thin relative to the model — worth seeing,
+            # not worth an automatic SKIP. cfg.vrp_hard_gate restores the block.
+            (gate if cfg.vrp_hard_gate else warn)(
+                "vrp_thin",
+                f"VRP thin: implied weekly range {vrp['implied_range_pct'] * 100:.2f}% is "
+                f"{ratio:.2f}× the HAR forecast {point_pct * 100:.2f}% "
+                f"(below the {cfg.vrp_min_ratio:.2f}× reference) — the straddle is not "
+                f"pricing much premium over the model's own vol forecast."
+                + ("" if cfg.vrp_hard_gate else
+                   " Audited 2026-08-03 over 148 weeks: this ratio does not "
+                   "predict condor survival, so it warns rather than gates."))
 
     # 4 — event policy (tier 1 gates or widens; tier 2 only warns)
     k_eff = cfg.k_expected_move
@@ -643,7 +655,7 @@ def evaluate_cockpit(
     proposal = None
     em_pts = 0.0
     if anchor and anchor > 0 and point_pct > 0 and chain_quotes and friday_exp:
-        em_pts = anchor * point_pct / 2.0
+        em_pts = anchor * point_pct * side_share
         proposal, prop_reasons = propose_condor(
             anchor=anchor, em_pts=em_pts, k_eff=k_eff, gex_levels=gex_levels,
             chain_quotes=chain_quotes, cfg=cfg, strike_increment=strike_increment,
@@ -689,6 +701,7 @@ def evaluate_cockpit(
         "spot": spot,
         "friday_exp": friday_exp,
         "em_pts": em_pts,
+        "side_share": side_share,
         "k_configured": cfg.k_expected_move,
         "k_used": k_eff,
         "sessions_to_expiry": sessions_to_expiry,

@@ -169,6 +169,21 @@ def test_model_red_inside_point_band():
     assert any("INSIDE" in r for r in g.reasons)
 
 
+def test_model_bands_follow_the_forecast_side_share():
+    """Pre-Flight must judge strikes against the SAME per-side convention the
+    Cockpit placed them with, or it reports the Cockpit's own proposal as
+    sitting inside the point band every week (the /2 bug, fixed 2026-08-03)."""
+    fc = dict(FORECAST, side_share_q=0.8357)
+    # point band widens 600×0.02×0.8357 = ±10.03, PI band ±15.04
+    strict = check_model(condor(call_s=607, put_s=593), fc, ANCHOR, FRIDAY, CFG)
+    assert strict.status == "red"        # was "yellow" under the half-split
+    wide = check_model(condor(call_s=616, put_s=584), fc, ANCHOR, FRIDAY, CFG)
+    assert wide.status == "green"        # outside the widened PI band
+    # and the legacy half-split is untouched when no share is supplied
+    assert check_model(condor(call_s=607, put_s=593), FORECAST, ANCHOR,
+                       FRIDAY, CFG).status == "yellow"
+
+
 def test_model_na_for_pure_debit_trade():
     trade = ProposedTrade("XSP", FRIDAY, 1, (leg("call", "buy", 610),))
     g = check_model(trade, FORECAST, ANCHOR, FRIDAY, CFG)

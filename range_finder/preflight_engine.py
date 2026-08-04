@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from phase1.ticker_config import TICKER_CONFIG
-from range_finder.cockpit_config import CockpitConfig
+from range_finder.cockpit_config import CockpitConfig, forecast_side_share
 
 _KNOWN_INDEXES = {"SPX", "SPXW", "XSP", "NDX", "XND", "RUT", "VIX", "DJX"}
 
@@ -202,10 +202,15 @@ def check_model(trade: ProposedTrade, forecast: dict | None, anchor: float | Non
     if point_pct <= 0:
         return GateResult("model", "na", ["Forecast has no usable point estimate."])
 
-    em_pts = anchor * point_pct / 2
-    point_up, point_dn = anchor * (1 + point_pct / 2), anchor * (1 - point_pct / 2)
-    pi_up = anchor * (1 + upper_pct / 2) if upper_pct > 0 else None
-    pi_dn = anchor * (1 - upper_pct / 2) if upper_pct > 0 else None
+    # Per-side range share, NOT a symmetric half-split — matches the Cockpit,
+    # the Spread Finder and the TV export (cockpit_config.forecast_side_share).
+    # A hardcoded /2 here would report the Cockpit's own proposal as sitting
+    # outside the point band on every week.
+    share = forecast_side_share(forecast)
+    em_pts = anchor * point_pct * share
+    point_up, point_dn = anchor * (1 + point_pct * share), anchor * (1 - point_pct * share)
+    pi_up = anchor * (1 + upper_pct * share) if upper_pct > 0 else None
+    pi_dn = anchor * (1 - upper_pct * share) if upper_pct > 0 else None
 
     shorts = [l for l in trade.legs if l.direction == "sell"
               and l.option_type in ("call", "put")]

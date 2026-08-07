@@ -640,18 +640,19 @@ def _init_all_tables_body(conn) -> None:
     """)
 
     # The 0DTE / daily-cadence tables (daily_spx, event_flags_daily,
-    # daily_model_features, forecast_log_daily) are no longer created here:
-    # the 0DTE finder was deliberately removed (2026-07) after a
-    # 1,036-session audit showed its VRP verdict had no predictive edge.
+    # daily_model_features, forecast_log_daily, spread_log_daily) are no
+    # longer created here: the 0DTE finder was deliberately removed (2026-07)
+    # after a 1,036-session audit showed its VRP verdict had no predictive
+    # edge. Their historical rows are still in Neon — drop manually if the
+    # storage matters.
     #
-    # Same for the Monday Cockpit / Pre-Flight tables (cockpit_verdicts,
-    # preflight_log) and the Public.com fill-history tables that fed
-    # Pre-Flight's behavioral gate (strategy_history, trade_category_stats,
-    # fill_review_queue): both tabs and the whole public_api package were
-    # removed 2026-08 as unused, so nothing reads or writes them.
-    #
-    # Existing deployments keep their historical rows in every case — drop
-    # the tables manually if the storage matters.
+    # The Monday Cockpit / Pre-Flight tables (cockpit_verdicts, preflight_log)
+    # and the Public.com fill-history tables that fed Pre-Flight's behavioral
+    # gate (strategy_history, trade_category_stats, fill_review_queue) went
+    # further: both tabs and the whole public_api package were removed
+    # 2026-08, and the five tables were DROPPED outright at the user's request
+    # (2026-08-07) rather than left as orphaned history. Re-creating any of
+    # them means restoring the deleted modules from git history first.
 
     conn.commit()
     log.info("All range finder tables initialized (postgres)")

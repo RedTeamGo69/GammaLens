@@ -423,9 +423,9 @@ def capture_snapshot():
     # The Public.com fill-history sync ran here daily (gated to the SPX matrix
     # entry) to feed the Pre-Flight behavioral gate. Both the Monday Cockpit
     # and Pre-Flight tabs were removed (2026-08), leaving the sync with no
-    # consumer, so the whole public_api package went with them. Historical
-    # strategy_history / trade_category_stats / fill_review_queue rows stay in
-    # the DB. PUBLIC_API_SECRET / PUBLIC_ACCOUNT_ID are no longer read.
+    # consumer, so the whole public_api package went with them — along with
+    # its three tables and the PUBLIC_API_SECRET / PUBLIC_ACCOUNT_ID secrets.
+    # Nothing here touches Public.com any more.
 
     _logger.info("Scheduled snapshot complete")
 

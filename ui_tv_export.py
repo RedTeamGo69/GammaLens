@@ -109,10 +109,17 @@ def _resolve_har_pi(ticker: str, run_now) -> "tuple[float, float] | None":
     cache key is exactly (week_start, model_choice, ticker).
     """
     try:
-        from ui_cockpit import _planning_week
-        from ui_spread_finder import _default_model_for_ticker
+        from datetime import timedelta
 
-        week_start, _ = _planning_week(run_now)
+        from ui_spread_finder import (_default_model_for_ticker,
+                                      _spread_finder_target_friday)
+
+        # Planning week = the Spread Finder's target Friday, back to its
+        # Monday. Mon-Thu that's this week; Fri-Sun it rolls forward. Reading
+        # it off the Spread Finder's helper (rather than a second copy of the
+        # rule) is what keeps the export and the tab on the same week.
+        week_start = (_spread_finder_target_friday(run_now.date())
+                      - timedelta(days=4)).strftime("%Y-%m-%d")
         model_choice = (st.session_state.get(f"sf_model_choice_{ticker}")
                         or _default_model_for_ticker(ticker))
         return _cached_tv_har_pi(week_start, model_choice, ticker)

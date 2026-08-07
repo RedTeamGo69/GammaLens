@@ -84,11 +84,10 @@ REFRESH_MODES = [("off", "Off"), ("5min", "5 min"), ("30min", "30 min")]
 # audit showed its VRP verdict had no predictive edge, and its full-session
 # range forecast never fit intraday entry timing. The "0dte" EXP_MODES token
 # above is unrelated — that's the chart's expiration selector, which stays.
+# The Monday Cockpit and Pre-Flight tabs were removed (2026-08) as unused.
 TABS = [
     ("gex", "Strike GEX"),
     ("spread", "Spread Finder"),
-    ("cockpit", "Monday Cockpit"),
-    ("preflight", "Pre-Flight"),
 ]
 
 
@@ -658,15 +657,9 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
   [class*="st-key-sf_risk_tier_"] [data-testid="stButtonGroup"] {{ flex-wrap:wrap !important; }}
   [class*="st-key-sf_risk_tier_"] [data-testid^="stBaseButton-segmented_control"] {{ flex:1 1 45% !important; }}
 
-  /* 4-tab main selector ("Strike GEX / Spread Finder / Monday Cockpit /
-     Pre-Flight") was sized for the old 3-tab row and clipped labels below
-     ~380px. Keep the four on one row but tighten padding + font and let long
-     labels wrap to two lines instead of truncating. */
-  .st-key-tab_seg [data-testid^="stBaseButton-segmented_control"] {{
-    font-size:12px !important; padding:9px 3px !important;
-    white-space:normal !important; line-height:1.15 !important;
-    text-align:center !important; hyphens:auto;
-  }}
+  /* The main tab selector's phone squeeze (12px font, wrapped labels) is
+     gone with the 4-tab row it was written for — two short labels fit the
+     default sizing at any width the app supports. */
 
   /* c. tighten page chrome + honour safe-area insets (notch / home indicator) */
   [data-testid="stAppViewBlockContainer"], .block-container {{

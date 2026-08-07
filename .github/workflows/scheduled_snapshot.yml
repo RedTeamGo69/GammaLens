@@ -69,10 +69,6 @@ jobs:
           TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          # Public.com fill-history sync (Pre-Flight behavioral gate). Only
-          # the SPX matrix entry uses these; absent secrets = sync skipped.
-          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
-          PUBLIC_ACCOUNT_ID: ${{ secrets.PUBLIC_ACCOUNT_ID }}
           TICKER: ${{ matrix.ticker }}
           FORCE_WEEKLY_SETUP: ${{ inputs.force_weekly_setup || 'false' }}
         run: python scheduled_snapshot.py

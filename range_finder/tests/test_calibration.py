@@ -42,6 +42,7 @@ def _make_conn() -> sqlite3.Connection:
             effective_range_pct REAL, buffer_pct REAL, event_count INTEGER,
             actual_high REAL, actual_low REAL, actual_range_pct REAL,
             outcome TEXT, call_breached INTEGER, put_breached INTEGER,
+            wing_width_used INTEGER, pnl_pts REAL,
             PRIMARY KEY (week_start, ticker)
         )
     """)
@@ -143,6 +144,73 @@ def test_coverage_by_model_pools_unknown():
     by_name = {r["model_name"]: r for _, r in out.iterrows()}
     assert by_name["M3_extended"]["one_sided"] == pytest.approx(0.5)
     assert by_name["(unknown)"]["one_sided"] == pytest.approx(1.0)
+
+
+# ── expectancy ─────────────────────────────────────────────────────────────────
+
+def _expectancy_frame(breaches, widths=None):
+    """rows of (call_breached, put_breached), optionally with wing widths.
+
+    Distinct from the _touch_frame helper further down: that one is the
+    minimal strike-touch fixture, this one carries the width column
+    expectancy needs.
+    """
+    n = len(breaches)
+    df = pd.DataFrame({
+        "week_start": pd.date_range("2026-01-05", periods=n, freq="7D"),
+        "actual_range_pct": [0.015] * n,
+        "upper_pct": [0.02] * n,
+        "lower_pct": [0.005] * n,
+        "effective_range_pct": [0.023] * n,
+        "call_breached": [b[0] for b in breaches],
+        "put_breached": [b[1] for b in breaches],
+    })
+    if widths is not None:
+        df["wing_width_used"] = widths
+    return df
+
+
+def test_breakeven_credit_ratio_equals_the_loss_rate():
+    # 3 of 10 weeks touch a strike -> E = c - p*w is zero at c/w = 0.30.
+    breaches = [(1, 0), (0, 1), (1, 1)] + [(0, 0)] * 7
+    out = cal.expectancy_summary(_expectancy_frame(breaches))
+
+    assert out["n"] == 10
+    assert out["loss_rate"] == pytest.approx(0.30)
+    assert out["breakeven_credit_ratio"] == pytest.approx(0.30)
+
+
+def test_expectancy_is_credit_ratio_minus_loss_rate():
+    breaches = [(1, 0), (0, 1)] + [(0, 0)] * 8      # 20% loss rate
+    out = cal.expectancy_summary(_expectancy_frame(breaches, widths=[50] * 10),
+                                 credit_ratio=0.25)
+
+    assert out["expectancy_width_units"] == pytest.approx(0.05)
+    assert out["mean_width"] == pytest.approx(50.0)
+    assert out["expectancy_pts"] == pytest.approx(2.5)
+
+
+def test_expectancy_negative_when_credit_under_breakeven():
+    breaches = [(1, 0)] * 4 + [(0, 0)] * 6          # 40% loss rate
+    out = cal.expectancy_summary(_expectancy_frame(breaches, widths=[50] * 10),
+                                 credit_ratio=0.20)
+
+    assert out["expectancy_width_units"] < 0
+
+
+def test_expectancy_without_widths_still_gives_breakeven():
+    # wing_width_used is absent on legacy rows; the ratio needs no width.
+    breaches = [(1, 0)] + [(0, 0)] * 4
+    out = cal.expectancy_summary(_expectancy_frame(breaches))
+
+    assert out["breakeven_credit_ratio"] == pytest.approx(0.20)
+    assert out["mean_width"] != out["mean_width"]    # NaN
+
+
+def test_expectancy_on_empty_frame_refuses():
+    out = cal.expectancy_summary(pd.DataFrame())
+    assert out["n"] == 0
+    assert not out["sufficient"]
 
 
 # ── DB loaders ─────────────────────────────────────────────────────────────────

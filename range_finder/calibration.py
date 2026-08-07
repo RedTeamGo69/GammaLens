@@ -61,7 +61,8 @@ def load_completed_forecasts(conn, ticker: str = "SPX") -> pd.DataFrame:
                point_pct, lower_pct, upper_pct, effective_range_pct,
                buffer_pct, event_count,
                actual_high, actual_low, actual_range_pct, outcome,
-               call_breached, put_breached
+               call_breached, put_breached,
+               wing_width_used, pnl_pts
         FROM spread_log
         WHERE ticker = ?
           AND upper_pct IS NOT NULL
@@ -197,6 +198,76 @@ def buffer_breach_rate(df: pd.DataFrame) -> dict:
     }
 
 
+def expectancy_summary(df: pd.DataFrame,
+                       credit_ratio: "float | None" = None) -> dict:
+    """Turn the loss rate into the P&L constraint it implies.
+
+    A coverage or survival number is not an edge. With credit c, width w and
+    loss probability p, treating a loss as the full width (the conservative
+    convention update_expiration_outcome already stores):
+
+        E = (1-p)*c - p*(w - c) = c - p*w
+
+    so expectancy is zero at c/w = p. The BREAK-EVEN CREDIT RATIO IS THE LOSS
+    RATE — which is what makes an otherwise reassuring "70% of weeks survive"
+    readable: it demands a 30% credit/width ratio just to break even.
+
+    Two limitations, both structural rather than fixable here:
+
+    * Wins carry no stored P&L. spread_log has pnl_pts, but
+      update_expiration_outcome writes NULL on full_profit because the actual
+      credit received is not recorded anywhere (spread_persistence.py). So
+      realized expectancy cannot be computed from this table — only the
+      break-even ratio, which needs no credit data, and a what-if under a
+      caller-supplied `credit_ratio`.
+    * The loss rate here is TOUCH-based, from the breach flags. XSP weeklys
+      are European and cash-settled, so a week can touch a short strike
+      intraweek and still settle outside it — a full profit that this counts
+      as a loss. spread_log stores actual_high/actual_low but no settlement
+      close, so the terminal rate is not recoverable from it;
+      target_form_experiment.py computes it from weekly_spx instead. Read
+      this number as an upper bound on the true loss rate.
+
+    Returns loss rate, break-even credit ratio, mean width, and (when
+    `credit_ratio` is given) expectancy in width-units and in points.
+    """
+    touch = strike_touch_summary(df)
+    n = touch["n"]
+    if n == 0:
+        return {"n": 0, "loss_rate": float("nan"),
+                "breakeven_credit_ratio": float("nan"),
+                "mean_width": float("nan"), "credit_ratio": credit_ratio,
+                "expectancy_width_units": float("nan"),
+                "expectancy_pts": float("nan"), "sufficient": False}
+
+    loss_rate = touch["any_touch"]
+
+    widths = (df["wing_width_used"].dropna()
+              if "wing_width_used" in df.columns else pd.Series(dtype=float))
+    mean_width = float(widths.mean()) if len(widths) else float("nan")
+
+    out = {
+        "n": n,
+        "loss_rate": loss_rate,
+        "loss_rate_ci": touch["any_touch_ci"],
+        "breakeven_credit_ratio": loss_rate,   # E = 0 at c/w = p
+        "mean_width": mean_width,
+        "credit_ratio": credit_ratio,
+        "sufficient": n >= MIN_SAMPLE,
+    }
+
+    if credit_ratio is not None:
+        per_width = float(credit_ratio) - loss_rate
+        out["expectancy_width_units"] = per_width
+        out["expectancy_pts"] = (per_width * mean_width
+                                 if mean_width == mean_width else float("nan"))
+    else:
+        out["expectancy_width_units"] = float("nan")
+        out["expectancy_pts"] = float("nan")
+
+    return out
+
+
 def rolling_coverage(df: pd.DataFrame, window: int = 26,
                      date_col: str = "week_start") -> pd.DataFrame:
     """Rolling one-sided coverage — drift detection.
@@ -315,6 +386,20 @@ def main() -> None:
         print(f"    buffer breach rate  : {_fmt_pct(buf['breach_rate'])} "
               f"(CI {_fmt_pct(lo)}-{_fmt_pct(hi)}) - realized range beyond "
               "PI-upper + buffer")
+
+    exp = expectancy_summary(df_w)
+    if exp["n"]:
+        from range_finder.spread_levels import MIN_CREDIT_RATIO
+        need = exp["breakeven_credit_ratio"]
+        print(f"\n    loss rate (touch)   : {_fmt_pct(exp['loss_rate'])} "
+              f"(n={exp['n']})")
+        print(f"    breakeven credit    : {_fmt_pct(need)} of width - below "
+              "this the placement loses money however good its coverage looks")
+        print(f"    finder credit floor : {_fmt_pct(MIN_CREDIT_RATIO)}"
+              + ("  [!] floor is BELOW breakeven at this loss rate"
+                 if need == need and MIN_CREDIT_RATIO < need else ""))
+        print("    (touch-based, so an upper bound on true loss rate - XSP "
+              "settles European; see target_form_experiment.py)")
 
     by_model = coverage_by_model(df_w)
     if not by_model.empty:

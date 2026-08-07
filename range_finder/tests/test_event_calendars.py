@@ -15,7 +15,6 @@ from datetime import date
 
 from range_finder.event_calendars import (
     CPI_DATES, FOMC_DATES, NFP_DATES, PPI_DATES, PCE_DATES,
-    EVENT_TIERS, RELEASE_TIMES_ET, events_for_week,
 )
 
 
@@ -109,50 +108,10 @@ def test_tier2_lists_sorted_unique_no_weekends():
         assert not weekend, f"{name} on weekends: {weekend}"
 
 
-def test_event_tier_and_time_maps_cover_all_names():
-    assert set(EVENT_TIERS) == {"fomc", "cpi", "nfp", "opex", "ppi", "pce"}
-    assert set(RELEASE_TIMES_ET) == set(EVENT_TIERS)
-    # Tier 1 (can gate a weekly trade) is exactly FOMC/CPI/NFP
-    assert [n for n, t in sorted(EVENT_TIERS.items()) if t == 1] == ["cpi", "fomc", "nfp"]
-    assert RELEASE_TIMES_ET["fomc"] == "14:00"
-    assert RELEASE_TIMES_ET["opex"] is None
-
-
-# ── events_for_week ────────────────────────────────────────────────────────────
-
-def test_events_for_week_fomc_week():
-    evs = events_for_week("2026-07-27")
-    fomc = [e for e in evs if e.name == "fomc"]
-    assert len(fomc) == 1
-    assert fomc[0].date == "2026-07-29"
-    assert fomc[0].tier == 1
-    assert fomc[0].release_time_et == "14:00"
-    # PCE prints the Thursday of the same week — tier 2, never gates
-    assert any(e.name == "pce" and e.date == "2026-07-30" and e.tier == 2
-               for e in evs)
-
-
-def test_events_for_week_multi_event_opex_week():
-    # Week of 2026-07-13: CPI Tue 7/14 (tier 1), PPI Wed 7/15 (tier 2),
-    # OpEx Fri 7/17 (tier 2, computed 3rd Friday, all-session)
-    evs = events_for_week("2026-07-13")
-    names = {e.name for e in evs}
-    assert {"cpi", "ppi", "opex"} <= names
-    assert [e.date for e in evs] == sorted(e.date for e in evs)
-    opex = next(e for e in evs if e.name == "opex")
-    assert opex.date == "2026-07-17"
-    assert opex.tier == 2
-    assert opex.release_time_et is None
-
-
-def test_events_for_week_normalizes_any_day_to_monday():
-    assert events_for_week("2026-07-29") == events_for_week("2026-07-27")
-
-
-def test_events_for_week_empty_week():
-    # Week of 2016-08-22: CPI was 8/16 and OpEx 8/19 (both the prior week),
-    # NFP was 8/5, no August-2016 FOMC, and tier-2 lists don't reach 2016.
-    assert events_for_week("2016-08-22") == []
+# The EVENT_TIERS / RELEASE_TIMES_ET and events_for_week tests went with the
+# per-event read model those covered (removed 2026-08 alongside the Monday
+# Cockpit and Pre-Flight event strips). The tier-2 lists above are still
+# pinned because calendar_staleness_warnings reads them.
 
 
 # ── third-Friday holiday roll (audit E59) ────────────────────────────────────

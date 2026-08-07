@@ -639,167 +639,19 @@ def _init_all_tables_body(conn) -> None:
         )
     """)
 
-    # --- cockpit_verdicts (Monday Cockpit TRADE/SKIP audit log) ---
-    # Every Cockpit render UPSERTs one row keyed by a hash of its canonical
-    # DECISION state (verdict + reason codes + strikes + rounded VRP/credit
-    # ratios — not volatile spot/quote noise): identical steady-state reruns
-    # collapse into one row, any real drift (new snapshot cycle, slider
-    # change) appends a fresh one. This is the dataset for auditing the
-    # weekly VRP gate the same way the 0DTE banner was audited in 2026-07 —
-    # the gate ships hard-SKIP on the explicit condition that it can be
-    # re-scored against realized outcomes later.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cockpit_verdicts (
-            ticker              TEXT NOT NULL DEFAULT 'XSP',
-            week_start          TEXT NOT NULL,
-            snapshot_hash       TEXT NOT NULL,
-            logged_at           TEXT,
-            verdict             TEXT,
-            reasons             TEXT,
-            model_name          TEXT,
-            anchor              REAL,
-            spot                REAL,
-            friday_exp          TEXT,
-            forecast_point_pct  REAL,
-            forecast_upper_pct  REAL,
-            straddle_mid        REAL,
-            implied_range_pct   REAL,
-            vrp_ratio           REAL,
-            tripwire_ok         INTEGER,
-            call_wall           REAL,
-            put_wall            REAL,
-            zero_gamma          REAL,
-            events_json         TEXT,
-            k_used              REAL,
-            wing_width          REAL,
-            call_short          REAL,
-            call_long           REAL,
-            put_short           REAL,
-            put_long            REAL,
-            credit              REAL,
-            credit_ratio        REAL,
-            max_loss            REAL,
-            pop                 REAL,
-            sweet_spot          REAL,
-            entry_mode          TEXT,
-            entry_lean          TEXT,
-            proposal_json       TEXT,
-            config_json         TEXT,
-            updated_at          TEXT,
-            PRIMARY KEY (ticker, week_start, snapshot_hash)
-        )
-    """)
-
-    # Migration: leg-in entry-guidance columns (sweet spot / mode / lean,
-    # added 2026-07-11) for deploys whose cockpit_verdicts pre-dates them.
-    for col, ctype in [("sweet_spot", "REAL"), ("entry_mode", "TEXT"),
-                       ("entry_lean", "TEXT")]:
-        cur.execute(
-            f"ALTER TABLE cockpit_verdicts ADD COLUMN IF NOT EXISTS {col} {ctype}")
-
-    # --- preflight_log (Pre-Flight gate evaluations) ---
-    # Append-per-click: the Pre-Flight tab logs on the explicit "Run
-    # Pre-Flight" action, not on every rerun, so volume stays proportional
-    # to actual usage. Lets the tool's own advice be audited later
-    # (optionally joined against whether the trade was actually taken).
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS preflight_log (
-            checked_at          TEXT NOT NULL,
-            input_hash          TEXT NOT NULL,
-            ticker              TEXT,
-            category            TEXT,
-            expiration          TEXT,
-            dte                 INTEGER,
-            in_weekly_window    INTEGER,
-            week_start          TEXT,
-            verdict             TEXT,
-            trade_json          TEXT,
-            behavioral_json     TEXT,
-            model_json          TEXT,
-            structure_json      TEXT,
-            public_json         TEXT,
-            reasons             TEXT,
-            updated_at          TEXT,
-            PRIMARY KEY (checked_at, input_hash)
-        )
-    """)
-
-    # --- strategy_history (grouped Public.com fills — behavioral gate data) ---
-    # One row per inferred strategy (see public_api/grouping.py). The
-    # deterministic strategy_id (hash of underlying + opening txn ids) makes
-    # full-repull syncs idempotent; grouping_version lets a future algorithm
-    # supersede rows deterministically.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS strategy_history (
-            strategy_id         TEXT NOT NULL,
-            account_id          TEXT NOT NULL,
-            underlying          TEXT,
-            category            TEXT,
-            status              TEXT,
-            close_reason        TEXT,
-            opened_at           TEXT,
-            closed_at           TEXT,
-            expiration          TEXT,
-            dte_at_open         INTEGER,
-            n_legs              INTEGER,
-            legs_json           TEXT,
-            realized_pnl        REAL,
-            fees                REAL,
-            opened_via          TEXT DEFAULT 'order',
-            rolled_from         TEXT,
-            grouping_version    INTEGER,
-            updated_at          TEXT,
-            PRIMARY KEY (strategy_id)
-        )
-    """)
-
-    # --- trade_category_stats (derived cache for the Pre-Flight behavioral
-    # gate) --- recomputed wholesale on every sync from closed strategies.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS trade_category_stats (
-            account_id          TEXT NOT NULL,
-            category            TEXT NOT NULL,
-            n_trades            INTEGER,
-            n_wins              INTEGER,
-            win_rate            REAL,
-            total_pnl           REAL,
-            avg_pnl             REAL,
-            avg_win             REAL,
-            avg_loss            REAL,
-            worst_loss          REAL,
-            best_trade          REAL,
-            avg_hold_days       REAL,
-            first_trade_date    TEXT,
-            last_trade_date     TEXT,
-            last_computed_at    TEXT,
-            updated_at          TEXT,
-            PRIMARY KEY (account_id, category)
-        )
-    """)
-
-    # --- fill_review_queue (ambiguous fills — flagged, never force-grouped) ---
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS fill_review_queue (
-            txn_id              TEXT NOT NULL,
-            account_id          TEXT,
-            symbol              TEXT,
-            underlying          TEXT,
-            ts                  TEXT,
-            reason              TEXT,
-            context             TEXT,
-            resolved            INTEGER DEFAULT 0,
-            resolved_as         TEXT,
-            updated_at          TEXT,
-            PRIMARY KEY (txn_id)
-        )
-    """)
-
     # The 0DTE / daily-cadence tables (daily_spx, event_flags_daily,
     # daily_model_features, forecast_log_daily) are no longer created here:
     # the 0DTE finder was deliberately removed (2026-07) after a
     # 1,036-session audit showed its VRP verdict had no predictive edge.
-    # Existing deployments keep their historical rows — drop the tables
-    # manually if the storage matters.
+    #
+    # Same for the Monday Cockpit / Pre-Flight tables (cockpit_verdicts,
+    # preflight_log) and the Public.com fill-history tables that fed
+    # Pre-Flight's behavioral gate (strategy_history, trade_category_stats,
+    # fill_review_queue): both tabs and the whole public_api package were
+    # removed 2026-08 as unused, so nothing reads or writes them.
+    #
+    # Existing deployments keep their historical rows in every case — drop
+    # the tables manually if the storage matters.
 
     conn.commit()
     log.info("All range finder tables initialized (postgres)")

@@ -569,9 +569,9 @@ def forecast_next_week(
     # equal-probability center of the range distribution, and the PI bounds
     # (which placement actually rides) are quantiles, which back-transform
     # exactly under any monotone map. Do NOT add a smearing correction to
-    # point_pct without re-running the VRP-gate calibration — the Cockpit's
-    # implied/forecast ratio tripwire was tuned against this median
-    # convention.
+    # point_pct without re-running calibration — every implied-vs-forecast
+    # ratio in the repo (feature_builder.vix_implied_range, model_vs_vix,
+    # the calibration audit) was measured against this median convention.
     point_pct = math.exp(log_point)
     lower_pct = max(0.0, math.exp(log_lower))
     upper_pct = math.exp(log_upper)

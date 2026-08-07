@@ -111,10 +111,11 @@ def find_weekly_expiration(avail_exps: list[str], ref_date: date) -> str | None:
     expiry) the correct weekly contract is Thursday's, the actual last
     trading day. Rolling to next Monday instead priced ~sqrt(5/4) ≈ 12%
     extra weekend/session premium into the straddle, and that inflated EM
-    feeds the Monday weekly snapshot → the Cockpit's VRP gate → a phantom
-    "TRADE" verdict on exactly the weeks with no edge. Returning None when
-    the week has no remaining listed expiry is honest: the weekly EM is
-    genuinely unavailable, and the gate reads "na" instead of lying.
+    then feeds the Monday weekly snapshot — every downstream surface reading
+    it (Key Levels, the TradingView export) would show a too-wide expected
+    move on exactly the weeks the contract does not exist. Returning None
+    when the week has no remaining listed expiry is honest: the weekly EM is
+    genuinely unavailable, and callers render "na" instead of a lie.
     """
     days_to_fri = (4 - ref_date.weekday()) % 7
     friday_date = ref_date + timedelta(days=days_to_fri)

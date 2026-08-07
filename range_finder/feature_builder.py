@@ -425,8 +425,8 @@ def build_features(conn, exclude_covid: bool = True,
     # (~0.3% after two minutes vs ~2% for a typical full week) is not "fresh
     # information", it is a structurally biased-low observation. Fed to the
     # scaffold it poisons har_d1 (100% of the value), har_w (1/5) and har_m
-    # (1/20), and the too-narrow W+1 forecast is then served all week to the
-    # Fri-Sun Cockpit plan. The same bias applies to spx_return (a partial
+    # (1/20), and that too-narrow W+1 forecast is then served all week to the
+    # Spread Finder. The same bias applies to spx_return (a partial
     # |return| is systematically smaller). LEVEL observations (vix_close =
     # the latest VIX print) are genuinely fresh and stay live — only path
     # statistics get proxied by the prior COMPLETED week's values.

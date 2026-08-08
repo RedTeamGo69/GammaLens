@@ -58,13 +58,20 @@ Live tables: `weekly_spx`, `weekly_underlying`, `daily_spx`, `model_features`,
 The `*_daily` tables and `daily_spx` are orphaned history from the 0DTE removal — nothing
 reads or writes them, and `init_all_tables` no longer creates them.
 
-**Dropping a table is not enough while a stale deployment is live.** `init_all_tables` uses
-`CREATE TABLE IF NOT EXISTS`, so any long-running process still on pre-removal code will
-recreate the shells (empty — no data comes back) the next time it boots. This happened on
-2026-08-07: the five Cockpit/Pre-Flight tables were dropped, then reappeared with 0 rows
-while HEAD contained zero references to them. Confirmed by OID ordering — they were the
-newest objects in the DB by a wide margin, created contiguously in one pass. After dropping
-tables, reboot the Streamlit Cloud app so it picks up the new commit, then re-verify.
+**Dropping a table is not enough while the Streamlit Cloud container is on old code.**
+`init_all_tables` uses `CREATE TABLE IF NOT EXISTS`, so a stale container recreates the
+shells (empty — no data returns) on every new session. Proven on 2026-08-07: the five
+Cockpit/Pre-Flight tables were dropped and verified gone, then reappeared with fresh OIDs
+the moment the deployed app was opened, while HEAD contained zero references to them.
+
+**Streamlit Cloud did not auto-redeploy on push** — the container kept serving pre-removal
+code for hours after the commit landed, so the live app still showed the two deleted tabs.
+A "session reset" restarts the script but not the container, which is why the old code stayed
+resident. Only **⋮ → Reboot app** on share.streamlit.io picks up a new commit.
+
+So the order matters: reboot first, confirm the UI reflects the new code, *then* drop tables
+and re-verify. Dropping before the reboot just gets undone. OID ordering (`pg_class.oid`,
+highest = newest) is the cheap way to tell a recreated table from an original.
 
 ## Cron
 

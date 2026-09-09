@@ -42,7 +42,8 @@ def methodology():
     paths = ["har_model.py", "feature_builder.py", "spread_levels.py",
              "gex_policy.py", "recommendations.py", "trading_week.py",
              "conformal.py", "event_calendars.py", "forward_test/capture.py",
-             "forward_test/provider.py", "forward_test/config.py"]
+             "forward_test/provider.py", "forward_test/config.py",
+             "forward_test/history_policy.py", "forward_test/history_resolutions.json"]
     hashes = {p: sha256((root / "range_finder" / p).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
               for p in paths}
     for p in ("phase1/ticker_config.py", "phase1/quote_filters.py"):
@@ -50,5 +51,6 @@ def methodology():
     config = {"protocol": 1, "universe": UNIVERSE, "models": MODELS,
               "capture_minutes_after_open": [15, 45], "gex_enabled": False,
               "conformal_enabled": False, "source_hashes": hashes,
+              "history_policy": "tradier-reviewed-whole-bars-v1",
               "versions": {p: version(p) for p in ("numpy", "pandas", "statsmodels", "pandas_market_calendars")}}
     return digest(config), config

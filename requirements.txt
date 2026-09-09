@@ -7,6 +7,7 @@ scipy>=1.11.0
 requests>=2.31.0
 pandas_market_calendars>=4.3.0
 yfinance>=0.2.36
+curl_cffi>=0.7.0
 psycopg2-binary>=2.9.9
 openpyxl>=3.1.0
 # Range finder dependencies

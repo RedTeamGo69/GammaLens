@@ -5,6 +5,7 @@ It does not change the interactive app's existing fallback behavior.
 """
 from datetime import date, datetime, timedelta
 from functools import cached_property
+from hashlib import sha256
 import math
 
 import numpy as np
@@ -19,6 +20,7 @@ from range_finder.event_calendars import event_flag_rows, FOMC_DATES, CPI_DATES,
 from range_finder.feature_builder import build_features
 from range_finder.trading_week import NY, UTC, listed_week_expiration, trading_week
 from .config import UNIVERSE
+from .history_policy import fetch_yahoo_history, validated_history
 
 
 def finite_price(value):
@@ -68,6 +70,7 @@ class TradierProvider:
             total=2, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=("GET",), respect_retry_after_header=False)))
         self.source_times = {}
+        self.history_receipts = []
 
     def close(self):
         self.http.close()
@@ -75,6 +78,11 @@ class TradierProvider:
     def _get(self, endpoint, **params):
         response = self.http.get(f"{self.client.base_url}/markets/{endpoint}", params=params, timeout=20)
         response.raise_for_status()
+        if endpoint == 'history':
+            self.history_receipts.append({'source':'Tradier Brokerage history',
+                'endpoint':endpoint, 'params':params, 'retrieved_at':self.clock().isoformat(),
+                'session':'regular', 'adjustment':'verified current split basis, no dividend adjustment after reviewed selection',
+                'raw_sha256':sha256(response.content).hexdigest(), 'raw_response':response.text})
         return response.json()
 
     def history(self, ticker, start, end, interval="daily"):
@@ -141,6 +149,38 @@ class TradierProvider:
         ts["vix_ts_slope"] = ts["vix3m_close"] - ts["vix9d_close"]
         return series["VIX"], ts, macro, errors
 
+    def training_history(self, ticker, week, *, review_end=None):
+        """Read-only full-window source gate, also usable outside admission.
+
+        Legacy storage determines the older side-placement horizon only. Fresh
+        validated weekly bars cover that same horizon; legacy prices and derived
+        columns are never overwritten or silently spliced into the new study.
+        review_end may audit the last completed week during a midweek release;
+        capture never supplies it and always requires the immediately prior week.
+        """
+        if ticker not in UNIVERSE:
+            raise ValueError('Ticker outside study universe')
+        daily_start = week.monday - timedelta(days=int(6 * 365.25) + 30)
+        start = daily_start - timedelta(days=daily_start.weekday())
+        prior = trading_week(week.monday - timedelta(days=7)).sessions[-1].day
+        end = prior if review_end is None else review_end
+        if end > prior:
+            raise ValueError('UNAVAILABLE_HISTORY: look-ahead beyond prior completed week')
+        older = self.history_loader(ticker) if self.history_loader else pd.DataFrame()
+        if not older.empty:
+            start = min(start, older.index.min().date())
+        self.history_receipts = []
+        weekly_rows = self.history(ticker, start, end, 'weekly')
+        daily_rows = self.history(ticker, daily_start, end)
+        alternative, receipt = fetch_yahoo_history(ticker, start, end, self.clock)
+        weekly, daily, evidence = validated_history(ticker, start, end, daily_start,
+            weekly_rows, daily_rows, alternative, as_of=self.clock())
+        evidence.update(primary_receipts=list(self.history_receipts), alternative_receipt=receipt,
+                        required_prior_session=str(prior), audit_only=review_end is not None,
+                        legacy_context={'rows':len(older), 'start':str(start),
+                                        'usage':'horizon only; fresh validated prices; no legacy writes'})
+        return weekly, daily, evidence
+
     def prepare(self, ticker, week):
         if ticker not in UNIVERSE:
             raise ValueError("Ticker outside study universe")
@@ -150,40 +190,8 @@ class TradierProvider:
         for name, dates in (("FOMC", FOMC_DATES), ("CPI", CPI_DATES), ("NFP", NFP_DATES)):
             if not dates or max(dates) < str(week.sessions[-1].day):
                 raise ValueError(f"{name} event calendar expired; extend the existing calendar")
-        start = week.monday - timedelta(days=int(6 * 365.25) + 30)
         previous = trading_week(week.monday - timedelta(days=7)).sessions[-1].day
-        weekly_rows = self.history(ticker, start, previous, "weekly")
-        daily_rows = self.history(ticker, start, previous)
-        if not weekly_rows or not daily_rows:
-            raise ValueError(f"Missing {ticker} training history")
-        for rows in (weekly_rows, daily_rows):
-            if any(not valid_ohlc(r) for r in rows):
-                raise ValueError(f"Invalid {ticker} history OHLC")
-        def frame(rows):
-            f = pd.DataFrame(rows).set_index("date")
-            f.index = pd.to_datetime(f.index)
-            return f.sort_index().astype(float)
-        weekly, daily = frame(weekly_rows), frame(daily_rows)
-        if weekly.index.has_duplicates or daily.index.has_duplicates:
-            raise ValueError("Duplicate historical session/week labels")
-        weekly = weekly[weekly.index < pd.Timestamp(week.monday)]
-        daily = daily[daily.index <= pd.Timestamp(previous)]
-        from range_finder.bar_sources import _validate_bars
-        ok, reason = _validate_bars(weekly, "1wk", start=pd.Timestamp(start), end=pd.Timestamp(previous))
-        if not ok:
-            raise ValueError(f"Invalid weekly cadence: {reason}")
-        ok, reason = _validate_bars(daily, "1d", start=pd.Timestamp(start), end=pd.Timestamp(previous))
-        if not ok:
-            raise ValueError(f"Invalid daily history: {reason}")
-        if daily.empty or daily.index.max().date() != previous or weekly.index.max().date() != week.monday - timedelta(days=7):
-            raise ValueError("Stale history: prior completed trading week missing")
-        # A single missing weekday silently changes the 5/20-session HV
-        # windows. Validate the daily calendar, not just the largest gap.
-        import pandas_market_calendars as mcal
-        expected = mcal.get_calendar("NYSE").valid_days(start_date=daily.index.min().date(), end_date=previous)
-        missing = expected.tz_localize(None).difference(daily.index)
-        if len(missing):
-            raise ValueError(f"Daily history missing {len(missing)} exchange session(s); first {missing[0].date()}")
+        weekly, daily, history_evidence = self.training_history(ticker, week)
         vix, ts, macro, errors = self.common
         if pd.Timestamp(week.monday - timedelta(days=7)) not in vix.index:
             raise ValueError("Stale VIX history: previous week missing")
@@ -194,14 +202,6 @@ class TradierProvider:
         base["range_pct"] = (base.spx_high - base.spx_low) / base.spx_open
         base["log_range"] = np.log(base.range_pct.where(base.range_pct > 0))
         base["spx_return"] = (base.spx_close - base.spx_open) / base.spx_open
-        if self.history_loader is not None:
-            older = self.history_loader(ticker)
-            self.source_times[f"{ticker}_persisted_history"] = {
-                "source": "existing Gamma Lens weekly history (read only)",
-                "retrieved_at": self.clock().isoformat(), "rows": len(older)}
-            if not older.empty:
-                older = older.loc[older.index < base.index.min()]
-                base = pd.concat([older.reindex(columns=base.columns), base]).sort_index()
         events = pd.DataFrame.from_dict(event_flag_rows(now), orient="index")
         events.index = pd.to_datetime(events.index)
         raw_inputs = {"weekly": base, "daily": daily[["close"]].rename(columns={"close": "spx_close"}),
@@ -228,7 +228,8 @@ class TradierProvider:
                 "anchor_source": "Tradier current-session daily open in quote", "anchor_at": week.sessions[0].open.isoformat(),
                 "expiration": expiry, "chain": chain, "source_times": dict(self.source_times),
                 "data_delay_seconds": self.delay, "source_errors": errors,
-                "raw_inputs": {k: frame_records(f) for k, f in raw_inputs.items()},
+                "raw_inputs": {**{k: frame_records(f) for k, f in raw_inputs.items()},
+                               "history_evidence":history_evidence},
                 "prepared_at": self.clock().isoformat()}
 
     def observe(self, ticker, session, first_available=None):

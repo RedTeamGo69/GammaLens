@@ -20,6 +20,7 @@ import pandas_market_calendars as mcal
 import psycopg2
 from range_finder.forward_test.config import UNIVERSE, utcnow
 from range_finder.forward_test.provider import TradierProvider, epoch_time, valid_ohlc
+from range_finder.forward_test.store import Store
 from range_finder.forward_test.capture import contract_chain
 from range_finder.trading_week import NY, trading_week, listed_week_expiration
 from range_finder.cboe_data import fetch_cboe_index_history
@@ -30,17 +31,24 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--secrets-file')
     parser.add_argument('--output',required=True)
+    parser.add_argument('--expected-database-fingerprint')
     args=parser.parse_args()
     cfg=tomllib.loads(Path(args.secrets_file).read_text()) if args.secrets_file else os.environ
     now=utcnow()
     week=trading_week(now.astimezone(NY).date())
     if now>=week.capture_end:week=trading_week(week.monday+timedelta(days=7))
     prior=trading_week(week.monday-timedelta(days=7))
+    required_prior=prior
+    while prior.evaluation_close > now:
+        prior=trading_week(prior.monday-timedelta(days=7))
     end=prior.sessions[-1].day
     start=week.monday-timedelta(days=int(6*365.25)+30)
     report={'checked_at':now.isoformat(),'mode':'read_only_no_forecasts',
             'target_week':str(week.monday),'capture_start':week.capture_start.isoformat(),
             'capture_end_exclusive':week.capture_end.isoformat(),'evaluation_close':week.evaluation_close.isoformat(),
+            'history_review_through':str(end),
+            'required_history_through_at_capture':str(required_prior.sessions[-1].day),
+            'future_history_pending':required_prior.evaluation_close > now,
             'sources':{},'tickers':{},'blockers':[],
             'session_dependent':['Opening-session quote freshness and open anchors',
                                  'Observed transport/feed latency during a live session',
@@ -54,6 +62,8 @@ def main():
     parsed=urlparse(url or '')
     report['database']={'host':parsed.hostname,'database':parsed.path.lstrip('/'),
                         'target_fingerprint':hashlib.sha256(f'{parsed.hostname}/{parsed.path}'.encode()).hexdigest()[:16]}
+    if args.expected_database_fingerprint and report['database']['target_fingerprint'] != args.expected_database_fingerprint:
+        raise SystemExit('Configured database does not match the reviewed production target fingerprint')
     try:
         conn=psycopg2.connect(url,connect_timeout=15)
         conn.set_session(readonly=True)
@@ -76,7 +86,9 @@ def main():
         conn.close()
     except Exception as exc:
         report['blockers'].append('Database read-only identity check: '+type(exc).__name__)
-    provider=TradierProvider(cfg.get('TRADIER_TOKEN'),clock=utcnow)
+    history_store=Store.postgres(url)
+    history_store.conn.set_session(readonly=True)
+    provider=TradierProvider(cfg.get('TRADIER_TOKEN'),clock=utcnow,history_loader=history_store.legacy_weekly)
     try:
         report['tradier_endpoint']=provider.client.base_url
         report['market_clock']=provider._get('clock').get('clock')
@@ -101,29 +113,22 @@ def main():
         for ticker in UNIVERSE:
             item=report['tickers'][ticker]
             try:
-                for interval in ['weekly','daily']:
-                    rows=provider.history(ticker,start,end,interval)
-                    frame=pd.DataFrame(rows).set_index('date')
-                    frame.index=pd.to_datetime(frame.index)
-                    frame=frame.sort_index().astype(float)
-                    from range_finder.bar_sources import _validate_bars
-                    ok,reason=_validate_bars(frame,'1wk' if interval=='weekly' else '1d',start=pd.Timestamp(start),end=pd.Timestamp(end))
-                    invalid=[r for r in rows if not valid_ohlc(r)]
-                    if invalid:
-                        ok,reason=False,'Invalid OHLC on '+', '.join(r['date'] for r in invalid)
-                    if interval=='daily':
-                        expected=mcal.get_calendar('NYSE').valid_days(start_date=frame.index.min().date(),end_date=end).tz_localize(None)
-                        missing=expected.difference(frame.index)
-                        if len(missing):ok,reason=False,f'{len(missing)} missing exchange sessions'
-                    item[interval+'_history']={'rows':len(rows),'first':str(frame.index.min().date()),
-                        'last':str(frame.index.max().date()),'valid':bool(ok),'reason':reason,
-                        'invalid_rows':invalid}
-                    if invalid:
-                        # Narrow requests distinguish a bulk-query problem
-                        # from repeatable upstream values. Never repair prices.
-                        item[interval+'_history']['narrow_recheck']={r['date']:provider.history(
-                            ticker,r['date'],r['date'],interval) for r in invalid[:10]}
-                    if not ok:report['blockers'].append(f'{ticker} {interval} history: {reason}')
+                weekly,daily,evidence=provider.training_history(ticker,week,review_end=end)
+                evidence_path=Path(args.output).with_name(Path(args.output).stem+'-'+ticker+'-history.json')
+                evidence_path.write_text(json.dumps(evidence,indent=2,allow_nan=False),encoding='utf-8')
+                for interval,frame in [('weekly',weekly),('daily',daily)]:
+                    item[interval+'_history']={'rows':len(frame),'first':str(frame.index.min().date()),
+                        'last':str(frame.index.max().date()),'valid':True,'policy':evidence['policy_version']}
+                item['history_decisions']={
+                    'reviewed':len(evidence['decisions']),
+                    'whole_bar_replacements':sum(d['accepted_source']=='alternative' for d in evidence['decisions']),
+                    'unused_daily_ohl_warnings':len(evidence['unused_daily_ohl_warnings']),
+                    'full_evidence':evidence_path.name,'sha256':hashlib.sha256(evidence_path.read_bytes()).hexdigest()}
+            except Exception as exc:
+                item['history_error']=type(exc).__name__+': '+str(exc).split('?')[0][:180]
+                report['blockers'].append(ticker+' history: '+item['history_error'])
+            # Capabilities remain independently testable when history fails.
+            try:
                 expirations=provider.client.get_expirations(ticker)
                 expiration=listed_week_expiration(expirations,week)
                 if not expiration:raise ValueError('No listed final-session expiry')
@@ -158,6 +163,7 @@ def main():
             except Exception as exc:report['blockers'].append(series+' source: '+type(exc).__name__)
     finally:
         provider.close()
+        history_store.close()
     report['capabilities_pass']=not report['blockers']
     text=json.dumps(report,indent=2,default=str)
     Path(args.output).write_text(text,encoding='utf-8')

@@ -43,6 +43,7 @@ def deployed_revision():
 def render_forward_test(rows=None, runs=None, studies=None):
     st.title("Forward Test")
     st.caption("Frozen weekly predictions for SPX, SPY, AAPL and AMD. Observational results; no trades are submitted.")
+    st.caption("Study history is checked across sources, with reviewed whole-bar corrections. Spread Finder uses its existing history, so displayed recommendations can differ from this study.")
     if rows is None:
         try:
             rows, runs, studies = load_snapshot()

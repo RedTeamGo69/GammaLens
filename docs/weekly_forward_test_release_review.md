@@ -1,5 +1,9 @@
 # Weekly forward tester pre-activation review — 2026-09-04 ET
 
+**Historical review:** the [September 8 source resolution](weekly_forward_test_history_resolution.md)
+records the reviewed source solution and refreshed live prerequisites. The state
+below is the original September 4 review, not the subsequent release status.
+
 **Follow-up:** the [full history-quality review](weekly_forward_test_history_review.md)
 reproduced these defects and found additional internally valid source
 contradictions. Activation remains disabled; no replacement prices were accepted.

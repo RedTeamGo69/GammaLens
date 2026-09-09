@@ -54,13 +54,23 @@ def main():
     target = trading_week(now.astimezone(NY).date())
     if now >= target.capture_end:
         target = trading_week(target.monday+timedelta(days=7))
-    previous = trading_week(target.monday-timedelta(days=7)).sessions[-1].day
+    required_previous = trading_week(target.monday-timedelta(days=7))
+    completed = required_previous
+    # A midweek release review cannot request the coming Friday as though it
+    # were already observed. Record that pending boundary, and audit every
+    # available completed week. This script never creates a forecast.
+    while completed.evaluation_close > now:
+        completed = trading_week(completed.monday-timedelta(days=7))
+    previous = completed.sessions[-1].day
     start = target.monday-timedelta(days=int(6*365.25)+30)
     provider = TradierProvider(cfg['TRADIER_TOKEN'], clock=utcnow)
     store = Store.postgres(cfg['DATABASE_URL'])
     store.conn.set_session(readonly=True)
     yahoo = curl_requests.Session(impersonate='chrome')
     summary = {'mode':'read_only_no_forecasts', 'required_start':str(start),
+               'checked_at':now.isoformat(), 'prospective_week':str(target.monday),
+               'required_final_session_at_capture':str(required_previous.sessions[-1].day),
+               'future_history_pending':required_previous.evaluation_close > now,
                'end':str(previous), 'tickers':{}, 'errors':[]}
     try:
         for ticker in UNIVERSE:

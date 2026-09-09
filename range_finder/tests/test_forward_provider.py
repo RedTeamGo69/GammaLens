@@ -15,14 +15,15 @@ from range_finder.trading_week import trading_week
     ('SPX',{'date':'2026-03-19','open':'NaN','high':'NaN','low':'NaN','close':6606.49,'volume':0}),
     ('SPY',{'date':'2026-06-17','open':751.29,'high':752.15,'low':739.22,'close':739.05648,'volume':85945227}),
 ])
-def test_prepare_rejects_observed_vendor_history_defects(monkeypatch,ticker,bar):
+def test_observations_keep_observed_vendor_defects_invalid(monkeypatch,ticker,bar):
+    from range_finder.forward_test.provider import valid_ohlc
     week=trading_week(date(2026,9,7)); clock=Clock(week.capture_start)
     provider=TradierProvider('fixture',clock=clock)
-    valid={'date':'2026-08-31','open':100.,'high':105.,'low':95.,'close':102.,'volume':0}
-    monkeypatch.setattr(provider,'history',lambda ticker,start,end,interval='daily':[valid] if interval=='weekly' else [bar])
+    monkeypatch.setattr(provider,'history',lambda *a,**k:[bar])
     try:
-        with pytest.raises(ValueError,match='Invalid '+ticker+' history OHLC'):
-            provider.prepare(ticker,week)
+        session=next(s for s in trading_week(date.fromisoformat(bar['date'])).sessions if str(s.day)==bar['date'])
+        observed=provider.observe(ticker,session)
+        assert observed['daily']==bar and not valid_ohlc(observed['daily'])
     finally:provider.close()
 
 
@@ -130,14 +131,17 @@ def test_prepare_uses_completed_primary_history_and_rejects_session_gap(monkeypa
     week=trading_week(date(2026,9,7)); clock=Clock(week.capture_start)
     previous=trading_week(week.monday-timedelta(days=7)).sessions[-1].day
     start=week.monday-timedelta(days=int(6*365.25)+30)
-    days=mcal.get_calendar('NYSE').valid_days(start_date=start,end_date=previous).tz_localize(None)
+    days=mcal.get_calendar('NYSE').valid_days(start_date=start-timedelta(days=start.weekday()),end_date=previous).tz_localize(None)
     close=600+np.sin(np.arange(len(days))*.4)*20
     daily=pd.DataFrame({'open':close-1,'high':close+2,'low':close-2,'close':close,'volume':10000.},index=days)
     weekly=resample_cboe_weekly(daily)
     def records(frame):
         return [{'date':str(d.date()),**r.to_dict()} for d,r in frame.iterrows()]
     provider=TradierProvider('fixture',clock=clock)
-    monkeypatch.setattr(provider,'history',lambda ticker,start,end,interval='daily':records(weekly if interval=='weekly' else daily))
+    monkeypatch.setattr(provider,'history',lambda ticker,start,end,interval='daily':records((weekly if interval=='weekly' else daily).loc[str(start):str(end)]))
+    from range_finder.tests.test_forward_history_policy import yahoo_payload
+    payload=yahoo_payload('SPY',daily)
+    monkeypatch.setattr(module,'fetch_yahoo_history',lambda *a:(payload,{'source':'isolated fixture'}))
     monkeypatch.setattr(module,'fetch_cboe_index_history',lambda index:daily/30)
     monkeypatch.setattr(data_collector,'fetch_fred_macro',lambda **k:pd.DataFrame({'yield_spread':.5,'fed_funds':4.},index=days))
     monkeypatch.setattr(provider,'_get',lambda *a,**k:{'quotes':{'quote':[
@@ -152,6 +156,6 @@ def test_prepare_uses_completed_primary_history_and_rejects_session_gap(monkeypa
     assert all(r['date']<str(week.monday) for r in prepared['raw_inputs']['weekly'])
     # A single missing ordinary weekday must not silently shorten HV windows.
     daily.drop(daily.index[-4],inplace=True)
-    with pytest.raises(ValueError,match='missing 1 exchange session'):
+    with pytest.raises(ValueError,match='primary daily coverage: 1 missing'):
         provider.prepare('SPY',week)
     provider.close()

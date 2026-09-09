@@ -1,6 +1,11 @@
 name: Forward Test Verification
 on:
   workflow_dispatch:
+    inputs:
+      live_prerequisites:
+        description: 'Also check intended production sources and database identity (read only, no forecasts)'
+        type: boolean
+        default: false
   pull_request:
     paths:
       - 'range_finder/**'
@@ -14,6 +19,7 @@ on:
       - 'scripts/check_forward_test_prerequisites.py'
       - 'scripts/diagnose_forward_history.py'
       - 'scripts/analyze_forward_history.py'
+      - 'scripts/build_forward_history_resolutions.py'
       - 'requirements.txt'
       - 'streamlit_app.py'
       - 'forward_test.py'
@@ -46,3 +52,25 @@ jobs:
       - run: python -m pytest -q
         env:
           FORWARD_TEST_TEST_DATABASE_URL: postgresql://fixture:fixture_only@127.0.0.1:5432/gammalens_forward_test
+  live-prerequisites:
+    if: github.event_name == 'workflow_dispatch' && inputs.live_prerequisites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Verify configured sources without forecasts or migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/check_forward_test_prerequisites.py --expected-database-fingerprint 36d4cccd11918975 --output prerequisites.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forward-test-live-prerequisites
+          path: prerequisites.json

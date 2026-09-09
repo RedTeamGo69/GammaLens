@@ -1,5 +1,8 @@
 # History quality follow-up — September 4, 2026 ET
 
+**Historical review:** superseded by the [September 8 source resolution](weekly_forward_test_history_resolution.md).
+The findings below preserve the original responses and blocked state at that time.
+
 **Release remains blocked and `FORWARD_TEST_ENABLED=false`.** No replacement
 prices were accepted. No production migration, registration, deployment, or
 capture was performed. This review found additional discrepancies beyond the

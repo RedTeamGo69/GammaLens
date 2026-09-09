@@ -1,0 +1,76 @@
+name: Forward Test Verification
+on:
+  workflow_dispatch:
+    inputs:
+      live_prerequisites:
+        description: 'Also check intended production sources and database identity (read only, no forecasts)'
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - 'range_finder/**'
+      - 'phase1/**'
+      - 'ui_forward_test.py'
+      - 'ui_spread_finder.py'
+      - 'ui_theme.py'
+      - 'tests/**'
+      - 'scripts/demo_forward_test.py'
+      - 'scripts/view_forward_test_fixture.py'
+      - 'scripts/check_forward_test_prerequisites.py'
+      - 'scripts/diagnose_forward_history.py'
+      - 'scripts/analyze_forward_history.py'
+      - 'scripts/build_forward_history_resolutions.py'
+      - 'requirements.txt'
+      - 'streamlit_app.py'
+      - 'forward_test.py'
+      - 'migrations/**'
+      - '.github/workflows/forward_test*.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fixture
+          POSTGRES_PASSWORD: fixture_only
+          POSTGRES_DB: gammalens_forward_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U fixture -d gammalens_forward_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+        env:
+          FORWARD_TEST_TEST_DATABASE_URL: postgresql://fixture:fixture_only@127.0.0.1:5432/gammalens_forward_test
+  live-prerequisites:
+    if: github.event_name == 'workflow_dispatch' && inputs.live_prerequisites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Verify configured sources without forecasts or migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/check_forward_test_prerequisites.py --expected-database-fingerprint 36d4cccd11918975 --output prerequisites.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forward-test-live-prerequisites
+          path: prerequisites.json

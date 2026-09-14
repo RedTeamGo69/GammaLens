@@ -390,29 +390,7 @@ def main():
     inject_pwa_head()
     inject_mobile_shell()
 
-    # Historical results remain usable without a live quote or a selected
-    # ticker. The tab callback sets _tab_last before this rerun begins.
-    rehydrate_from_url()
-    if st.session_state.get("_tab_last") == "forward":
-        from ui_forward_test import render_forward_test
-        render_tab_control()
-        render_forward_test()
-        sync_to_url()
-        return
-
     tradier_token, fred_key = get_credentials()
-
-    # ── Credentials gate (only if no token configured) ──
-    if not tradier_token:
-        st.markdown("### ⚙️ Connect Tradier to start")
-        tradier_token = st.text_input("Tradier API Token", type="password",
-                                       help="Get yours at https://web.tradier.com/user/api")
-        if not fred_key:
-            fred_key = st.text_input("FRED API Key (optional)", type="password",
-                                     help="For live T-bill rates.")
-        if not tradier_token:
-            st.warning("Enter your Tradier API token to get started.")
-            st.stop()
 
     # ── Active ticker (resolved from st.session_state; widget callbacks set it).
     # State lives in session — native-widget reruns patch the page over the
@@ -430,7 +408,8 @@ def main():
 
     ticker = (st.session_state.get("active_ticker") or "SPX").strip().upper()
     ticker_error = None
-    if ticker not in _curated:
+    if (ticker not in _curated and tradier_token
+            and st.session_state.get("_tab_last") != "forward"):
         meta = st.session_state["ticker_meta"].get(ticker)
         if meta is None:
             with st.spinner(f"Validating {ticker}…"):
@@ -474,6 +453,43 @@ def main():
             exp_token, refresh_token, cal_start, cal_end = render_settings_controls(
                 ticker, ticker_type, recents)
             render_refresh_button()
+
+    # Every view owns the same layout and selector position. Replace the body
+    # before any slow work so the prior view cannot linger below the new chart
+    # while, for example, the TradingView export is waiting on its saved model.
+    with main_col:
+        tab = render_tab_control()
+        tab_content = st.empty()
+
+    # Stored study results have no live-market dependency, but retain the same
+    # instrument controls and column width as the other views.
+    if tab == "forward":
+        from ui_forward_test import render_forward_test
+        with header_box:
+            st.html(render_header(
+                ticker=ticker, spot=None, day_change_pts=None, day_change_pct=None,
+                regime_label="FORWARD TEST", regime_color=COLORS["accent_blue"],
+                regime_note="Saved weekly results", live=False,
+            ))
+        with tab_content.container():
+            with st.spinner("Loading forward-test results…", show_time=True):
+                render_forward_test()
+        sync_to_url()
+        return
+
+    # Keep navigation available even when market credentials are missing.
+    if not tradier_token:
+        with tab_content.container():
+            st.markdown("### ⚙️ Connect Tradier to start")
+            tradier_token = st.text_input("Tradier API Token", type="password",
+                                           help="Get yours at https://web.tradier.com/user/api")
+            if not fred_key:
+                fred_key = st.text_input("FRED API Key (optional)", type="password",
+                                         help="For live T-bill rates.")
+            if not tradier_token:
+                st.warning("Enter your Tradier API token to get started.")
+                sync_to_url()
+                st.stop()
 
     mode = map_exp_mode(exp_token)
     mode_short = mode
@@ -748,10 +764,8 @@ def main():
     with em_box:
         st.html(em_strip + _build_em_stamp(display_em_label, ticker, data.run_time, market_ctx))
 
-    # ── Main column: tab control + tab content ──
-    with main_col:
-        # Tabs (native segmented control → websocket rerun, no reload) + content
-        tab = render_tab_control()
+    # ── Fill the selected view's reserved body ──
+    with tab_content.container():
         if tab == "gex":
             _today_str = run_now.strftime("%Y-%m-%d")
             _farthest = max(selected) if selected else _today_str
@@ -778,9 +792,6 @@ def main():
             )
         elif tab == "spread":
             _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
-        elif tab == "forward":
-            from ui_forward_test import render_forward_test
-            render_forward_test()
 
     # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:

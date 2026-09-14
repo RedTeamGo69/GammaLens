@@ -73,6 +73,18 @@ def _make_no_deselect_cb(widget_key: str, last_key: str, fallback: str):
     return _cb
 
 
+def _cb_tab() -> None:
+    # Routing happens before the selector is rendered. Commit the click during
+    # the callback so the new view never uses the previous run's route.
+    tab = st.session_state.get("tab_seg")
+    if tab not in _TAB_TOKENS:
+        tab = st.session_state.get("_tab_last", "gex")
+    if tab not in _TAB_TOKENS:
+        tab = "gex"
+    st.session_state["tab_seg"] = tab
+    st.session_state["_tab_last"] = tab
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Small HTML label helper (eyebrows match the .card-eyebrow look)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +205,7 @@ def render_refresh_button() -> None:
     exactly what the button promises while leaving those expensive resources
     warm.
     """
-    if st.button("⟳ Refresh data", key="refresh_now_btn", use_container_width=True):
+    if st.button("⟳ Refresh data", key="refresh_now_btn", width="stretch"):
         st.cache_data.clear()
         try:
             from streamlit_app import fetch_all_data
@@ -209,8 +221,7 @@ def render_refresh_button() -> None:
 # Tab control (rendered in the main column, above the tab content)
 # ─────────────────────────────────────────────────────────────────────────────
 def render_tab_control() -> str:
-    """Render the Strike GEX / Spread Finder / 0DTE Finder selector. Returns the
-    active tab token (``gex`` | ``spread`` | ``0dte``)."""
+    """Render the Strike GEX / Spread Finder / Forward Test selector."""
     # Sanitize a stale token (e.g. "0dte" from a session that predates the
     # 0DTE Finder tab removal) — an out-of-options default raises in
     # st.segmented_control.
@@ -226,7 +237,7 @@ def render_tab_control() -> str:
         "View", _TAB_TOKENS, selection_mode="single",
         format_func=lambda t: _TAB_LABELS[t],
         key="tab_seg", label_visibility="collapsed",
-        on_change=_make_no_deselect_cb("tab_seg", "_tab_last", "gex"),
+        on_change=_cb_tab,
     )
     tab = st.session_state["tab_seg"] or _last
     st.session_state["_tab_last"] = tab

@@ -168,7 +168,9 @@ section[data-testid="stSidebar"] {{ display:none !important; }}
   flex:0 0 332px !important; width:332px !important; min-width:300px;
 }}
 [data-testid="stHorizontalBlock"]:has(.st-key-settings_card) > [data-testid="stColumn"]:last-child {{
-  flex:1 1 auto !important; min-width:0;
+  /* A zero basis reserves the aside first; an auto basis can wrap the main
+     column beneath it when a result table or code block has intrinsic width. */
+  flex:1 1 0 !important; min-width:0;
 }}
 [data-testid="stHorizontalBlock"]:has(.st-key-settings_card) > [data-testid="stColumn"] [data-testid="stVerticalBlock"] {{ gap:0.7rem; }}
 .stApp, body, [data-testid="stMarkdownContainer"] {{
@@ -764,7 +766,7 @@ details.term-details[open] > summary {{ border-bottom:1px solid var(--border); m
 def render_header(
     *,
     ticker: str,
-    spot: float,
+    spot: float | None,
     day_change_pts: float | None,
     day_change_pct: float | None,
     regime_label: str,
@@ -803,6 +805,15 @@ def render_header(
         f'<img class="term-logo" src="{_logo_uri}" alt="Gamma Lens" />'
         if _logo_uri else '<div class="term-logo term-logo-fallback">Γ</div>'
     )
+    # Stored-results pages need the shared header/settings toggle without
+    # inventing a current quote or carrying a stale LIVE label from GEX.
+    quote_html = (
+        f'<div style="display:flex;align-items:baseline;gap:8px;">'
+        f'<span class="hdr-ticker">{esc(ticker)}</span>'
+        f'<span class="hdr-spot">${fmt_commas(spot, 2)}</span>'
+        f'<span class="hdr-chg" style="color:{chg_color};">{esc(chg_txt)}</span></div>'
+        if spot is not None else ""
+    )
     return f"""
 <div class="term-header">
   <div style="display:flex;align-items:center;gap:11px;">
@@ -813,11 +824,7 @@ def render_header(
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-    <div style="display:flex;align-items:baseline;gap:8px;">
-      <span class="hdr-ticker">{esc(ticker)}</span>
-      <span class="hdr-spot">${fmt_commas(spot, 2)}</span>
-      <span class="hdr-chg" style="color:{chg_color};">{esc(chg_txt)}</span>
-    </div>
+    {quote_html}
     <div style="display:flex;align-items:center;gap:9px;">
       <span style="font-size:11px;font-weight:700;letter-spacing:.05em;color:{regime_color};background:{badge_bg};border:1px solid {badge_bd};padding:5px 10px;border-radius:6px;">{esc(regime_label)}</span>
       <span class="hdr-note" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">{esc(regime_note)}</span>

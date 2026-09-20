@@ -43,7 +43,6 @@ def deployed_revision():
 def render_forward_test(rows=None, runs=None, studies=None):
     st.title("Forward Test")
     st.caption("Frozen weekly predictions for SPX, SPY, AAPL and AMD. Observational results; no trades are submitted.")
-    st.caption("Study history is checked across sources, with reviewed whole-bar corrections. Spread Finder uses its existing history, so displayed recommendations can differ from this study.")
     if rows is None:
         try:
             rows, runs, studies = load_snapshot()
@@ -53,11 +52,39 @@ def render_forward_test(rows=None, runs=None, studies=None):
             return
     runs = runs or []
     studies = studies or []
-    if st.button("Refresh results"):
-        load_snapshot.clear()
-        st.rerun()
+    st.session_state.setdefault("ft_view", st.session_state.get("_ft_view_last", "Summary"))
+    with st.container(horizontal=True, vertical_alignment="center"):
+        view = st.segmented_control("Results view", ["Summary", "Detailed data"],
+                                    key="ft_view", on_change=_keep_view,
+                                    label_visibility="collapsed")
+        if st.button("Refresh results"):
+            load_snapshot.clear()
+            st.rerun()
+    st.session_state["_ft_view_last"] = view
     if not rows:
         st.info("No frozen predictions yet. Registered studies are waiting for an eligible opening-week capture.")
+    if view == "Detailed data":
+        filtered = _render_details(rows, studies)
+    else:
+        from ui_forward_summary import render_summary
+        filtered = render_summary(rows, studies)
+    st.download_button("Download Excel results", build_workbook(filtered),
+                       file_name="Gamma_Lens_Forward_Test.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if runs and runs[0]["status"] != "ok":
+        st.warning("The latest collection run needs attention. See Capture and scoring health below.")
+    with st.expander("Capture and scoring health"):
+        _render_health(rows, runs)
+
+
+def _keep_view():
+    if st.session_state.get("ft_view") is None:
+        st.session_state["ft_view"] = st.session_state.get("_ft_view_last", "Summary")
+
+
+def _render_details(rows, studies):
+    st.caption("Study history is checked across sources, with reviewed whole-bar corrections. "
+               "Spread Finder uses its existing history, so recommendations can differ from this study.")
     for study in studies:
         st.caption(f"Registered study: {study['study_id']} · First eligible week: {study['start_week']}")
     filtered = list(rows)
@@ -74,7 +101,12 @@ def render_forward_test(rows=None, runs=None, studies=None):
                             'ticker': UNIVERSE, 'model': MODELS, 'cohort': [COHORT],
                             'tier_label': ['Lower PI', 'Point Estimate', '80% PI Upper', 'Effective (+buffer)']}
                 options = sorted(options.union(defaults.get(key, [])))
-                selected = st.multiselect(label, options, key=f"ft_filter_{key}")
+                widget_key = f"ft_filter_{key}"
+                saved_key = f"_ft_filter_{key}"
+                previous = st.session_state.get(widget_key, st.session_state.get(saved_key, []))
+                st.session_state[widget_key] = [value for value in previous if value in options]
+                selected = st.multiselect(label, options, key=widget_key)
+                st.session_state[saved_key] = list(selected)
                 if selected:
                     filtered = [r for r in filtered if str(r.get(key)) in selected]
     summary = metrics(filtered)
@@ -110,10 +142,10 @@ def render_forward_test(rows=None, runs=None, studies=None):
                   "close_on_boundary", "available_at", "expiration", "settlement_status", "error"]
         st.subheader("Predictions and results")
         st.dataframe(pd.DataFrame(filtered).reindex(columns=fields), hide_index=True)
-    st.download_button("Download Excel results", build_workbook(filtered),
-                       file_name="Gamma_Lens_Forward_Test.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.subheader("Capture and scoring health")
+    return filtered
+
+
+def _render_health(rows, runs):
     st.caption(f"App revision: {deployed_revision()}")
     good = next((r for r in runs if r["status"] == "ok" and r.get("finished_at")), None)
     st.caption(f"Latest successful run: {good['finished_at'] if good else 'No successful run recorded'}")

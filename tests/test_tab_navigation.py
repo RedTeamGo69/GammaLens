@@ -37,6 +37,7 @@ def test_gex_forward_gex_preserves_controls_and_export():
         assert at.session_state["fixture_market_calls"] == calls
         assert not at.code
         assert at.query_params["tab"] == ["forward"]
+        at.button_group(key="ft_view").set_value("Detailed data").run()
         at.multiselect(key="ft_filter_ticker").select("AMD").run()
         assert at.session_state["fixture_market_calls"] == calls
         at.button_group(key="tab_seg").set_value("gex").run()

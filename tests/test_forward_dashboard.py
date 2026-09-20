@@ -26,6 +26,9 @@ def test_dashboard_filters_export_and_real_app_route(tmp_path,monkeypatch):
     monkeypatch.setattr(ui_forward_test,'load_snapshot',lambda:(rows,runs,[]))
     at=AppTest.from_string('from ui_forward_test import render_forward_test\nrender_forward_test()').run(timeout=60)
     assert not at.exception
+    assert at.button_group(key='ft_view').value=='Summary'
+    assert any('64 of 64' in m.value for m in at.markdown)
+    at.button_group(key='ft_view').set_value('Detailed data').run()
     assert at.metric[0].value=='100.0%'
     assert len(at.dataframe[1].value)==64
     at.multiselect(key='ft_filter_ticker').select('AMD').run()
@@ -61,6 +64,7 @@ def test_registered_empty_study_filters_and_excel(monkeypatch):
     assert not at.exception
     assert 'No frozen predictions' in at.info[0].value
     assert any('2026-09-07' in c.value for c in at.caption)
+    at.button_group(key='ft_view').set_value('Detailed data').run()
     assert at.multiselect(key='ft_filter_study_id').options==['prospective-only']
     at.multiselect(key='ft_filter_ticker').select('SPX').run()
     assert not at.exception and at.metric[0].value=='—'

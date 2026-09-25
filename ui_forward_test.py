@@ -83,7 +83,7 @@ def _keep_view():
 
 
 def _render_details(rows, studies):
-    st.caption("Study history is checked across sources, with reviewed whole-bar corrections. "
+    st.caption("New predictions use Tradier price history. Earlier predictions retain their original inputs. "
                "Spread Finder uses its existing history, so recommendations can differ from this study.")
     for study in studies:
         st.caption(f"Registered study: {study['study_id']} · First eligible week: {study['start_week']}")

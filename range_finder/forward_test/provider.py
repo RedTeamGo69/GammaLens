@@ -20,7 +20,7 @@ from range_finder.event_calendars import event_flag_rows, FOMC_DATES, CPI_DATES,
 from range_finder.feature_builder import build_features
 from range_finder.trading_week import NY, UTC, listed_week_expiration, trading_week
 from .config import UNIVERSE
-from .history_policy import fetch_yahoo_history, validated_history
+from .history_policy import validated_tradier_history
 
 
 def finite_price(value):
@@ -81,7 +81,7 @@ class TradierProvider:
         if endpoint == 'history':
             self.history_receipts.append({'source':'Tradier Brokerage history',
                 'endpoint':endpoint, 'params':params, 'retrieved_at':self.clock().isoformat(),
-                'session':'regular', 'adjustment':'verified current split basis, no dividend adjustment after reviewed selection',
+                'session':'regular', 'adjustment':'as supplied by Tradier; no local adjustments',
                 'raw_sha256':sha256(response.content).hexdigest(), 'raw_response':response.text})
         return response.json()
 
@@ -172,10 +172,9 @@ class TradierProvider:
         self.history_receipts = []
         weekly_rows = self.history(ticker, start, end, 'weekly')
         daily_rows = self.history(ticker, daily_start, end)
-        alternative, receipt = fetch_yahoo_history(ticker, start, end, self.clock)
-        weekly, daily, evidence = validated_history(ticker, start, end, daily_start,
-            weekly_rows, daily_rows, alternative, as_of=self.clock())
-        evidence.update(primary_receipts=list(self.history_receipts), alternative_receipt=receipt,
+        weekly, daily, evidence = validated_tradier_history(ticker, start, end, daily_start,
+            weekly_rows, daily_rows, as_of=self.clock())
+        evidence.update(primary_receipts=list(self.history_receipts),
                         required_prior_session=str(prior), audit_only=review_end is not None,
                         legacy_context={'rows':len(older), 'start':str(start),
                                         'usage':'horizon only; fresh validated prices; no legacy writes'})

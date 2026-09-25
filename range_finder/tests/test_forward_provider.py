@@ -139,9 +139,12 @@ def test_prepare_uses_completed_primary_history_and_rejects_session_gap(monkeypa
         return [{'date':str(d.date()),**r.to_dict()} for d,r in frame.iterrows()]
     provider=TradierProvider('fixture',clock=clock)
     monkeypatch.setattr(provider,'history',lambda ticker,start,end,interval='daily':records((weekly if interval=='weekly' else daily).loc[str(start):str(end)]))
-    from range_finder.tests.test_forward_history_policy import yahoo_payload
-    payload=yahoo_payload('SPY',daily)
-    monkeypatch.setattr(module,'fetch_yahoo_history',lambda *a:(payload,{'source':'isolated fixture'}))
+    from curl_cffi import requests as yahoo_requests
+    from range_finder.forward_test import history_policy
+    def forbidden(*args, **kwargs):
+        pytest.fail('Forward capture must not request Yahoo history')
+    monkeypatch.setattr(history_policy,'fetch_yahoo_history',forbidden)
+    monkeypatch.setattr(yahoo_requests.Session,'get',forbidden)
     monkeypatch.setattr(module,'fetch_cboe_index_history',lambda index:daily/30)
     monkeypatch.setattr(data_collector,'fetch_fred_macro',lambda **k:pd.DataFrame({'yield_spread':.5,'fed_funds':4.},index=days))
     monkeypatch.setattr(provider,'_get',lambda *a,**k:{'quotes':{'quote':[
@@ -150,6 +153,7 @@ def test_prepare_uses_completed_primary_history_and_rejects_session_gap(monkeypa
     monkeypatch.setattr(provider.client,'get_expirations',lambda ticker:[fixture['expiration']])
     monkeypatch.setattr(provider.client,'get_chain_once',lambda *a:{'status':'ok',**fixture['chain']})
     prepared=provider.prepare('SPY',week)
+    assert prepared['raw_inputs']['history_evidence']['corroboration_required'] is False
     assert prepared['reference']==600 and prepared['anchor_at']==week.sessions[0].open.isoformat()
     target=prepared['features'].loc[pd.Timestamp(week.monday)]
     assert pd.isna(target['log_range']) and target['path_source_week']==pd.Timestamp(week.monday-timedelta(days=7))

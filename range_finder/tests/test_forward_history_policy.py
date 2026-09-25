@@ -162,12 +162,11 @@ def test_corroboration_failure_is_bounded_and_sanitized(monkeypatch):
     assert attempts[0][1]['timeout']==20 and attempts[0][1]['params']['includePrePost']=='false'
 
 
-def test_methodology_archives_source_policy_and_catalog_hash():
-    from hashlib import sha256
+def test_methodology_uses_primary_policy_without_legacy_catalog():
     from range_finder.forward_test.config import methodology
     _,config=methodology()
-    assert config['history_policy']=='tradier-reviewed-whole-bars-v1'
-    assert config['source_hashes']['forward_test/history_resolutions.json']==sha256(CATALOG.read_bytes().replace(b'\r\n',b'\n')).hexdigest()
+    assert config['history_policy']=='tradier-primary-history-v2'
+    assert 'forward_test/history_resolutions.json' not in config['source_hashes']
 
 
 @pytest.mark.parametrize('ticker',('SPX','SPY','AAPL','AMD'))

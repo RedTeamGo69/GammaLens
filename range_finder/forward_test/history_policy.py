@@ -1,9 +1,8 @@
-"""Reviewed training-history reconciliation, never an observation/price repair.
+"""Tradier training-history validation and archived source-review helpers.
 
-Tradier remains primary. Yahoo quote OHLC is a bounded corroborating source
-and supplies whole replacement bars only for exact, independently reviewed
-discrepancies. An unknown disagreement is unavailable, even if both bars have
-valid shapes. The catalog is methodology-versioned; weekly refits do not edit it.
+Live captures use validated_tradier_history without another price provider.
+The older Yahoo selection helpers remain for reproducing archived evidence;
+they are not part of the current provider's capture path.
 """
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -18,6 +17,7 @@ import pandas_market_calendars as mcal
 from range_finder.trading_week import NY
 
 POLICY_VERSION = 'tradier-reviewed-whole-bars-v1'
+TRADIER_POLICY_VERSION = 'tradier-primary-history-v2'
 PRICE_PRECISION = 0.0051  # half-cent reporting plus float32 representation
 OHLC = ('open', 'high', 'low', 'close')
 CATALOG = Path(__file__).with_name('history_resolutions.json')
@@ -156,9 +156,7 @@ def _choose(primary, alternative, ticker, cadence, resolutions, fields):
     return accepted, decisions, warnings
 
 
-def validated_history(ticker, start, end, daily_start, primary_weekly, primary_daily,
-                      alternative_payload, *, as_of, resolutions=None):
-    """Pure validation/selection. No forecasts, DB writes or shortened windows."""
+def _primary_frames(ticker, start, end, daily_start, primary_weekly, primary_daily, as_of):
     if ticker not in SYMBOLS or start > daily_start or daily_start > end:
         _fail('invalid instrument/history window')
     expected = mcal.get_calendar('NYSE').valid_days(start_date=start, end_date=end).tz_localize(None)
@@ -175,6 +173,42 @@ def validated_history(ticker, start, end, daily_start, primary_weekly, primary_d
     weekly, daily = _frame(primary_weekly), _frame(primary_daily)
     _coverage(weekly, weekly_labels, 'primary weekly')
     _coverage(daily, expected[expected >= pd.Timestamp(daily_start)], 'primary daily')
+    return weekly, daily, expected, weekly_labels
+
+
+def validated_tradier_history(ticker, start, end, daily_start, primary_weekly,
+                              primary_daily, *, as_of):
+    """Use primary prices unchanged; validate only the fields training consumes."""
+    weekly, daily, _, _ = _primary_frames(ticker, start, end, daily_start,
+                                        primary_weekly, primary_daily, as_of)
+    for day, row in weekly.iterrows():
+        if not _shape(row):
+            _fail(f'{ticker} weekly {day.date()}: invalid primary OHLC')
+    # Daily history feeds close-to-close volatility only. Historical vendor
+    # OHL inconsistencies must not veto a valid close that the model consumes.
+    # Outcome observations still require complete valid OHLC independently.
+    for day, value in daily['close'].items():
+        if not np.isfinite(value) or value <= 0:
+            _fail(f'{ticker} daily {day.date()}: invalid primary close')
+    for monday, frame in daily.groupby(daily.index-pd.to_timedelta(daily.index.weekday, unit='D')):
+        if abs(float(frame.iloc[-1]['close'])-float(weekly.at[monday,'close'])) > PRICE_PRECISION:
+            _fail(f'{ticker} {monday.date()}: primary daily/weekly final close mismatch')
+    evidence = {'policy_version':TRADIER_POLICY_VERSION, 'status':'accepted',
+                'source':'Tradier Brokerage history', 'corroboration_required':False,
+                'start':str(start), 'daily_start':str(daily_start), 'end':str(end),
+                'weekly_rows':len(weekly), 'daily_rows':len(daily),
+                'primary_weekly':primary_weekly, 'primary_daily':primary_daily,
+                'decisions':[], 'unused_daily_ohl_warnings':[],
+                'adjustment':'as supplied by Tradier; no price replacements or local adjustments',
+                'daily_consumed_fields':['close'], 'weekly_consumed_fields':list(OHLC)}
+    return weekly, daily, evidence
+
+
+def validated_history(ticker, start, end, daily_start, primary_weekly, primary_daily,
+                      alternative_payload, *, as_of, resolutions=None):
+    """Archived v1 validation, retained only to reproduce the prior source review."""
+    weekly, daily, expected, weekly_labels = _primary_frames(
+        ticker, start, end, daily_start, primary_weekly, primary_daily, as_of)
     alternative = _yahoo_frame(alternative_payload, ticker, expected)
     agg = {'open':'first', 'high':'max', 'low':'min', 'close':'last'}
     if 'volume' in alternative:

@@ -227,6 +227,33 @@ def test_end_to_end_and_immutable_duplicate_trigger(store,week):
     assert store.forecasts('fixture')==frozen
 
 
+@pytest.mark.parametrize('monday', [date(2026,9,21), date(2026,11,23)])
+def test_scoring_opens_twenty_minutes_after_regular_or_early_close(monday):
+    week = trading_week(monday)
+    f, observations, _ = scoring_fixture(week)
+    ready = week.evaluation_close + timedelta(minutes=20)
+    for session in week.sessions:
+        observations[str(session.day)]['collected_at'] = (session.close + timedelta(minutes=20)).isoformat()
+    before = score_forecast(f, week, observations, ready-timedelta(seconds=1))
+    assert before['status'] == 'pending' and not before['close_eligible']
+    result = score_forecast(f, week, observations, ready)
+    assert result['status'] == 'final' and result['close_eligible'] and result['path_eligible']
+    observations[str(week.sessions[-1].day)]['collected_at'] = (ready-timedelta(seconds=1)).isoformat()
+    assert not score_forecast(f, week, observations, ready)['close_eligible']
+
+
+def test_runner_collects_final_session_at_twenty_minutes(store, week):
+    clock = Clock(week.capture_start)
+    provider = FixtureProvider(clock)
+    run_study(store, provider, 'fixture', clock=clock, model_version='fixture-v1')
+    clock.value = week.evaluation_close + timedelta(minutes=20, seconds=-1)
+    run_study(store, provider, 'fixture', clock=clock, model_version='fixture-v1')
+    assert not metrics(load_results(store, 'fixture'))['close_n']
+    clock.value += timedelta(seconds=1)
+    run_study(store, provider, 'fixture', clock=clock, model_version='fixture-v1')
+    assert metrics(load_results(store, 'fixture'))['close_n'] == 64
+
+
 def test_partial_failure_safe_retry_and_missed_window(store,week):
     clock=Clock(week.capture_start)
     provider=FixtureProvider(clock)
@@ -315,7 +342,7 @@ def test_scorer_rejects_incomplete_minute_coverage_and_early_close_data(week):
     s=score_forecast(f,week,obs,clock())
     assert s['close_eligible'] and not s['path_eligible'] and s['put_breach'] is None
     final=obs[str(week.sessions[-1].day)]
-    final['collected_at']=(week.evaluation_close+timedelta(minutes=20)).isoformat()
+    final['collected_at']=(week.evaluation_close+timedelta(minutes=19)).isoformat()
     assert not score_forecast(f,week,obs,clock())['close_eligible']
 
 

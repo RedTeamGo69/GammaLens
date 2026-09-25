@@ -163,3 +163,30 @@ def test_prepare_uses_completed_primary_history_and_rejects_session_gap(monkeypa
     with pytest.raises(ValueError,match='primary daily coverage: 1 missing'):
         provider.prepare('SPY',week)
     provider.close()
+
+
+def test_hood_requires_every_session_from_first_full_listed_week(monkeypatch):
+    import pandas_market_calendars as mcal
+    from range_finder.cboe_data import resample_cboe_weekly
+    week = trading_week(date(2021,8,16))
+    clock = Clock(week.capture_start)
+    days = mcal.get_calendar('NYSE').valid_days(start_date='2021-08-02', end_date='2021-08-13').tz_localize(None)
+    daily = pd.DataFrame({'open':40., 'high':42., 'low':38., 'close':41.}, index=days)
+    weekly = resample_cboe_weekly(daily)
+    calls = []
+    def history(ticker, start, end, interval='daily'):
+        calls.append((ticker, start, end, interval))
+        frame = weekly if interval == 'weekly' else daily
+        return [{'date':str(d.date()), **r.to_dict()} for d,r in frame.iterrows()]
+    provider = TradierProvider('fixture', clock=clock)
+    monkeypatch.setattr(provider, 'history', history)
+    try:
+        w, d, evidence = provider.training_history('HOOD', week)
+        assert all(call[1] == date(2021,8,2) for call in calls)
+        assert len(w) == 2 and len(d) == 10
+        assert evidence['first_full_listed_week'] == '2021-08-02'
+        daily.drop(daily.index[3], inplace=True)
+        with pytest.raises(ValueError, match='primary daily coverage: 1 missing'):
+            provider.training_history('HOOD', week)
+    finally:
+        provider.close()

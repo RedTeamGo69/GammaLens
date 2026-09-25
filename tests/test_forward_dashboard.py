@@ -72,3 +72,28 @@ def test_registered_empty_study_filters_and_excel(monkeypatch):
     wb=load_workbook(BytesIO(build_workbook([])))
     assert wb.sheetnames==['Scoreboard','Breach details','Read me']
     assert wb['Scoreboard'].max_row==4  # headers only; no synthetic records
+
+
+def test_restart_defaults_to_empty_active_study_and_keeps_archive_separate(monkeypatch):
+    import json
+    import runpy
+    import ui_forward_test
+    from range_finder.forward_test.config import DEFAULT_STUDY_ID
+    rows = runpy.run_path(str(Path(__file__).parent/'fixtures/forward_summary_rows.py'))['summary_rows']()
+    studies = [{'study_id': DEFAULT_STUDY_ID, 'start_week':'2026-09-28'},
+               {'study_id':'SYNTHETIC', 'start_week':'2026-09-14'}]
+    runs = [{'study_id':'SYNTHETIC', 'status':'failed', 'started_at':'2026-09-21',
+             'finished_at':'2026-09-21', 'payload_json':json.dumps({'errors':['ARCHIVED_FAILURE']})}]
+    monkeypatch.setattr(ui_forward_test, 'load_snapshot', lambda: (rows, runs, studies))
+    at = AppTest.from_string('from ui_forward_test import render_forward_test\nrender_forward_test()').run()
+    assert not at.exception and at.selectbox(key='ft_active_study').value == DEFAULT_STUDY_ID
+    assert 'No frozen predictions' in at.info[0].value
+    assert not at.warning and not any('53 of 64' in m.value for m in at.markdown)
+    assert any('2026-09-28' in c.value for c in at.caption)
+    at.selectbox(key='ft_active_study').set_value('SYNTHETIC').run()
+    assert not at.exception and any('53 of 64' in m.value for m in at.markdown)
+    assert any('ARCHIVED_FAILURE' in w.value for w in at.warning)
+    at.selectbox(key='ft_active_study').set_value(DEFAULT_STUDY_ID).run()
+    at.button_group(key='ft_view').set_value('Detailed data').run()
+    assert not at.exception and at.metric[0].value == '—'
+    assert at.multiselect(key='ft_filter_study_id').options == [DEFAULT_STUDY_ID]

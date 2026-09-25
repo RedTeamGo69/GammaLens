@@ -4,7 +4,23 @@ The implementation is observational and contains no order submission or executio
 
 ## Methodology
 
-The study universe is exactly **SPX, SPY, AAPL and AMD**. Each week has 16 model slots and, when all models are available, 64 immutable tier forecasts.
+The active study universe is **SPX, SPY, AAPL, AMD, META, TSLA and HOOD**. Each week has 28 model slots and, when all models are available, 112 immutable tier forecasts. Each registration retains its own universe; the archived first study remains a four-ticker study.
+
+The active study is **`spread-finder-weekly-v2`**, starting **September 28, 2026**.
+The CLI's default `run` targets only this study. The original
+`spread-finder-weekly-v1` is retired from scheduled collection; its evidence is
+retained unchanged and is available through the dashboard's archived-study
+selection. The dashboard, health area and exports show one selected study at a
+time, including an empty new study before its first capture. A restart does not
+backfill forecasts or turn historical missed slots into successful captures.
+
+Capture attempts for the new study begin Monday September 28 at 09:45, 09:55
+and 10:05 ET. Its first weekly-close scoring is Friday October 2 at 16:20 ET.
+HOOD starts with its first full listed week, **2021-08-02**.
+[Robinhood confirms its Nasdaq listing on July 29, 2021](https://robinhood.com/us/en/newsroom/welcome-to-the-new-wall-street/).
+The two-day IPO week is excluded; no pre-IPO bars are invented. Every exchange
+session from the declared start is required. The six-year training limit and
+minimum-sample rules still apply, with fewer available years for HOOD.
 
 | Model | Production feature specification before the existing availability filter |
 |---|---|
@@ -72,9 +88,9 @@ The Forward Test tab reads durable records without requesting a live quote or in
 
 Expected usage, excluding retries and vendor corrections:
 
-- Opening capture: about **20 Tradier GETs** (two histories, one batch quote, expirations and one chain per ticker), **3 Cboe history requests** and **3 FRED series requests**. Common supplemental inputs are reused across the four tickers in one invocation. Failed attempts are capped at three per model; the study's Tradier history/quote/timesales requests have 20-second timeouts and at most two HTTP retries. The capture path makes no Yahoo requests. Existing chain/source clients are reused; the overall GitHub job has a 25-minute limit.
-- A five-session week initially needs **20 daily-bar requests plus 4 minute-history requests** for observations. Daily reconciliation adds bounded rechecks; plan for roughly **150–250 observation GETs per study week** with ordinary weekday scheduling, before HTTP retries. Outages, source corrections and manual invocations affect that estimate. No continuous polling or full-chain archives are stored.
-- A runner uses **one database connection**, shared observations and four-tier transactions. Typical primary growth is 64 forecast rows, 16 model snapshots, 4 shared ticker-input snapshots and 20 first observation revisions per full week, plus score revisions and small run/check metadata. JSON input sizes depend on history depth. The 160-week deterministic fixture used **1,435,503 input JSON bytes** and **141,652 observation JSON bytes**; these are measured fixture sizes, not production storage estimates. Production six-year/deeper snapshots will be larger, ordinarily a few MB per week before indexes/backups.
+- Opening capture: about **35 Tradier GETs** (two histories, one batch quote, expirations and one chain per ticker), **3 Cboe history requests** and **3 FRED series requests**. Common supplemental inputs are reused across the seven tickers in one invocation. Failed attempts are capped at three per model; the study's Tradier history/quote/timesales requests have 20-second timeouts and at most two HTTP retries. The capture path makes no Yahoo requests. Existing chain/source clients are reused; the overall GitHub job has a 25-minute limit.
+- A five-session week initially needs **35 daily-bar requests plus 7 minute-history requests** for observations. Daily reconciliation adds bounded rechecks; plan for roughly **260–440 observation GETs per study week** with ordinary weekday scheduling, before HTTP retries. Outages, source corrections and manual invocations affect that estimate. No continuous polling or full-chain archives are stored.
+- A runner uses **one database connection**, shared observations and four-tier transactions. Typical primary growth is 112 forecast rows, 28 model snapshots, 7 shared ticker-input snapshots and 35 first observation revisions per full week, plus score revisions and small run/check metadata. JSON input sizes depend on history depth. The 160-week deterministic fixture used **1,435,503 input JSON bytes** and **141,652 observation JSON bytes**; these are measured fixture sizes, not production storage estimates. Production six-year/deeper snapshots will be larger, ordinarily a few MB per week before indexes/backups.
 - The dashboard caches reads for ten minutes and opens/closes one connection per cache miss. Historic finalized forecasts age out of runner work; old incomplete outcomes are terminalized after reconciliation expires. No dollar billing estimate is claimed.
 
 ## Verification and reproduction
@@ -100,11 +116,11 @@ The original pre-activation review is in [weekly_forward_test_release_review.md]
 
 1. Merge the scoped implementation through the repository's normal process only after its checks and live prerequisites pass. Keep the repository variable `FORWARD_TEST_ENABLED=false` throughout preparation. The new workflow is independent of the existing GEX snapshot and cron-job.org schedules.
 2. Choose the production database and explicitly set `FORWARD_TEST_DATABASE_URL` or `DATABASE_URL` in the operator's shell. Do not use the isolated test URL. Run `.venv\Scripts\python.exe forward_test.py migrate` once. This applies only the two additive `ft_*` migrations. Neither the runner nor Streamlit applies them automatically.
-3. Register the first still-prospective week: `.venv\Scripts\python.exe forward_test.py register --start-week YYYY-MM-DD`. Use its Monday label. For 2026-09-07 this is only valid before Tuesday 2026-09-08 at 10:15 ET; if that window has ended, choose a later week. The study ID defaults to `spread-finder-weekly-v1`; its start/configuration cannot be rewritten.
+3. Register the first still-prospective week: `.venv\Scripts\python.exe forward_test.py register --start-week YYYY-MM-DD`. Use its Monday label. For 2026-09-07 this is only valid before Tuesday 2026-09-08 at 10:15 ET; if that window has ended, choose a later week. The study ID defaults to `spread-finder-weekly-v2`; its start/configuration cannot be rewritten.
 4. Confirm the existing GitHub secrets `DATABASE_URL`, `TRADIER_TOKEN` and `FRED_API_KEY` refer to the intended account/database. The workflow uses `DATABASE_URL`; the optional CLI override is for explicit operator/test environments. Leave `FORWARD_TEST_DATA_DELAY_SECONDS` at `0` unless the actual feed is known to be delayed, in which case set it to `900`. This does not buy or change any entitlement.
 5. Deploy the reviewed code to Streamlit Cloud and verify the **Forward Test** tab. If the container still serves old code, use **Reboot app**. The results tab should work before any live market quote is requested. Point its existing `DATABASE_URL` secret at the same database.
 6. Run the prepared **Forward Test Verification** workflow with `live_prerequisites=true`. It uses its own disposable PostgreSQL test service and separately checks the intended production database fingerprint and configured live sources read-only. Then set the repository variable **`FORWARD_TEST_ENABLED=true`** to activate the capture/reconciliation workflow. The workflow must be on the default branch for scheduled events. A manual dispatch is also gated by this variable; it cannot bypass the engine's prospective window.
-7. After the first eligible opening run, check the dashboard and workflow health: 16 captured models / 64 tiers, or explicit unavailable/missed reasons. After the final-session collection, check independent close and path sample counts. Missing minute history may reduce path coverage while valid close results remain available. Verify the real account's SPX, quote and history availability during this first run; no live production certification was attempted here.
+7. After the first eligible opening run, check the dashboard and workflow health: 28 captured models / 112 tiers, or explicit unavailable/missed reasons. After the final-session collection, check independent close and path sample counts. Missing minute history may reduce path coverage while valid close results remain available. Verify the real account's SPX, quote and history availability during this first run; no live production certification was attempted here.
 
 The cron contains paired UTC times for DST and a New York time gate. Its separate `weekly-forward-test` concurrency group has `cancel-in-progress: false`: overlapping attempts wait without cancelling a healthy capture. GitHub retains at most one pending run, so a newer retry can replace an older pending attempt, but cannot replace captured database slots. GitHub may delay or drop scheduled jobs, so this architecture cannot guarantee every week's capture. Late computation is rejected and reported as missed, never backdated. An additional cron-job.org trigger is authorized by the release request, but the management console requires sign-in and no API credential was available during review. No existing GEX job was changed and no extra dispatcher job was created. Retain the prepared GitHub schedule with this punctuality limitation. [GitHub schedule behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 

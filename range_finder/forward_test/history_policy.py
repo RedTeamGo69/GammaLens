@@ -22,7 +22,8 @@ PRICE_PRECISION = 0.0051  # half-cent reporting plus float32 representation
 OHLC = ('open', 'high', 'low', 'close')
 CATALOG = Path(__file__).with_name('history_resolutions.json')
 SYMBOLS = {'SPX': ('^GSPC', 'INDEX'), 'SPY': ('SPY', 'ETF'),
-           'AAPL': ('AAPL', 'EQUITY'), 'AMD': ('AMD', 'EQUITY')}
+           'AAPL': ('AAPL', 'EQUITY'), 'AMD': ('AMD', 'EQUITY'),
+           'META': ('META', 'EQUITY'), 'TSLA': ('TSLA', 'EQUITY'), 'HOOD': ('HOOD', 'EQUITY')}
 
 
 class HistoryUnavailable(ValueError):

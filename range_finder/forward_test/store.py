@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from .config import COHORT, MODELS, UNIVERSE, digest, json_text
+from .config import COHORT, MODELS, digest, json_text, study_universe
 from range_finder.recommendations import TIER_KEYS
 
 
@@ -110,8 +110,10 @@ class Store:
             raise ValueError("Study already exists with a different start/configuration")
 
     def seed_week(self, study_id, week, model_version, now, *, cohort=COHORT):
+        study = self.query('SELECT config_json FROM ft_studies WHERE study_id=?', (study_id,))[0]
+        universe = study_universe(json.loads(study['config_json']))
         with self.transaction():
-            for ticker in UNIVERSE:
+            for ticker in universe:
                 for model in MODELS:
                     slot_id = digest([study_id, week, ticker, model])
                     self.execute("INSERT INTO ft_slots VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?) "

@@ -6,13 +6,23 @@ from pathlib import Path
 
 from .history_policy import TRADIER_POLICY_VERSION
 
-UNIVERSE = ("SPX", "SPY", "AAPL", "AMD")
+LEGACY_UNIVERSE = ("SPX", "SPY", "AAPL", "AMD")
+UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v2"
 SCORER_VERSION = "weekly-close-path-v2-20m"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14
 MAX_CAPTURE_ATTEMPTS = 3
+
+
+def study_universe(config):
+    """A new registration must not silently expand an older study's roster."""
+    universe = tuple(config.get('universe', LEGACY_UNIVERSE))
+    if not universe or len(set(universe)) != len(universe) or not set(universe) <= set(UNIVERSE):
+        raise ValueError('Invalid registered study universe')
+    return universe
 
 
 def utcnow():

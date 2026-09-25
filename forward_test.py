@@ -12,9 +12,10 @@ def database_url():
 
 
 def main():
+    from range_finder.forward_test.config import DEFAULT_STUDY_ID
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("migrate", "register", "run", "export"))
-    parser.add_argument("--study", default="spread-finder-weekly-v1")
+    parser.add_argument("--study", default=DEFAULT_STUDY_ID)
     parser.add_argument("--start-week")
     parser.add_argument("--output")
     args = parser.parse_args()

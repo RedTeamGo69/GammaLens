@@ -254,6 +254,35 @@ def test_runner_collects_final_session_at_twenty_minutes(store, week):
     assert metrics(load_results(store, 'fixture'))['close_n'] == 64
 
 
+def test_restarted_study_captures_seven_tickers_without_expanding_old_study(store, week):
+    from range_finder.forward_test.config import DEFAULT_STUDY_ID
+    clock = Clock(week.capture_start)
+    provider = FixtureProvider(clock)
+    store.register(DEFAULT_STUDY_ID, str(week.monday), clock(), {'universe': UNIVERSE})
+    result = run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
+    assert result['captured_models'] == 28 and not result['errors']
+    frozen = store.forecasts(DEFAULT_STUDY_ID)
+    assert len(frozen) == 112 and {r['ticker'] for r in frozen} == set(UNIVERSE)
+    # Running an older registration explicitly must preserve its original roster.
+    run_study(store, provider, 'fixture', clock=clock, model_version='old-fixture')
+    assert len(store.forecasts('fixture')) == 64
+    clock.value = week.evaluation_close + timedelta(minutes=20)
+    run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
+    m = metrics(load_results(store, DEFAULT_STUDY_ID))
+    assert m['close_n'] == m['path_n'] == 112
+
+
+def test_future_restart_does_not_seed_or_reconcile_old_study(store, week):
+    from range_finder.forward_test.config import DEFAULT_STUDY_ID
+    clock = Clock(week.evaluation_close + timedelta(minutes=20))
+    provider = FixtureProvider(clock)
+    store.register(DEFAULT_STUDY_ID, str(week.monday+timedelta(days=7)), clock(), {'universe': UNIVERSE})
+    result = run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
+    assert result['captured_models'] == result['observations_checked'] == result['scores_checked'] == 0
+    assert not result['errors'] and not provider.prepares and not provider.observes
+    assert not store.slots(DEFAULT_STUDY_ID, str(week.monday))
+
+
 def test_partial_failure_safe_retry_and_missed_window(store,week):
     clock=Clock(week.capture_start)
     provider=FixtureProvider(clock)

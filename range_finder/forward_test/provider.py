@@ -22,6 +22,12 @@ from range_finder.trading_week import NY, UTC, listed_week_expiration, trading_w
 from .config import UNIVERSE
 from .history_policy import validated_tradier_history
 
+# HOOD began trading on 2021-07-29. Its first full exchange week starts August 2.
+# Never demand nonexistent pre-IPO bars or treat the two-day IPO week as a full
+# weekly training target. All subsequent exchange sessions are still required.
+# https://robinhood.com/us/en/newsroom/welcome-to-the-new-wall-street/
+FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2)}
+
 
 def finite_price(value):
     try:
@@ -169,12 +175,17 @@ class TradierProvider:
         older = self.history_loader(ticker) if self.history_loader else pd.DataFrame()
         if not older.empty:
             start = min(start, older.index.min().date())
+        listing_start = FIRST_FULL_HISTORY_WEEK.get(ticker)
+        if listing_start:
+            start = max(start, listing_start)
+            daily_start = max(daily_start, listing_start)
         self.history_receipts = []
         weekly_rows = self.history(ticker, start, end, 'weekly')
         daily_rows = self.history(ticker, daily_start, end)
         weekly, daily, evidence = validated_tradier_history(ticker, start, end, daily_start,
             weekly_rows, daily_rows, as_of=self.clock())
         evidence.update(primary_receipts=list(self.history_receipts),
+                        first_full_listed_week=str(listing_start) if listing_start else None,
                         required_prior_session=str(prior), audit_only=review_end is not None,
                         legacy_context={'rows':len(older), 'start':str(start),
                                         'usage':'horizon only; fresh validated prices; no legacy writes'})

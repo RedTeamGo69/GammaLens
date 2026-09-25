@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from range_finder.forward_test.results import load_results, metrics, scoreboard, build_workbook
-from range_finder.forward_test.config import UNIVERSE, MODELS, COHORT
+from range_finder.forward_test.config import UNIVERSE, MODELS, COHORT, DEFAULT_STUDY_ID
 
 
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
@@ -42,7 +42,8 @@ def deployed_revision():
 
 def render_forward_test(rows=None, runs=None, studies=None):
     st.title("Forward Test")
-    st.caption("Frozen weekly predictions for SPX, SPY, AAPL and AMD. Observational results; no trades are submitted.")
+    st.caption("Frozen weekly predictions for SPX, SPY, AAPL, AMD, META, TSLA and HOOD. "
+               "Observational results; no trades are submitted.")
     if rows is None:
         try:
             rows, runs, studies = load_snapshot()
@@ -52,6 +53,24 @@ def render_forward_test(rows=None, runs=None, studies=None):
             return
     runs = runs or []
     studies = studies or []
+    # Select the registered study before checking for empty results. Otherwise
+    # a fresh restart with no forecasts falls back to the retired study's rows.
+    study_ids = list(dict.fromkeys([s['study_id'] for s in studies] + [r['study_id'] for r in rows]))
+    if study_ids:
+        preferred = DEFAULT_STUDY_ID if DEFAULT_STUDY_ID in study_ids else study_ids[0]
+        study_ids = [preferred] + [sid for sid in study_ids if sid != preferred]
+        if len(study_ids) > 1:
+            from ui_forward_summary import _choose
+            dates = {s['study_id']: s['start_week'] for s in studies}
+            def label(sid):
+                status = 'Current study' if sid == preferred else 'Archived study'
+                return f"{status} · {dates.get(sid, sid)}"
+            selected = _choose('Study', study_ids, 'ft_active_study', format_func=label)
+        else:
+            selected = preferred
+        rows = [r for r in rows if r['study_id'] == selected]
+        studies = [s for s in studies if s['study_id'] == selected]
+        runs = [r for r in runs if r['study_id'] == selected]
     st.session_state.setdefault("ft_view", st.session_state.get("_ft_view_last", "Summary"))
     with st.container(horizontal=True, vertical_alignment="center"):
         view = st.segmented_control("Results view", ["Summary", "Detailed data"],

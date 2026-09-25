@@ -7,7 +7,7 @@ from uuid import uuid4
 from range_finder.trading_week import NY, trading_week
 from .capture import capture_model
 from .config import (DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
-                     SCORER_VERSION, UNIVERSE, methodology)
+                     SCORER_VERSION, methodology, study_universe)
 from .scoring import score_forecast
 from .provider import valid_ohlc
 
@@ -24,7 +24,9 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
     store.run_record(run_id, study_id, started, None, "running", details)
     try:
         from .config import COHORT
-        cohort = json.loads(studies[0]['config_json']).get('cohort', COHORT)
+        registration = json.loads(studies[0]['config_json'])
+        cohort = registration.get('cohort', COHORT)
+        universe = study_universe(registration)
         version = model_version or methodology()[0]
         current = trading_week(started.astimezone(NY).date())
         week_date = date.fromisoformat(studies[0]["start_week"])
@@ -52,7 +54,7 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
                         store.failure(slot, "missed", reason, clock())
                         details["errors"].append(f"{slot['ticker']}/{slot['model']}/{ws}: {reason}")
             elif week.admits(clock()):
-                for ticker in UNIVERSE:
+                for ticker in universe:
                     pending = [s for s in slots if s["ticker"] == ticker and s["status"] != "captured"
                                and s["attempts"] < MAX_CAPTURE_ATTEMPTS]
                     if not pending:

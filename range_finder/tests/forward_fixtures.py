@@ -9,6 +9,9 @@ from range_finder.feature_builder import build_features
 from range_finder.trading_week import trading_week
 from range_finder.forward_test.provider import frame_records
 
+REFERENCES = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.,
+              "META": 600., "TSLA": 350., "HOOD": 100.}
+
 
 class Clock:
     def __init__(self, value):
@@ -19,7 +22,7 @@ class Clock:
 
 
 def prepared_fixture(ticker, week, clock):
-    ref = {"SPX": 6000.0, "SPY": 600.0, "AAPL": 200.0, "AMD": 150.0}[ticker]
+    ref = REFERENCES[ticker]
     index = pd.date_range(end=pd.Timestamp(week.monday) - pd.Timedelta(days=7), periods=160, freq="W-MON")
     rng = np.random.default_rng(179)
     width = 0.012 + rng.uniform(0, 0.020, len(index))
@@ -72,7 +75,7 @@ class FixtureProvider:
 
     def observe(self, ticker, session, first_available=None):
         self.observes.append((ticker, session.day))
-        ref = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.}[ticker]
+        ref = REFERENCES[ticker]
         bar = {"open": ref, "close": ref, "high": ref * 1.002, "low": ref * .998}
         minutes = []
         when = first_available.replace(second=0, microsecond=0) if first_available else session.close

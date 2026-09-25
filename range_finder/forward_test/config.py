@@ -10,8 +10,8 @@ LEGACY_UNIVERSE = ("SPX", "SPY", "AAPL", "AMD")
 UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v2"
-SCORER_VERSION = "weekly-close-path-v2-20m"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v3-open"
+SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14
 MAX_CAPTURE_ATTEMPTS = 3
@@ -61,7 +61,8 @@ def methodology():
     for p in ("phase1/ticker_config.py", "phase1/quote_filters.py"):
         hashes[p] = sha256((root / p).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     config = {"protocol": 1, "universe": UNIVERSE, "models": MODELS,
-              "capture_minutes_after_open": [15, 45], "gex_enabled": False,
+              "capture_minutes_after_open": [0, 45], "tracking_policy": "first_session_open",
+              "gex_enabled": False,
               "conformal_enabled": False, "source_hashes": hashes,
               "history_policy": TRADIER_POLICY_VERSION,
               "versions": {p: version(p) for p in ("numpy", "pandas", "statsmodels", "pandas_market_calendars")}}

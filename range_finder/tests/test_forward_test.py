@@ -94,7 +94,7 @@ def test_calendar_expiration_dst(d,first,last,hours):
     assert (week.sessions[-1].close-week.sessions[-1].open).total_seconds()/3600==hours
     assert listed_week_expiration([last],week)==last
     assert listed_week_expiration([str(week.monday+timedelta(days=7))],week) is None
-    assert week.capture_start.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).strftime('%H:%M')=='09:45'
+    assert week.capture_start.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).strftime('%H:%M')=='09:30'
 
 
 @pytest.mark.parametrize('put_breach,call_breach',[(False,False),(True,False),(False,True),(True,True)])
@@ -127,6 +127,37 @@ def test_earlier_outside_close_recovers(week):
     obs[str(week.sessions[1].day)]['daily'].update(close=94.,low=93.)
     s=score_forecast(f,week,obs,clock())
     assert s['close_inside'] and s['earlier_close_outside'] and s['returned_inside']
+
+
+def test_opening_session_counts_breach_before_save_but_preserves_legacy(week):
+    f, obs, clock = scoring_fixture(week, available=week.sessions[0].open + timedelta(minutes=17))
+    first = obs[str(week.sessions[0].day)]
+    # A breach in the opening minutes, followed by in-range prices throughout
+    # the legacy post-save minute window. Daily OHLC preserves that early event.
+    first['daily']['low'] = 94.
+    legacy = score_forecast(f, week, obs, clock())
+    assert legacy['path_eligible'] and legacy['put_breach'] is False
+    opening = {**f, 'tracking_policy':'first_session_open',
+               'tracking_start_at':week.sessions[0].open.isoformat()}
+    first['minutes'] = []  # Full regular-session daily bars are sufficient.
+    score = score_forecast(opening, week, obs, clock())
+    assert score['path_eligible'] and score['put_breach'] and score['returned_inside']
+    assert score['window_start'] == week.sessions[0].open.isoformat()
+    assert score['first_breach_session'] == str(week.sessions[0].day)
+    assert score['first_breach_timestamp'] is None
+    assert score['first_breach_interval'] is None  # Daily evidence, no invented minute.
+    assert opening['available_at'] == f['available_at']
+
+
+def test_capture_at_open_and_late_save_keep_open_tracking(week):
+    opened = week.sessions[0].open
+    assert week.admits(opened) and not week.admits(opened - timedelta(microseconds=1))
+    saved = opened + timedelta(minutes=8, seconds=21)
+    prepared = prepared_fixture('SPY', week, Clock(saved))
+    _, forecasts = capture_model(prepared, 'M1_baseline', week, 'opening-version', saved)
+    assert all(f['available_at'] == saved.isoformat() for f in forecasts)
+    assert all(f['tracking_start_at'] == opened.isoformat() for f in forecasts)
+    assert all(f['reference'] == prepared['reference'] for f in forecasts)
 
 
 def test_close_eligible_with_missing_path(week):

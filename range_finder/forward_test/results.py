@@ -179,18 +179,19 @@ def build_workbook(rows):
                    "earlier_close_outside", "returned_inside", "close_on_boundary", "observed_low", "observed_high",
                    "whole_week_low", "whole_week_high", "whole_week_complete", "first_breach_session",
                    "first_breach_timestamp", "first_breach_interval", "first_breach_is_earliest_verified",
-                   "window_start", "window_end", "scheduled_at", "captured_at", "available_at", "feature_cutoff",
+                   "window_start", "window_end", "tracking_policy", "tracking_start_at", "observed_extremes_scope",
+                   "scheduled_at", "captured_at", "available_at", "feature_cutoff",
                    "training_cutoff", "data_delay_seconds", "expiration", "contract_root", "settlement_convention",
                    "settlement_status", "settlement_value", "settlement_inside", "interpretation", "sources",
                    "path_limitations", "scored_at", "score_revision", "forecast_id", "error", "wings"]
     table("Breach details", "Weekly close and prospective breach evidence", rows, detail_keys)
     notes = [
         ("Close sample", "Valid final regular-session daily OHLC; inclusive put <= close <= call. Independent of path completeness."),
-        ("Breach sample", "Complete post-availability coverage and known strict-breach flags on both sides. Missing intervals do not mean no breach."),
+        ("Breach sample", "Complete declared tracking-window coverage and known strict-breach flags on both sides. New opening-session forecasts track from the first session open; legacy forecasts track from availability. Missing intervals do not mean no breach."),
         ("Recovery sample", "Rows with valid close and path data and a strict breach. Recovery rate = inside final close / these breached rows."),
         ("Touches", "Low <= put or high >= call. Equality alone is not a strict breach. Partial-minute equality may be unknown."),
         ("First breach", "Session and interval only where supported. Exact timestamps remain blank for OHLC evidence."),
-        ("Extremes", "Observed extremes use verified post-availability intervals. Whole-week daily extremes include pre-forecast movement."),
+        ("Extremes", "Opening-session forecasts include all regular-session movement from the opening anchor, including before the recorded save time. Legacy observed extremes use verified post-availability intervals. Whole-week daily extremes cover full sessions."),
         ("Versions", "Different cohorts and model versions remain separate in the Scoreboard. Counts are tier records."),
         ("Version labels", "Short version labels identify groups. Full model version hashes are retained in each data sheet."),
         ("Settlement", "Official contract settlement is separate from the weekly close. Stock/ETF results are theoretical expiration proxies."),

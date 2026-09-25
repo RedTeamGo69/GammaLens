@@ -24,7 +24,7 @@ class TradingWeek:
 
     @property
     def capture_start(self):
-        return self.sessions[0].open + timedelta(minutes=15)
+        return self.sessions[0].open
 
     @property
     def capture_end(self):

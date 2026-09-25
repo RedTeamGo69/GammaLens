@@ -58,6 +58,9 @@ def render_forward_test(rows=None, runs=None, studies=None):
     study_ids = list(dict.fromkeys([s['study_id'] for s in studies] + [r['study_id'] for r in rows]))
     if study_ids:
         preferred = DEFAULT_STUDY_ID if DEFAULT_STUDY_ID in study_ids else study_ids[0]
+        # Superseded registrations with no slots/results are not result archives.
+        populated = {r['study_id'] for r in rows}
+        study_ids = [sid for sid in study_ids if sid == preferred or sid in populated]
         study_ids = [preferred] + [sid for sid in study_ids if sid != preferred]
         if len(study_ids) > 1:
             from ui_forward_summary import _choose
@@ -71,6 +74,9 @@ def render_forward_test(rows=None, runs=None, studies=None):
         rows = [r for r in rows if r['study_id'] == selected]
         studies = [s for s in studies if s['study_id'] == selected]
         runs = [r for r in runs if r['study_id'] == selected]
+        if selected == DEFAULT_STUDY_ID:
+            st.caption("Tracking starts at the first trading session's 9:30 AM ET open. "
+                       "Opening prices anchor the ranges; actual forecast save times are recorded separately.")
     st.session_state.setdefault("ft_view", st.session_state.get("_ft_view_last", "Summary"))
     with st.container(horizontal=True, vertical_alignment="center"):
         view = st.segmented_control("Results view", ["Summary", "Detailed data"],

@@ -1,6 +1,8 @@
 """Close success and path events are separate, with independent eligibility.
 
-Minute highs/lows locate a breach only to an interval. The first minute may
+Opening-session forecasts use full-session OHLC from the opening bell and keep
+their actual publication time separately. Legacy forecasts use post-availability
+minute coverage. Minute highs/lows locate a breach only to an interval. The first minute may
 straddle availability: its full-bar extremes can prove absence of a breach,
 but an outside extreme alone cannot prove a prospective breach. A later
 unambiguous observation can establish that side's event. Missing intervals
@@ -15,6 +17,11 @@ from .provider import valid_ohlc, finite_price
 
 def score_forecast(forecast, week, observations, now):
     available = datetime.fromisoformat(forecast["available_at"])
+    # New opening-anchored studies evaluate the entire regular session. The
+    # actual forecast availability remains separate; old forecasts retain their
+    # original post-availability rule rather than being silently reinterpreted.
+    full_session = forecast.get("tracking_policy") == "first_session_open"
+    tracking_start = datetime.fromisoformat(forecast["tracking_start_at"]) if full_session else available
     put, call = forecast["put_short"], forecast["call_short"]
     out = {"close_eligible": False, "path_eligible": False, "close_inside": None,
            "put_breach": None, "call_breach": None, "either_breach": None, "both_breached": None,
@@ -23,12 +30,13 @@ def score_forecast(forecast, week, observations, now):
            "observed_high": None, "observed_low": None, "whole_week_high": None, "whole_week_low": None,
            "first_breach_session": None, "first_breach_timestamp": None,
            "first_breach_interval": None, "first_breach_is_earliest_verified": False,
-           "window_start": available.isoformat(), "window_end": week.evaluation_close.isoformat(),
+           "window_start": tracking_start.isoformat(), "window_end": week.evaluation_close.isoformat(),
            "classification": "Pending", "status": "pending", "missing_sessions": [],
            "path_limitations": [], "sources": [], "observation_ids": [],
            "settlement_status": "unverified", "settlement_value": None, "settlement_inside": None}
     if not (finite_price(put) and finite_price(call) and put < call and week.admits(available)
-            and forecast["expiration"] == str(week.sessions[-1].day)):
+            and forecast["expiration"] == str(week.sessions[-1].day)
+            and (not full_session or tracking_start == week.sessions[0].open)):
         return {**out, "classification": "Invalid forecast data", "status": "invalid"}
     complete_window = now >= week.evaluation_close + timedelta(minutes=DATA_READY_MINUTES)
     path_complete = True
@@ -51,7 +59,7 @@ def score_forecast(forecast, week, observations, now):
         day = str(session.day)
         obs = observations.get(day)
         due = session.close + timedelta(minutes=DATA_READY_MINUTES)
-        if session.close <= available:
+        if session.close <= tracking_start:
             continue
         if not obs or obs.get("ticker") != forecast["ticker"] or obs.get("session") != day:
             path_complete = False
@@ -90,13 +98,13 @@ def score_forecast(forecast, week, observations, now):
             out["path_limitations"].append(f"{day}: missing/invalid daily OHLC")
             if session != week.sessions[-1]:
                 missing_earlier_close = True
-        if session.open >= available:
+        if session.open >= tracking_start:
             if daily_valid:
                 add_bar(bar, session.day)
             continue
 
         # Only the first partially observed session requires minute history.
-        start = available.replace(second=0, microsecond=0)
+        start = tracking_start.replace(second=0, microsecond=0)
         minute_map = {}
         duplicate_minutes = set()
         invalid_minutes = False
@@ -124,7 +132,7 @@ def score_forecast(forecast, week, observations, now):
             end = cursor + timedelta(minutes=1)
             if not minute or not valid_ohlc(minute):
                 path_complete = False
-            elif cursor < available:
+            elif cursor < tracking_start:
                 # Superset bounds wholly inside imply no breach in the partial
                 # minute. Outside/equality could be pre-publication, so do not
                 # assign an event unless later in-window evidence establishes it.
@@ -143,7 +151,8 @@ def score_forecast(forecast, week, observations, now):
     if path_bars:
         out["observed_high"] = max(float(b["high"]) for b in path_bars)
         out["observed_low"] = min(float(b["low"]) for b in path_bars)
-    out["observed_extremes_scope"] = "verified post-availability intervals; excludes partial-minute extremes"
+    out["observed_extremes_scope"] = ("full regular sessions from the opening anchor; includes movement before forecast availability"
+                                     if full_session else "verified post-availability intervals; excludes partial-minute extremes")
     if daily_bars:
         out["whole_week_high"] = max(float(b["high"]) for b in daily_bars)
         out["whole_week_low"] = min(float(b["low"]) for b in daily_bars)

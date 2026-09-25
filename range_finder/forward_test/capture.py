@@ -142,6 +142,8 @@ def capture_model(prepared, model, week, model_version, now):
                           "interpretation": "weekly-close range study" if ticker == "SPX" else "theoretical expiration proxy",
                           "scheduled_at": week.capture_start.isoformat(), "captured_at": now.isoformat(),
                           "available_at": now.isoformat(), "prepared_at": prepared["prepared_at"],
+                          "tracking_start_at": week.sessions[0].open.isoformat(),
+                          "tracking_policy": "first_session_open",
                           "evaluation_close": week.evaluation_close.isoformat(),
                           "feature_cutoff": inputs["feature_cutoff"], "training_cutoff": inputs["training_cutoff"],
                           "data_delay_seconds": prepared["data_delay_seconds"],

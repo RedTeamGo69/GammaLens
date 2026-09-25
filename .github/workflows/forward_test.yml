@@ -5,8 +5,7 @@ name: Weekly Spread Finder Forward Test
 on:
   workflow_dispatch:
   schedule:
-    - cron: "45,55 13,14 * * 1-5"
-    - cron: "5 14,15 * * 1-5"
+    - cron: "30,40,50 13,14 * * 1-5"
     # 13:20 ET covers early closes; 16:20 ET covers regular closes.
     - cron: "20 17,18,20,21 * * 1-5"
 
@@ -39,7 +38,7 @@ jobs:
           import os
           now = datetime.now(ZoneInfo('America/New_York'))
           minute = now.hour * 60 + now.minute
-          run = os.environ['MANUAL'] == 'true' or 585 <= minute < 615 or 800 <= minute < 850 or 980 <= minute < 1030
+          run = os.environ['MANUAL'] == 'true' or 570 <= minute < 615 or 800 <= minute < 850 or 980 <= minute < 1030
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'run={str(run).lower()}\n')
           PY

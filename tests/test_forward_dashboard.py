@@ -81,12 +81,15 @@ def test_restart_defaults_to_empty_active_study_and_keeps_archive_separate(monke
     from range_finder.forward_test.config import DEFAULT_STUDY_ID
     rows = runpy.run_path(str(Path(__file__).parent/'fixtures/forward_summary_rows.py'))['summary_rows']()
     studies = [{'study_id': DEFAULT_STUDY_ID, 'start_week':'2026-09-28'},
+               {'study_id':'spread-finder-weekly-v2', 'start_week':'2026-09-28'},
                {'study_id':'SYNTHETIC', 'start_week':'2026-09-14'}]
     runs = [{'study_id':'SYNTHETIC', 'status':'failed', 'started_at':'2026-09-21',
              'finished_at':'2026-09-21', 'payload_json':json.dumps({'errors':['ARCHIVED_FAILURE']})}]
     monkeypatch.setattr(ui_forward_test, 'load_snapshot', lambda: (rows, runs, studies))
     at = AppTest.from_string('from ui_forward_test import render_forward_test\nrender_forward_test()').run()
     assert not at.exception and at.selectbox(key='ft_active_study').value == DEFAULT_STUDY_ID
+    assert len(at.selectbox(key='ft_active_study').options) == 2
+    assert any('9:30 AM ET open' in c.value for c in at.caption)
     assert 'No frozen predictions' in at.info[0].value
     assert not at.warning and not any('53 of 64' in m.value for m in at.markdown)
     assert any('2026-09-28' in c.value for c in at.caption)

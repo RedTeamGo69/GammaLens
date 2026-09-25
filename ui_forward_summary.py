@@ -36,7 +36,7 @@ def ticker_recap(rows):
     if m["recoveries"]:
         parts.append(f"{m['recoveries']} breached, then recovered by the close.")
     elif m["path_n"] == len(rows) and not m["breaches"]:
-        parts.append("No breaches after capture.")
+        parts.append("No breaches during the tracking window.")
     if m["close_n"] < len(rows) or m["path_n"] < len(rows):
         parts.append("Some results are still pending or lack complete data.")
     return " ".join(parts)
@@ -158,7 +158,7 @@ def render_summary(rows, studies):
                        f"Incomplete/invalid: {m['incomplete']}")
         if m["path_n"]:
             st.write(f"{m['breaches']} of {m['path_n']} predictions with complete path data broke outside "
-                     "a boundary after capture.")
+                     "a boundary during the tracking window.")
         if m["recovery_n"]:
             st.write(f"Of the {m['recovery_n']} breached predictions with a valid weekly close, "
                      f"{m['recoveries']} recovered by that close.")

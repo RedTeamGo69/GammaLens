@@ -100,7 +100,11 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
             observations = store.observations(study_id, ws, ticker)
             checks = store.observation_checks(study_id, ws, ticker)
             changed = False
-            first_available = min(datetime.fromisoformat(f["available_at"]) for f in forecasts)
+            # Full-session scoring uses daily OHLC from the opening bell. Only
+            # legacy post-availability forecasts need partial-session minutes.
+            partial_starts = [datetime.fromisoformat(f["available_at"]) for f in forecasts
+                              if json.loads(f["payload_json"]).get("tracking_policy") != "first_session_open"]
+            first_available = min(partial_starts) if partial_starts else None
             for session in week.sessions:
                 if expired:
                     break
@@ -113,13 +117,14 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
                 # Re-fetch incomplete sessions daily; complete sessions get a
                 # four-calendar-day correction window, then stay cold. Final-day
                 # settlement remains independently eligible for reconciliation.
-                if old and valid_ohlc(old.get("daily")) and session.day != first_available.astimezone(NY).date():
+                partial_session = first_available is not None and session.day == first_available.astimezone(NY).date()
+                if old and valid_ohlc(old.get("daily")) and not partial_session:
                     age = (now.astimezone(NY).date() - session.day).days
                     if age > 4 and (ticker != "SPX" or session != week.sessions[-1]):
                         continue
                 try:
                     payload = provider.observe(ticker, session,
-                        first_available if session.day == first_available.astimezone(NY).date() else None)
+                        first_available if partial_session else None)
                     if (payload.get("ticker") != ticker or payload.get("session") != str(session.day)
                             or not valid_ohlc(payload.get("daily"))
                             or payload["daily"].get("date") != str(session.day)):

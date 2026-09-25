@@ -89,7 +89,8 @@ class FixtureProvider:
 
 
 def scoring_fixture(week, put=95., call=105., available=None):
-    available = available or week.capture_start
+    # These fixtures exercise the legacy post-availability scoring contract.
+    available = available or week.sessions[0].open + timedelta(minutes=15)
     f = {"ticker": "SPY", "put_short": put, "call_short": call,
          "available_at": available.isoformat(), "expiration": str(week.sessions[-1].day), "contract_root": "SPY"}
     clock = Clock(week.evaluation_close + timedelta(hours=3))

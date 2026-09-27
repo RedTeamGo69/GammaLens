@@ -250,62 +250,64 @@ _INIT_ADVISORY_LOCK_KEY = 776699
 
 
 def _acquire_init_advisory_lock(conn) -> None:
-    """Block until the session owns the schema-init advisory lock.
+    """Block until this TRANSACTION owns the schema-init advisory lock.
+
+    Transaction-scoped on purpose: DATABASE_URL is Neon's pooled endpoint
+    (PgBouncer, transaction mode) and this wrapper runs in autocommit, so a
+    session lock's acquire and unlock could be routed to different server
+    connections — unlock then reported "not held" and the lock leaked. Every
+    Monday weekly setup after 2026-08-31 failed that way. The xact lock is
+    released by the transaction's COMMIT/ROLLBACK; there is no unlock call.
 
     ``PGCursor`` intentionally retains its historical numeric adaptation,
     which turns Python integers into floats. PostgreSQL does not implicitly
-    resolve ``pg_advisory_lock(double precision)`` to the bigint overload, so
-    this one overload-sensitive call casts explicitly instead of changing
-    parameter semantics for every range-finder query.
+    resolve the double-precision overload to the bigint one, so this call
+    casts explicitly instead of changing parameter semantics for every
+    range-finder query.
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT pg_advisory_lock(CAST(? AS bigint))",
+        "SELECT pg_advisory_xact_lock(CAST(? AS bigint))",
         (_INIT_ADVISORY_LOCK_KEY,),
     )
     if cur.fetchone() is None:
-        raise RuntimeError("pg_advisory_lock returned no result row")
+        raise RuntimeError("pg_advisory_xact_lock returned no result row")
 
-
-def _release_init_advisory_lock(conn) -> None:
-    """Release the session lock and prove PostgreSQL reported success."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT pg_advisory_unlock(CAST(? AS bigint))",
-        (_INIT_ADVISORY_LOCK_KEY,),
-    )
-    row = cur.fetchone()
-    if not row or row[0] is not True:
-        raise RuntimeError("pg_advisory_unlock reported that the lock was not held")
 
 def init_all_tables(conn) -> None:
     """Create all range finder tables if they don't exist (Postgres DDL).
 
-    Serialized behind a session-level Postgres advisory lock. Eight matrix
-    jobs fire this concurrently every Monday; without serialization their
-    CREATE / ALTER / migration DDL raced on Neon's throttled free tier,
+    Serialized behind a transaction-scoped Postgres advisory lock. Eight
+    matrix jobs fire this concurrently every Monday; without serialization
+    their CREATE / ALTER / migration DDL raced on Neon's throttled free tier,
     where the pile-up stretched a normally-instant init to 15+ minutes and
-    delayed the 9:30 snapshot. pg_advisory_lock makes the others wait for
-    the first to finish (after which every statement is a cheap no-op via
-    IF NOT EXISTS / duplicate-column guards). Postgres is the only supported
-    backend, so failure to acquire or release this serialization mechanism is
-    a hard initialization error rather than an unlocked best-effort fallback.
+    delayed the 9:30 snapshot. The lock makes the others wait for the first
+    to finish (after which every statement is a cheap no-op via IF NOT
+    EXISTS / duplicate-column guards).
+
+    The whole body runs in ONE explicit transaction (BEGIN…COMMIT sent as
+    statements, because psycopg2's commit() is a no-op under autocommit): a
+    transaction pins a single pooled server connection, the DDL applies
+    atomically, and the lock releases at COMMIT/ROLLBACK. Failure to take the
+    lock is a hard initialization error, not an unlocked fallback.
     """
+    cur = conn.cursor()
+    cur.execute("BEGIN")
     try:
-        _acquire_init_advisory_lock(conn)
-    except Exception as exc:
-        raise RuntimeError(
-            "Failed to acquire Postgres schema init lock"
-        ) from exc
-    try:
-        _init_all_tables_body(conn)
-    finally:
         try:
-            _release_init_advisory_lock(conn)
+            _acquire_init_advisory_lock(conn)
         except Exception as exc:
             raise RuntimeError(
-                "Failed to release Postgres schema init lock"
+                "Failed to acquire Postgres schema init lock"
             ) from exc
+        _init_all_tables_body(conn)
+    except BaseException:
+        try:
+            cur.execute("ROLLBACK")
+        except Exception:
+            log.warning("ROLLBACK after failed schema init also failed")
+        raise
+    cur.execute("COMMIT")
 
 
 def _init_all_tables_body(conn) -> None:

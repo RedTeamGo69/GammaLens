@@ -41,6 +41,10 @@ jobs:
   capture:
     runs-on: ubuntu-latest
     strategy:
+      # One ticker's failure must not cancel the others: with the default
+      # fail-fast, a JPM schema-lock error cancelled SPX's Monday weekly setup
+      # (2026-09-21), so no SPX anchor, fit or calibration plan landed.
+      fail-fast: false
       matrix:
         # Index / ETF defaults + single-name defaults. Single names resolve
         # through ticker_config's dynamic-config path (own-HAR, VIX vol proxy).

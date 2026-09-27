@@ -8,12 +8,12 @@
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from range_finder.data_collector import (
     get_weekly_spx,
@@ -65,6 +65,56 @@ def assess_path_provenance(feature_row: pd.Series, forecast_week) -> tuple:
     except (TypeError, ValueError):
         return False, None, required_week
     return source_week == required_week, source_week, required_week
+
+
+def _week_label(ts) -> str:
+    return ts.strftime("%Y-%m-%d") if ts is not None else "missing"
+
+
+@dataclass(frozen=True)
+class ForecastRowBlocked:
+    """Why a week's feature row may not be forecast off.
+
+    ``reason`` is ``"missing"`` (no row for the week) or ``"stale_path"``
+    (the row exists but its HAR path is not the immediately prior week's).
+    """
+    reason: str
+    week: pd.Timestamp
+    newest_week: "pd.Timestamp | None" = None
+    source_week: "pd.Timestamp | None" = None
+    required_week: "pd.Timestamp | None" = None
+
+    def describe(self) -> str:
+        if self.reason == "missing":
+            return (f"no feature row for {_week_label(self.week)} "
+                    f"(newest is {_week_label(self.newest_week)})")
+        return (f"{_week_label(self.week)} path source is "
+                f"{_week_label(self.source_week)}; requires "
+                f"{_week_label(self.required_week)}")
+
+
+def select_forecast_row(features: pd.DataFrame, week_start) -> tuple:
+    """``(row, None)`` when ``week_start``'s row is servable, else
+    ``(None, ForecastRowBlocked)``.
+
+    The single serving rule for every forecaster (UI tab, export, forward
+    capture, cron). Never falls back to another week's row: a stale row
+    produces confident-looking strikes off last week's volatility path.
+    """
+    week = pd.Timestamp(week_start).normalize()
+    if features is None or features.empty or week not in features.index:
+        newest = None
+        if features is not None and not features.empty:
+            newest = pd.Timestamp(features.index.max())
+        return None, ForecastRowBlocked("missing", week, newest_week=newest)
+    row = features.loc[week]
+    fresh, source_week, required_week = assess_path_provenance(row, week)
+    if not fresh:
+        return None, ForecastRowBlocked(
+            "stale_path", week,
+            source_week=source_week, required_week=required_week,
+        )
+    return row, None
 
 
 # =============================================================================
@@ -157,7 +207,8 @@ def compute_hv_windows(daily_df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
-    """Pull weekly closes for VIX9D and VIX3M — Cboe primary, yfinance fallback.
+    """Pull weekly closes for VIX9D and VIX3M — Cboe primary, then validated
+    bar_sources bars (Tradier, then yfinance).
 
     Cboe's official CSVs carry VIX9D back to 2011 and VIX3M back to 2009
     (far deeper than yfinance's reliable coverage), which also unlocks longer
@@ -177,17 +228,17 @@ def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
         except Exception as e:
             log.warning(f"Cboe {cboe_index} unavailable ({e}) — "
                         f"falling back to yfinance {yf_symbol}")
-        # Fallback: yfinance weekly bars.
-        raw = yf.download(yf_symbol, start=start, end=end, interval="1wk", progress=False)
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        if raw.empty:
-            log.warning(f"{name} returned empty — will be NULL in features")
+        # Fallback: validated weekly bars (Tradier, then yfinance).
+        from range_finder.bar_sources import fetch_weekly_bars, tradier_symbol_for
+        try:
+            bars = fetch_weekly_bars(yf_symbol, tradier_symbol_for(yf_symbol),
+                                     years, name)
+        except Exception as e:
+            log.warning(f"{name} unavailable ({e}) — will be NULL in features")
             return pd.Series(dtype=float, name=name)
-        s = raw["Close"].copy()
+        s = bars["close"].copy()
         s.name = name
-        s.index = pd.to_datetime(s.index).normalize()
-        return s
+        return s[s.index >= pd.Timestamp(start)]
 
     vix9d = fetch_series("VIX9D", "^VIX9D", "vix9d_close")
     vix3m = fetch_series("VIX3M", "^VIX3M", "vix3m_close")
@@ -447,7 +498,7 @@ def build_features(conn, exclude_covid: bool = True,
         last_bar_week + pd.Timedelta(days=4, hours=16)
     ).tz_localize("America/New_York")
     if as_of is not None:
-        from range_finder.trading_week import trading_week
+        from phase1.trading_week import trading_week
         _last_bar_friday_close = trading_week(last_bar_week.date()).evaluation_close
     last_bar_is_complete = (as_of if as_of is not None else _ny_now()) >= _last_bar_friday_close
 

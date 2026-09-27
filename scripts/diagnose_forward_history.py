@@ -19,7 +19,7 @@ from curl_cffi import requests as curl_requests
 from range_finder.forward_test.config import UNIVERSE, utcnow
 from range_finder.forward_test.provider import TradierProvider, valid_ohlc, frame_records
 from range_finder.forward_test.store import Store
-from range_finder.trading_week import NY, trading_week
+from phase1.trading_week import NY, trading_week
 
 
 def main():

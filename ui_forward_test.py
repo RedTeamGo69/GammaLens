@@ -1,6 +1,5 @@
 """Read-only Forward Test view. No quotes, model refits, or schema changes."""
 import json
-import os
 from pathlib import Path
 import subprocess
 
@@ -14,10 +13,8 @@ from range_finder.forward_test.config import UNIVERSE, MODELS, COHORT, DEFAULT_S
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
 def load_snapshot():
     from range_finder.forward_test.store import Store
-    url = os.environ.get("FORWARD_TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if not url:
-        url = st.secrets.get("DATABASE_URL", "")
-    store = Store.postgres(url)
+    from phase1 import credentials
+    store = Store.postgres(credentials.forward_test_database_url())
     try:
         studies = store.query("SELECT study_id, start_week FROM ft_studies ORDER BY created_at DESC")
         records = [r for s in studies for r in load_results(store, s["study_id"])]

@@ -12,7 +12,7 @@ captures daily snapshots.
 
 ```bash
 .venv/Scripts/python.exe -m streamlit run streamlit_app.py    # run the app
-.venv/Scripts/python.exe -m pytest -q                          # 402 tests, ~20s
+.venv/Scripts/python.exe -m pytest -q                          # ~720 tests, ~2 min
 .venv/Scripts/python.exe -m pytest range_finder/tests -q        # model tests only
 ```
 
@@ -25,8 +25,8 @@ Three layers, roughly in dependency order:
 
 | Path | Role |
 |---|---|
-| `phase1/` | GEX engine + market data. `gex_engine.py`, `zero_gamma.py`, `expected_move.py`, `key_levels.py`, `ticker_config.py`, `data_client.py` |
-| `range_finder/` | Weekly range model. `har_model.py` (the forecast), `feature_builder.py`, `spread_levels.py`, `db.py`, `event_calendars.py`, `calibration.py` |
+| `phase1/` | GEX engine + market data. `gex_engine.py`, `zero_gamma.py`, `expected_move.py`, `key_levels.py`, `ticker_config.py`, `data_client.py`, `trading_week.py` (every "which week?" question), `credentials.py` (call-time secrets), `pg.py` (the one Postgres connect) |
+| `range_finder/` | Weekly range model. `har_model.py` (the forecast), `recommendations.py` (fit-all, saved-fit lookup, forecast→plan→tiers — every caller goes through it), `weekly_anchor.py` (the Monday strike anchor), `feature_builder.py` (`select_forecast_row` is the one serving rule), `bar_sources.py` (Tradier-first bars + symbol map), `spread_levels.py`, `db.py`, `event_calendars.py`, `calibration.py`, `forward_workbook.py`, `spread_finder_rules.py`, `spread_finder_view.py` (the tab's view-model; `tests/test_spread_finder_tab.py` renders the real tab against fakes) |
 | `ui_*.py` (root) | Streamlit rendering. `ui_charts.py`, `ui_spread_finder.py`, `ui_theme.py`, `ui_controls.py`, `ui_sidebar.py`, `ui_tv_export.py` |
 
 Entry points: `streamlit_app.py` (`main()` at line 379), `scheduled_snapshot.py` (cron),
@@ -75,9 +75,16 @@ highest = newest) is the cheap way to tell a recreated table from an original.
 
 ## Cron
 
-`.github/workflows/scheduled_snapshot.yml` — 9:45 ET on weekdays (two cron lines to cover
-EDT/EST). Matrix: `SPX, XSP, SPY, QQQ, NDX, NVDA, JPM, CAT`. Index/ETF capture daily;
-single names run weekly-only on the week's first trading day.
+`.github/workflows/scheduled_snapshot.yml` — primary trigger is cron-job.org's
+`workflow_dispatch` at 9:28 ET. The two `schedule:` lines are a backup that GitHub starts
+~4 hours late, so the script treats any run after the 9:20–10:15 ET window as **recovery**:
+it re-runs a missing first-session weekly setup (anchor from the daily bar; no GEX save, no
+spot fallback) and exits 1 if the opening EM snapshots are missing (the dead-man's-switch
+e-mail). Matrix (`fail-fast: false`): `SPX, XSP, SPY, QQQ, NDX, NVDA, JPM, CAT`. Index/ETF
+capture daily; single names run weekly-only on the week's first trading day.
+
+Architecture decisions live in `docs/adr/` (0001: the forward study keeps its own
+fail-closed market-data path — don't merge it into `bar_sources`).
 
 `TICKER_CONFIG` (`phase1/ticker_config.py`) has explicit entries for SPX, XSP, QQQ, SPY,
 NDX, AMZN, AMD; the single names in the matrix resolve through the dynamic-config path.
@@ -101,6 +108,17 @@ These are load-bearing. Each one cost a debugging session or a walk-forward stud
   doing it before the Monday cron overwrites `saved_models`.
 - **Nav state is not URL-persisted.** Ticker, tab, and recents live only in `session_state`,
   so a Streamlit Cloud session reset wipes all three at once — one bug, not three.
+- **The forward study hashes source bytes.** `forward_test/config.py::methodology()` digests
+  the raw source of ~14 files (har_model, feature_builder, spread_levels, recommendations,
+  gex_policy, conformal, event_calendars, forward_test/{capture,provider,config,history_policy},
+  phase1/{ticker_config,quote_filters,trading_week}). Any byte change — even a pure refactor —
+  starts a new comparison series; landing one during a Monday 09:30–10:15 ET capture window
+  fails that week's slots. Batch such edits and merge outside the window.
+- **`DATABASE_URL` is Neon's pooled endpoint (PgBouncer, transaction mode).** Session-level
+  advisory locks do not survive it: `pg_advisory_lock`/`unlock` under autocommit can hit
+  different server connections ("lock was not held"). Use `pg_advisory_xact_lock` inside an
+  explicit BEGIN…COMMIT (see `db.init_all_tables`, `forward_test/store.py`). This broke every
+  Monday setup from 2026-09-08 to the fix.
 - **xlsx export scores by ticker** via an `INDIRECT` sanitizer. `IFERROR(SUMIF(INDIRECT(...)))`
   silently returns 0 in Excel, so the sanitizer is what makes the scoreboard correct.
 

@@ -41,6 +41,26 @@ _MIN_MONDAY_FRACTION = 0.95
 
 _INTERVAL_TO_TRADIER = {"1wk": "weekly", "1d": "daily"}
 
+# yfinance index symbol -> Tradier symbol, the one vendor symbol map (Cboe's
+# own index names live in cboe_data.YF_TO_CBOE_INDEX). Plain symbols (no ^)
+# ARE their Tradier symbols; ^VXN is deliberately absent — Tradier can't
+# quote it, so it falls through to Cboe / yfinance.
+_YF_TO_TRADIER_INDEX = {
+    "^GSPC":  "SPX",
+    "^NDX":   "NDX",
+    "^VIX":   "VIX",
+    "^VIX1D": "VIX1D",
+    "^VIX9D": "VIX9D",
+    "^VIX3M": "VIX3M",
+}
+
+
+def tradier_symbol_for(yf_symbol: str) -> "str | None":
+    """Tradier symbol for a yfinance symbol, or None if Tradier can't serve it."""
+    if not yf_symbol.startswith("^"):
+        return yf_symbol
+    return _YF_TO_TRADIER_INDEX.get(yf_symbol)
+
 
 def primary_source_for(tradier_symbol: str | None) -> str:
     """Resolve the primary bar source for a symbol ("tradier"/"yfinance")."""
@@ -99,8 +119,8 @@ def _fetch_bars(yf_symbol: str, tradier_symbol: str | None, interval: str,
 def _fetch_tradier(symbol: str, interval: str,
                    start: datetime, end: datetime) -> pd.DataFrame:
     """Bars from Tradier /markets/history, shaped to the output contract."""
-    from range_finder.data_collector import _tradier_token
-    token = _tradier_token()
+    from phase1 import credentials
+    token = credentials.tradier_token()
     if not token:
         raise RuntimeError("TRADIER_TOKEN not set")
 
@@ -288,13 +308,12 @@ def _parity_row(label: str, yf_symbol: str, tradier_symbol: str,
 
 
 def main() -> None:
-    import os
     import sys
 
     logging.basicConfig(level=logging.WARNING)
 
-    from range_finder.data_collector import _tradier_token
-    if not (_tradier_token() or os.environ.get("TRADIER_TOKEN", "").strip()):
+    from phase1 import credentials
+    if not credentials.tradier_token():
         print("TRADIER_TOKEN not set — cannot run parity check.")
         sys.exit(1)
 

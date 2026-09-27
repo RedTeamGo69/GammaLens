@@ -17,7 +17,7 @@ from range_finder.forward_test.results import load_results, metrics, build_workb
 from range_finder.forward_test.runner import run_study
 from range_finder.forward_test.store import Store
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider
-from range_finder.trading_week import trading_week
+from phase1.trading_week import trading_week
 
 
 class DemoProvider(FixtureProvider):

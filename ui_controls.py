@@ -191,7 +191,7 @@ def render_settings_controls(ticker: str, ticker_type: str,
     return exp_token, refresh_token, cal_start, cal_end
 
 
-def render_refresh_button() -> None:
+def render_refresh_button(clear_pipeline=None) -> None:
     """A native 'refresh data' button — refreshes market data and reruns.
 
     Clears the cheap ``cache_data`` market fetches (quotes, expirations, FRED
@@ -204,16 +204,17 @@ def render_refresh_button() -> None:
     burning Neon CU-hours for nothing. Targeting the two data caches refreshes
     exactly what the button promises while leaving those expensive resources
     warm.
+
+    ``clear_pipeline`` is the app's ``fetch_all_data.clear``, passed in rather
+    than imported: under ``streamlit run`` the app module is ``__main__``, so
+    importing ``fetch_all_data`` from the app module loaded a SECOND copy
+    whose cache (keyed by module name) the app never reads — the button
+    cleared nothing and the pipeline only refreshed on its 90 s TTL.
     """
     if st.button("⟳ Refresh data", key="refresh_now_btn", width="stretch"):
         st.cache_data.clear()
-        try:
-            from streamlit_app import fetch_all_data
-            fetch_all_data.clear()
-        except Exception:
-            # If the GEX pipeline cache can't be reached for any reason, the
-            # cache_data clear + rerun still refreshes the bulk of the view.
-            pass
+        if clear_pipeline is not None:
+            clear_pipeline()
         st.rerun()
 
 

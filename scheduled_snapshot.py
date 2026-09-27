@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from phase1 import credentials
+from phase1.trading_week import is_first_session, setup_week
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _logger = logging.getLogger(__name__)
@@ -92,21 +94,65 @@ def _execute_required_weekly_setup(setup_fn, *args, **kwargs) -> bool:
     return True
 
 
+def _late_run_plan(completion, is_week_first_trading_day):
+    """``(run_weekly_setup, fail_reason)`` for a run after the morning window.
+
+    GitHub starts the backup ``schedule:`` fires ~4 hours late, so they land
+    in the afternoon. The weekly setup is recoverable then (its anchor is the
+    first session's daily bar; fits don't depend on the hour). The opening
+    EM snapshots are not — a mid-day straddle is a different number — so
+    their absence becomes a failure: that is the dead-man's-switch
+    notification the backup exists for.
+    """
+    if completion is None:
+        return False, "could not read today's capture state"
+    run_setup = bool(is_week_first_trading_day and not completion["weekly_setup"])
+    missing = [k for k in ("daily_em", "weekly_em") if not completion[k]]
+    if missing:
+        return run_setup, (f"opening capture missing ({', '.join(missing)}) — the "
+                           "primary 9:28 ET run did not capture at the open; "
+                           "it cannot be reconstructed after the window")
+    return run_setup, None
+
+
+def _late_recovery(ticker, run_now, completion, is_week_first_trading_day,
+                   fred_key) -> int:
+    """Run what a late backup can still do correctly; return the exit code."""
+    run_setup, fail_reason = _late_run_plan(completion, is_week_first_trading_day)
+    if run_setup:
+        _logger.info(f"{ticker}: late backup — weekly setup missing, running it now")
+        try:
+            _execute_required_weekly_setup(
+                _run_weekly_spread_setup, ticker, None, run_now, fred_key,
+                None, None, None, None, late_recovery=True,
+            )
+            setup_key = setup_week(run_now).key
+            if not _weekly_setup_artifacts_complete(ticker, setup_key):
+                raise RuntimeError(f"weekly artifacts still missing for {ticker}/{setup_key}")
+        except Exception as e:
+            _logger.error(f"{ticker}: late weekly setup failed: {e}")
+            return 1
+    if fail_reason:
+        _logger.error(f"{ticker}: {fail_reason}")
+        return 1
+    _logger.info(f"{ticker}: late backup — nothing left to recover, exiting green")
+    return 0
+
+
 def capture_snapshot():
     """Run the full GEX pipeline and save a snapshot + EM to Postgres."""
 
     # ── Validate env ──
-    tradier_token = os.environ.get("TRADIER_TOKEN", "")
+    tradier_token = credentials.tradier_token()
     if not tradier_token:
         _logger.error("TRADIER_TOKEN not set — aborting")
         sys.exit(1)
 
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
+    if not credentials.database_url():
         _logger.error("DATABASE_URL not set — nowhere to save snapshot")
         sys.exit(1)
 
-    fred_key = os.environ.get("FRED_API_KEY", "")
+    fred_key = credentials.fred_api_key()
     ticker = os.environ.get("TICKER", "SPX")
 
     # ── Imports (after env check so errors are clear) ──
@@ -139,9 +185,12 @@ def capture_snapshot():
     time_val = hour * 60 + minute  # minutes since midnight
     market_open  = 9 * 60 + 20     # 9:20 AM (small buffer)
     market_close = 10 * 60 + 15    # 10:15 AM (tolerate runner startup delay)
-    if not force_weekly_setup and (time_val < market_open or time_val > market_close):
-        _logger.info(f"Outside morning capture window ({run_now.strftime('%I:%M %p ET')}) — skipping")
+    if not force_weekly_setup and time_val < market_open:
+        _logger.info(f"Before the morning capture window ({run_now.strftime('%I:%M %p ET')}) — skipping")
         sys.exit(0)
+    # After the window: a (GitHub-delayed) backup fire. It never captures
+    # opening data, but recovers what it can — see _late_run_plan below.
+    is_late = not force_weekly_setup and time_val > market_close
 
     # Skip weekends (shouldn't happen with Mon-Fri cron, but just in case)
     if not force_weekly_setup and run_now.weekday() >= 5:
@@ -163,15 +212,9 @@ def capture_snapshot():
     # trading day — exactly the SPX/XSP weekly-setup cadence. Skipping them on
     # the other weekdays avoids 4 no-op runs/week (and the Neon compute they'd
     # wake). FORCE_WEEKLY_SETUP overrides. Computed here (before the 9:30 wait,
-    # the Tradier chain fetch, and GEX compute) so a skip is cheap. is_monday /
-    # is_tuesday_after_holiday are reused by the weekly-setup block below.
-    is_monday = run_now.weekday() == 0
-    is_tuesday_after_holiday = False
-    if run_now.weekday() == 1:
-        monday = run_now - __import__('datetime').timedelta(days=1)
-        mon_session = get_session_state(CASH_CALENDAR, monday)
-        is_tuesday_after_holiday = mon_session.market_open is None
-    is_week_first_trading_day = is_monday or is_tuesday_after_holiday
+    # the Tradier chain fetch, and GEX compute) so a skip is cheap; the
+    # weekly-setup block below reuses it.
+    is_week_first_trading_day = is_first_session(run_now)
 
     from phase1.ticker_config import get_config as _get_cfg
     if (_get_cfg(ticker).get("category") == "stock"
@@ -193,6 +236,7 @@ def capture_snapshot():
     # that's the dead-man's switch. A DB hiccup during the check proceeds
     # with capture (idempotent ON CONFLICT writes make a duplicate harmless);
     # skipping on error would be the dangerous direction.
+    _completion = None
     if not force_weekly_setup:
         try:
             from phase1.gex_history import get_em_snapshot, get_weekly_em_date_key
@@ -216,6 +260,10 @@ def capture_snapshot():
             raise
         except Exception as _e:
             _logger.warning(f"Dedup guard check failed ({_e}) — proceeding with capture")
+
+    if is_late:
+        sys.exit(_late_recovery(ticker, run_now, _completion,
+                                is_week_first_trading_day, fred_key))
 
     # ── Pre-open warm-up ──
     # The cron fires slightly before 9:30 so the runner is already booted by
@@ -390,11 +438,11 @@ def capture_snapshot():
     from phase1.expected_move import find_weekly_expiration, find_monthly_expiration, compute_em_for_expiration
     from phase1.gex_history import get_weekly_em_date_key, get_monthly_em_date_key, get_em_snapshot
 
-    # is_monday / is_tuesday_after_holiday are computed once near the top of
-    # capture_snapshot (the single-name cadence gate needs them before the
-    # market-open wait), so they're reused here rather than recomputed.
+    # is_week_first_trading_day is computed once near the top of
+    # capture_snapshot (the single-name cadence gate needs it before the
+    # market-open wait), so it's reused here rather than recomputed.
     weekly_key = get_weekly_em_date_key(run_now)
-    should_capture_weekly = is_monday or is_tuesday_after_holiday
+    should_capture_weekly = is_week_first_trading_day
     if not should_capture_weekly:
         # Backfill path: no snap yet for this week → capture today.
         try:
@@ -469,8 +517,8 @@ def capture_snapshot():
     # FORCE_WEEKLY_SETUP (set at top of function) lets a manual
     # workflow_dispatch trigger a full rebuild on any day — useful for
     # bootstrapping a fresh Postgres without waiting for Monday's cron.
-    if is_monday or is_tuesday_after_holiday or force_weekly_setup:
-        if force_weekly_setup and not (is_monday or is_tuesday_after_holiday):
+    if is_week_first_trading_day or force_weekly_setup:
+        if force_weekly_setup and not is_week_first_trading_day:
             _logger.info("FORCE_WEEKLY_SETUP=1 — running weekly spread finder setup on non-Monday")
         else:
             _logger.info("Running weekly spread finder setup...")
@@ -480,10 +528,11 @@ def capture_snapshot():
                 ticker, spot, run_now, fred_key, client, avail,
                 levels, regime_info,
             )
-            if not _weekly_setup_artifacts_complete(ticker, weekly_key):
+            setup_key = setup_week(run_now).key
+            if not _weekly_setup_artifacts_complete(ticker, setup_key):
                 raise RuntimeError(
                     f"Required weekly artifacts were not persisted for "
-                    f"{ticker}/{weekly_key}"
+                    f"{ticker}/{setup_key}"
                 )
         except Exception as e:
             _logger.error(f"Weekly spread finder setup failed: {e}")
@@ -540,13 +589,80 @@ def _safe_float(val):
         return None
 
 
+def _side_share_q(conn):
+    """Per-side band-share quantile from completed SPX weekly history, or
+    None (legacy /2 split) when history is thin/unavailable."""
+    try:
+        from range_finder.feature_builder import _load_weekly_for_ticker
+        from range_finder.har_model import estimate_side_share_quantile
+        est = estimate_side_share_quantile(_load_weekly_for_ticker(conn, "SPX"))
+        _logger.info(f"  Side-share quantile: q={est['q']} "
+                     f"(n={est['n']}, beta={est['beta']})")
+        return est["q"]
+    except Exception as e:
+        _logger.warning(f"  Side-share estimate failed ({e}) — using legacy /2 split")
+        return None
+
+
+def _log_calibration_plan(conn, df_feat, cal_fit, week_start,
+                          monday_open, monday_vix, spot,
+                          run_date=None, anchor_date=None) -> bool:
+    """Forecast the week with the production spec and log the plan to
+    spread_log; returns whether a row was written.
+
+    Builds the plan the way the UI would (no chain snap — the logged strikes
+    are the model's raw placement). Next Monday's Step 1b scores it against
+    the realized range: this is the write half of the loop that
+    range_finder/calibration.py reads. The week's row must pass the shared
+    serving rule — falling back to another week's row would score a plan the
+    UI would have refused to show, poisoning the coverage audit.
+    """
+    from range_finder.feature_builder import select_forecast_row
+    from range_finder.recommendations import build_recommendations
+    from range_finder.spread_levels import log_spread_plan
+
+    # Only the week's first session logs the plan. spread_log upserts on
+    # (week_start, ticker), so a forced mid-week or weekend refresh would
+    # otherwise overwrite Monday's plan — and a weekend refit has already
+    # trained on that week's outcome (lookahead into the coverage audit).
+    if run_date is not None and anchor_date is not None and run_date != anchor_date:
+        _logger.info(f"  Calibration plan not re-logged: {run_date} is not "
+                     f"the week's first session ({anchor_date})")
+        return False
+
+    feature_row, blocked = select_forecast_row(df_feat, week_start)
+    if blocked is not None:
+        _logger.error(f"  Calibration plan NOT logged: {blocked.describe()}")
+        return False
+
+    result, cal_cols = cal_fit
+    # Same recommendation path as the UI (no chain snap: the logged strikes
+    # are the model's raw placement). Per-side share keeps the logged strikes
+    # on the placement the UI shows, so the audit scores what was shown.
+    forecast, plan, _tiers = build_recommendations(
+        result=result, feature_row=feature_row, feature_cols=cal_cols,
+        reference=monday_open or spot, vix=monday_vix, week_start=week_start,
+        ticker="SPX", side_share_q=_side_share_q(conn), conn=conn,
+        model_name=_CALIBRATION_SPEC,
+    )
+    log_spread_plan(
+        conn, plan,
+        ticker="SPX",
+        model_name=_CALIBRATION_SPEC,
+        lower_pct=forecast.get("lower_pct"),
+    )
+    _logger.info(
+        f"  Plan logged for {week_start} ({_CALIBRATION_SPEC}): "
+        f"point={forecast['point_pct']:.4f} "
+        f"PI=[{forecast['lower_pct']:.4f}, {forecast['upper_pct']:.4f}]"
+    )
+    return True
+
+
 def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
-                              levels, regime_info):
+                              levels, regime_info, *, late_recovery=False):
     """Run the full spread finder pipeline: refresh data, rebuild features,
     save GEX, fit model, log the Monday plan, and persist Monday open + VIX."""
-    import yfinance as yf
-    from datetime import timedelta
-
     from range_finder.db import get_connection, init_all_tables
     from range_finder.data_collector import (
         fetch_spx_vix, save_spx_vix,
@@ -554,19 +670,13 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         populate_earnings_flags,
         fetch_fred_macro, save_fred_macro,
         build_event_flags,
-        fred_key_status, FRED_API_KEY,
+        fred_key_status,
     )
     from range_finder.feature_builder import build_features
     from range_finder.gex_bridge import (
         GEXContext, extract_gex_context, save_gex_to_range_finder,
     )
-    from range_finder.har_model import (
-        fit_validation_and_production,
-        save_model, MODEL_SPECS, forecast_next_week,
-        feature_has_enough_data,
-    )
-    from range_finder.gex_policy import live_spread_feature_columns
-    from range_finder.spread_levels import build_spread_plan, log_spread_plan
+    from range_finder.har_model import MODEL_SPECS
     from phase1.ticker_config import (
         get_config, uses_own_har, has_single_name_earnings,
         feature_source_ticker,
@@ -621,7 +731,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
             save_fred_macro(conn, df_macro)
             _logger.info(f"  FRED macro: {len(df_macro)} rows")
         except Exception as e:
-            if not FRED_API_KEY:
+            if not credentials.fred_api_key():
                 _logger.warning("  FRED fetch skipped: FRED_API_KEY not set")
             else:
                 _logger.warning(
@@ -642,7 +752,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     if ticker == "SPX":
         try:
             from range_finder.spread_levels import update_expiration_outcome
-            this_monday = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
+            this_monday = setup_week(run_now).key
             cur = conn.cursor()
             cur.execute(
                 "SELECT week_start FROM spread_log "
@@ -678,15 +788,18 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # (Monday 9:31) as the training rows. The lag-1 features (VIX, HV,
     # macro) are shifted inside build_features and are unaffected by this
     # ordering.
-    _logger.info("  2/4 Saving GEX to range finder...")
-    _gex_saved = False
-    try:
-        gex_ctx = extract_gex_context(levels, spot, regime_info)
-        save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
-        _gex_saved = True
-    except Exception as e:
-        _logger.warning(f"  GEX save failed ({e}) — features will rebuild "
-                        "without this week's GEX row (train mean fills in)")
+    if late_recovery:
+        # A mid-day reading would break the "every GEX row is Monday 9:31"
+        # timestamp parity above; leave the week's GEX row missing instead.
+        _logger.info("  2/4 Late recovery — skipping GEX save (not an opening reading)")
+    else:
+        _logger.info("  2/4 Saving GEX to range finder...")
+        try:
+            gex_ctx = extract_gex_context(levels, spot, regime_info)
+            save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
+        except Exception as e:
+            _logger.warning(f"  GEX save failed ({e}) — features will rebuild "
+                            "without this week's GEX row (train mean fills in)")
 
     # ── Step 3: Rebuild features ──
     _logger.info(f"  3/4 Rebuilding feature matrix ({ticker})...")
@@ -708,116 +821,54 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # unnecessarily. OLS with HC3 on ~few hundred weekly rows is
     # milliseconds per spec, so fitting all 5 adds ~1–2s total.
     _logger.info(f"  4/4 Fitting all {len(MODEL_SPECS)} model specs...")
-    _cal_fit = None   # (result, avail_cols) of _CALIBRATION_SPEC — set in the loop
+    _cal_fit = None   # (result, feature_cols) of _CALIBRATION_SPEC
     try:
-        from range_finder.feature_builder import get_features
-        # A scaled mini (XSP→SPX) loads its parent's shared HAR
-        # features; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) load their own rows.
-        _features_ticker = feature_source_ticker(ticker)
-        # Window pinned to TRAIN_WINDOW_YEARS so deeper weekly_spx backfills
-        # (the 10y history experiment) can't silently retrain production.
-        from range_finder.har_model import train_window_min_date
-        df_feat = get_features(conn, min_date=train_window_min_date(),
-                               exclude_covid=True, ticker=_features_ticker)
+        from range_finder.recommendations import (
+            fit_and_save_specs, load_production_features,
+        )
+        # The ticker's feature-source rows (XSP rides SPX), pinned to
+        # TRAIN_WINDOW_YEARS so deeper backfills can't silently retrain
+        # production, COVID excluded — the same window the UI forecasts on.
+        df_feat = load_production_features(conn, ticker)
         if df_feat.empty:
             raise RuntimeError("No features available for required weekly fit")
 
-        fitted = 0
-        failed = []
-        for spec_name in MODEL_SPECS:
-            try:
-                feat_cols = live_spread_feature_columns(MODEL_SPECS[spec_name])
-                avail_cols = [c for c in feat_cols if feature_has_enough_data(df_feat, c)]
+        report = fit_and_save_specs(conn, ticker, features=df_feat)
+        for spec_name, fit in report.fits.items():
+            _logger.info(
+                f"    {spec_name}: OOS R² = {fit.metrics['oos_r2']:.4f}, "
+                f"MAE = {fit.metrics['mae_pct']*100:.2f}%  (features: {len(fit.feature_cols)})"
+            )
+        for spec_name, reason in report.skipped.items():
+            _logger.warning(f"    {spec_name}: skipped — {reason}")
+        _logger.info(f"  Fitted {len(report.fits)}/{len(MODEL_SPECS)} specs")
 
-                if len(avail_cols) < 2:
-                    _logger.info(f"    {spec_name}: skipping — only {len(avail_cols)} usable features")
-                    continue
-
-                _validation, production_result, metrics = fit_validation_and_production(
-                    df_feat, feature_cols=avail_cols, model_name=spec_name
-                )
-                save_model(production_result, avail_cols, spec_name, metrics,
-                           conn=conn, ticker=ticker)
-
-                if spec_name == _CALIBRATION_SPEC:
-                    _cal_fit = (production_result, avail_cols)
-
-                _logger.info(
-                    f"    {spec_name}: OOS R² = {metrics['oos_r2']:.4f}, "
-                    f"MAE = {metrics['mae_pct']*100:.2f}%  (features: {len(avail_cols)})"
-                )
-                fitted += 1
-            except Exception as e:
-                failed.append(spec_name)
-                _logger.warning(f"    {spec_name}: fit failed — {e}")
-
-        _logger.info(f"  Fitted {fitted}/{len(MODEL_SPECS)} specs" + (f" (failed: {failed})" if failed else ""))
-        if _cal_fit is None:
+        cal = report.fits.get(_CALIBRATION_SPEC)
+        if cal is None:
             raise RuntimeError(
                 f"Required {_CALIBRATION_SPEC} production fit was not saved"
             )
+        _cal_fit = (cal.result, cal.feature_cols)
     except Exception as e:
         _logger.error(f"  Model fitting stage failed: {e}")
         raise RuntimeError("Model fitting stage failed") from e
 
     # ── Save Monday open + VIX to DB ──
-    # Prefer the true daily-candle Open over the live mid-move `spot` /
-    # live-last VIX tick. Yahoo publishes today's Open within seconds of
-    # 9:30 ET, so by the time this cron actually runs the daily bar is
-    # almost always available. Fall back to `spot` / live VIX only if
-    # the bar is still empty (which mostly happens when the workflow
-    # fires before Yahoo's first tick). The capture + persist logic is shared
-    # with the UI mid-week self-heal (capture_and_save_monday_anchor) so the
-    # cron and the on-demand path can never drift apart.
+    # The week's first-session daily Open (Tradier → Cboe → yfinance), pinned
+    # to the first session even on a forced mid-week/weekend run, with live
+    # spot / live VIX only as last resorts so the required weekly_setup row
+    # always exists. Shared resolver with the UI: range_finder.weekly_anchor.
     _logger.info("  Saving Monday open + VIX...")
-    monday_open = None
-    monday_vix = None
     try:
-        from range_finder.data_collector import capture_and_save_monday_anchor
-
-        # Live vol-proxy last close as the VIX fallback for the rare case where
-        # the daily-Open bar isn't published yet at 9:30 (mirrors the prior
-        # inline behavior; the underlying falls back to `spot`).
-        _vix_fallback = None
-        try:
-            _vp_hist = yf.Ticker(cfg["vol_proxy_yf"]).history(period="5d")
-            if not _vp_hist.empty:
-                _vix_fallback = round(float(_vp_hist["Close"].dropna().iloc[-1]), 2)
-        except Exception:
-            pass
-
-        days_since_monday = run_now.weekday()
-        monday = run_now - timedelta(days=days_since_monday)
-        week_start = monday.strftime("%Y-%m-%d")
-
-        # Anchor to the week's FIRST TRADING SESSION, not run_now.date().
-        # On a normal Monday (or Tuesday-after-holiday) cron those are the
-        # same day, so behavior is unchanged — but a FORCE_WEEKLY_SETUP
-        # dispatch is allowed on any weekday ("refresh after a code change"),
-        # and passing run_now.date() there would persist e.g. Wednesday's open
-        # as this week's frozen Monday anchor via save_weekly_setup's
-        # ON CONFLICT DO UPDATE, silently re-snapping every ticker's strikes
-        # mid-week. Resolving the first session off the exchange calendar keeps
-        # the anchor pinned to Monday (or the true first trading day) regardless
-        # of when the job runs.
-        anchor_date = monday.date()
-        try:
-            from phase1.market_clock import get_schedule
-            from phase1.config import CASH_CALENDAR
-            _friday = (monday + timedelta(days=4)).strftime("%Y-%m-%d")
-            _week_sched = get_schedule(CASH_CALENDAR, week_start, _friday)
-            if not _week_sched.empty:
-                anchor_date = _week_sched.index[0].date()
-        except Exception as _e:
-            _logger.warning(f"  Anchor-date calendar lookup failed ({_e}); "
-                            f"using Monday {anchor_date}")
-
-        monday_open, monday_vix, open_source = capture_and_save_monday_anchor(
-            conn, ticker, week_start, anchor_date,
-            spot_fallback=spot, live_vix_fallback=_vix_fallback, cfg=cfg,
-        )
+        from range_finder.weekly_anchor import capture_setup_anchor
+        # Late recovery never falls back to a mid-day spot: the true first-
+        # session daily bar exists by then, and if it doesn't, fail loudly.
+        anchor = capture_setup_anchor(conn, ticker, run_now,
+                                      spot_fallback=None if late_recovery else spot,
+                                      cfg=cfg)
+        monday_open, monday_vix = anchor.open, anchor.vix
         _logger.info(
-            f"  Monday open saved: {ticker}={monday_open:.2f} ({open_source}), "
+            f"  Monday open saved: {ticker}={monday_open:.2f} ({anchor.source}), "
             f"VIX={monday_vix:.2f}"
         )
     except Exception as e:
@@ -825,64 +876,12 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         raise RuntimeError("Monday open/VIX save failed") from e
 
     # ── Step 5: Log this week's plan for the calibration audit (SPX only) ──
-    # Forecast the week with the production spec, build the plan the way the
-    # UI would (no chain snap — the logged strikes are the model's raw
-    # placement), and persist forecast bounds + strikes to spread_log. Next
-    # Monday's Step 1b scores it against the realized range. This is the
-    # write half of the loop that range_finder/calibration.py reads.
     if ticker == "SPX" and _cal_fit is not None:
         try:
-            from range_finder.feature_builder import get_feature_for_week
-
-            week_start = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
-            result, cal_cols = _cal_fit
-
-            feature_row = get_feature_for_week(conn, week_start, ticker="SPX")
-            if feature_row is None:
-                feature_row = df_feat.iloc[-1]
-                _logger.warning(f"  No feature row for {week_start} — "
-                                "logging plan off the latest available row")
-
-            spx_ref = monday_open or spot
-
-            # Per-side band share from completed weekly history (falls back
-            # to the legacy /2 when history is thin/unavailable). The logged
-            # strikes therefore reflect the SAME placement the UI shows, and
-            # the calibration audit scores the placement actually used.
-            _side_q = None
-            try:
-                from range_finder.feature_builder import _load_weekly_for_ticker
-                from range_finder.har_model import estimate_side_share_quantile
-                _q_est = estimate_side_share_quantile(
-                    _load_weekly_for_ticker(conn, "SPX"))
-                _side_q = _q_est["q"]
-                _logger.info(f"  Side-share quantile: q={_side_q} "
-                             f"(n={_q_est['n']}, beta={_q_est['beta']})")
-            except Exception as _e:
-                _logger.warning(f"  Side-share estimate failed ({_e}) — "
-                                f"using legacy /2 split")
-
-            forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref,
-                                          side_share_q=_side_q)
-            plan = build_spread_plan(
-                forecast, feature_row,
-                week_start=week_start,
-                vix_level=monday_vix,
-                spx_open=monday_open,
-                ticker="SPX",
-                side_share_q=_side_q,
-            )
-            log_spread_plan(
-                conn, plan,
-                ticker="SPX",
-                model_name=_CALIBRATION_SPEC,
-                lower_pct=forecast.get("lower_pct"),
-            )
-            _logger.info(
-                f"  Plan logged for {week_start} ({_CALIBRATION_SPEC}): "
-                f"point={forecast['point_pct']:.4f} "
-                f"PI=[{forecast['lower_pct']:.4f}, {forecast['upper_pct']:.4f}]"
-            )
+            _log_calibration_plan(conn, df_feat, _cal_fit, setup_week(run_now).key,
+                                  monday_open, monday_vix, spot,
+                                  run_date=run_now.date(),
+                                  anchor_date=setup_week(run_now).first_session_day)
         except Exception as e:
             _logger.warning(f"  Plan logging failed: {e} (calibration row skipped)")
 

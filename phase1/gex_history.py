@@ -14,60 +14,22 @@ finder's frozen expected-move band), so it remains.
 """
 from __future__ import annotations
 
-import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 NY_TZ = ZoneInfo("America/New_York")
 _logger = logging.getLogger(__name__)
 
 
-# ── Connection string resolution ──
-
-_pg_conn_str = None
-
-try:
-    import streamlit as st
-    _pg_conn_str = st.secrets.get("DATABASE_URL", "")
-except Exception:
-    pass
-
-if not _pg_conn_str:
-    _pg_conn_str = os.environ.get("DATABASE_URL", "")
-
-
-def _require_postgres():
-    """Raise a clear error if DATABASE_URL is missing or psycopg2 is unavailable."""
-    if not _pg_conn_str:
-        raise RuntimeError(
-            "DATABASE_URL is not set. This app requires Postgres — set DATABASE_URL "
-            "in Streamlit secrets or as an environment variable."
-        )
-    try:
-        import psycopg2  # noqa: F401
-    except ImportError as e:
-        raise RuntimeError(
-            "psycopg2 is not installed. This app requires Postgres — "
-            "`pip install psycopg2-binary`."
-        ) from e
-
-
 # ── Postgres helpers ──
 
 def _pg_get_connection():
-    _require_postgres()
-    import psycopg2
-    conn = psycopg2.connect(_pg_conn_str, sslmode="require")
-    conn.autocommit = True
-    return conn
+    from phase1.pg import connect
+    return connect()
 
 
 # ── Public API ──
-
-def get_backend():
-    """Legacy compatibility shim. Always returns 'postgres' now."""
-    return "postgres"
 
 
 # One-time schema init flag — `save_em_snapshot` previously issued a
@@ -237,23 +199,16 @@ def get_em_snapshot(date_str, ticker="SPX", em_type="daily"):
 
 
 def get_weekly_em_date_key(now):
-    """Return Monday's date string for the trading week the weekly EM
-    refers to.
+    """Monday key of the week the weekly EM describes (see
+    phase1.trading_week.em_week: Mon–Fri this week, weekends next).
 
-    Mon-Fri → this week's Monday (matches the cron's Monday-open capture).
-    Sat-Sun → the UPCOMING Monday: the completed week's straddle has
-    expired and find_weekly_expiration() already points at next Friday,
-    so keying the lookup to last Monday would restore (and chart) a stale
-    snapshot anchored at last week's spot. With the forward key the lookup
-    simply misses and the UI falls back to the live next-week EM.
+    Weekends roll forward because the completed week's straddle has expired
+    and find_weekly_expiration() already points at next Friday; keying to
+    last Monday would restore (and chart) a stale snapshot. With the forward
+    key the lookup misses and the UI falls back to the live next-week EM.
     """
-    wd = now.weekday()  # 0=Mon
-    delta_days = -wd if wd < 5 else (7 - wd)
-    if hasattr(now, 'date'):
-        monday = (now + timedelta(days=delta_days)).date()
-    else:
-        monday = now + timedelta(days=delta_days)
-    return monday.strftime("%Y-%m-%d")
+    from phase1.trading_week import em_week
+    return em_week(now).key
 
 
 def get_monthly_em_date_key(now):

@@ -1,7 +1,7 @@
 """Shared fixtures for range_finder tests.
 
 Hermeticity guard: `.streamlit/secrets.toml` exists in the repo root on the
-dev machine, so `data_collector._tradier_token()` resolves a REAL token even
+dev machine, so `phase1.credentials.tradier_token()` resolves a REAL token even
 under pytest — a Tradier-first anchor lookup would silently hit the live API
 from unit tests. The autouse fixture below pins the anchor-open source list
 to the yfinance path (which every test stubs) for ALL tests; tests that
@@ -17,3 +17,5 @@ import range_finder.data_collector as dc
 @pytest.fixture(autouse=True)
 def _hermetic_anchor_sources(monkeypatch):
     monkeypatch.setattr(dc, "_ANCHOR_OPEN_SOURCES", [dc._open_from_yf])
+    # Same guard for the live vol-proxy chain (Tradier-first).
+    monkeypatch.setattr(dc, "_LIVE_VOL_SOURCES", [dc._live_from_yf])

@@ -9,21 +9,14 @@
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from range_finder.feature_builder import (
-    init_features_table,
-    build_features,
-    get_features,
-    get_feature_for_week,
-    create_gex_table,
-    print_feature_summary,
-)
+from range_finder.feature_builder import get_features
 from range_finder.gex_policy import (
     GEX_LIVE_SPREAD_INFLUENCE_ENABLED,
     GEX_NORMALIZED_FEATURE,
@@ -393,23 +386,6 @@ def fit_validation_and_production(
     return validation_result, production_result, metrics
 
 
-def compare_models(results: dict[str, dict]) -> pd.DataFrame:
-    """Build a comparison table across all model specs."""
-    df = pd.DataFrame(results.values())
-    df = df.sort_values("oos_r2", ascending=False).reset_index(drop=True)
-
-    print("\n" + "=" * 75)
-    print("  MODEL COMPARISON — OUT-OF-SAMPLE")
-    print("=" * 75)
-    print(df.to_string(
-        index=False,
-        float_format=lambda x: f"{x:.4f}" if isinstance(x, float) else str(x),
-    ))
-    print("=" * 75 + "\n")
-
-    return df
-
-
 def _oos_r2(y_true: pd.Series, y_pred: pd.Series, benchmark=None) -> float:
     """Out-of-sample R² (Campbell & Thompson 2008).
 
@@ -435,39 +411,6 @@ def _oos_r2(y_true: pd.Series, y_pred: pd.Series, benchmark=None) -> float:
 # =============================================================================
 # RESIDUAL DIAGNOSTICS
 # =============================================================================
-
-def run_diagnostics(
-    result: sm.regression.linear_model.RegressionResultsWrapper,
-    model_name: str = "HAR",
-) -> dict:
-    """Run standard OLS assumption checks on the fitted model."""
-    from statsmodels.stats.stattools import durbin_watson, jarque_bera
-    from statsmodels.stats.diagnostic import het_breuschpagan
-
-    resids = result.resid
-
-    dw     = durbin_watson(resids)
-    jb_val, jb_p, _, _ = jarque_bera(resids)
-    bp_lm, bp_p, _, _  = het_breuschpagan(resids, result.model.exog)
-    cond_num = result.condition_number
-
-    diag = {
-        "durbin_watson":  dw,
-        "jarque_bera_p":  jb_p,
-        "breusch_pagan_p": bp_p,
-        "condition_number": cond_num,
-    }
-
-    log.info(f"\n{'='*60}")
-    log.info(f"  {model_name} — RESIDUAL DIAGNOSTICS")
-    log.info(f"{'='*60}")
-    log.info(f"  Durbin-Watson     : {dw:.3f}  (target ~2.0; <1.5 -> autocorrelation)")
-    log.info(f"  Jarque-Bera p     : {jb_p:.4f}  (< 0.05 -> non-normal residuals)")
-    log.info(f"  Breusch-Pagan p   : {bp_p:.4f}  (< 0.05 -> heteroskedastic errors)")
-    log.info(f"  Condition number  : {cond_num:.1f}  (> 30 -> multicollinearity concern)")
-
-    return diag
-
 
 # =============================================================================
 # ENHANCEMENT COMPARISON — walk-forward OOS evaluation
@@ -686,125 +629,3 @@ def forecast_next_week(
 
     return forecast
 
-
-# =============================================================================
-# MODEL PERSISTENCE — re-exported from model_persistence.py
-# =============================================================================
-
-from range_finder.model_persistence import save_model, load_model  # noqa: F401
-from range_finder.model_persistence import MODEL_DIR  # noqa: F401
-
-
-# =============================================================================
-# FULL PIPELINE
-# =============================================================================
-
-def run_full_pipeline(
-    conn,
-    spx_close: float = None,
-    next_week_start: str = None,
-    preferred_model: str = "M3_extended",
-    exclude_covid: bool = True,
-    ticker: str = "SPX",
-) -> dict:
-    """End-to-end: load features -> fit all specs -> compare -> forecast."""
-    # --- Load features (window pinned to TRAIN_WINDOW_YEARS) ---
-    df = get_features(conn, min_date=train_window_min_date(),
-                      exclude_covid=exclude_covid, ticker=ticker)
-    if df.empty:
-        raise RuntimeError(f"model_features is empty for {ticker} — run feature_builder.py first")
-
-    log.info(f"Loaded {len(df)} feature rows for modeling ({ticker})")
-
-    # --- Determine if GEX is available ---
-    # Keep a local copy so a research feature can never mutate MODEL_SPECS.
-    gex_available = feature_has_enough_data(df, GEX_NORMALIZED_FEATURE)
-    local_specs = {
-        key: live_spread_feature_columns(value)
-        for key, value in MODEL_SPECS.items()
-    }
-    if GEX_LIVE_SPREAD_INFLUENCE_ENABLED and gex_available:
-        log.info("GEX data available — adding gex_normalized to M4_full")
-        if GEX_NORMALIZED_FEATURE not in local_specs["M4_full"]:
-            local_specs["M4_full"].append(GEX_NORMALIZED_FEATURE)
-    elif not GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-        log.info(
-            "BUG-06 mitigation active — GEX is retained for research but "
-            "excluded from live model fits"
-        )
-    else:
-        log.info("GEX data sparse — GEX features excluded from M4_full")
-
-    # --- Fit and evaluate all specs ---
-    all_metrics  = {}
-    all_results  = {}
-
-    for spec_name, feat_cols in local_specs.items():
-        available = [c for c in feat_cols if feature_has_enough_data(df, c)]
-        if len(available) < len(feat_cols):
-            missing = set(feat_cols) - set(available)
-            log.warning(f"{spec_name}: skipping missing features {missing}")
-        feat_cols = available
-
-        if len(feat_cols) < 2:
-            log.warning(f"{spec_name}: fewer than 2 features available, skipping")
-            continue
-
-        try:
-            validation_result, production_result, metrics = (
-                fit_validation_and_production(
-                    df, feature_cols=feat_cols, model_name=spec_name
-                )
-            )
-            all_metrics[spec_name] = metrics
-            all_results[spec_name] = (
-                validation_result, production_result, feat_cols
-            )
-        except Exception as e:
-            log.error(f"Failed to fit {spec_name}: {e}")
-
-    # --- Comparison table ---
-    compare_models(all_metrics)
-
-    # --- Diagnostics on preferred model ---
-    if preferred_model not in all_results:
-        preferred_model = list(all_results.keys())[0]
-        log.warning(f"Preferred model unavailable — falling back to {preferred_model}")
-
-    validation_result, production_result, best_features = all_results[preferred_model]
-    run_diagnostics(validation_result, model_name=preferred_model)
-
-    # --- Save preferred model ---
-    save_model(production_result, best_features, preferred_model,
-               all_metrics.get(preferred_model, {}), ticker=ticker)
-
-    # --- Live forecast ---
-    if spx_close is None:
-        from range_finder.data_collector import get_weekly_spx
-        wkly = get_weekly_spx(conn)
-        spx_close = float(wkly["spx_close"].iloc[-1])
-        log.info(f"Using most recent SPX close from DB: {spx_close:,.2f}")
-
-    if next_week_start is None:
-        today = datetime.today()
-        days_ahead = (7 - today.weekday()) % 7 or 7
-        next_week_start = (today + pd.Timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-        log.info(f"Forecasting for week starting: {next_week_start}")
-
-    feature_row = get_feature_for_week(conn, next_week_start, ticker=ticker)
-    if feature_row is None:
-        log.warning(
-            f"No feature row for {next_week_start} — "
-            "using most recent available row for demonstration"
-        )
-        feature_row = df.iloc[-1]
-
-    forecast = forecast_next_week(
-        production_result,
-        feature_row,
-        best_features,
-        spx_close,
-        alpha=PI_ALPHA,
-    )
-
-    return forecast

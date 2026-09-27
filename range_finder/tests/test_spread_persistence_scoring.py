@@ -67,7 +67,7 @@ def test_stale_partial_row_falls_through_to_network(monkeypatch):
         "updated_at) VALUES (?, 6000, 6003, 5999, '2026-07-06T13:31:00+00:00')",
         (WEEK,))                                   # 4-pt "range": partial bar
 
-    monkeypatch.setattr("range_finder.data_collector._tradier_token",
+    monkeypatch.setattr("phase1.credentials.tradier_token",
                         lambda: None)              # skip Tradier arm
     days = pd.date_range(WEEK, FRIDAY, freq="B")
     frame = pd.DataFrame(

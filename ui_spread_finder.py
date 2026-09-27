@@ -5,15 +5,14 @@ Extracted from streamlit_app.py.
 """
 from __future__ import annotations
 
-from datetime import date as date_cls, datetime, timedelta, timezone
+from datetime import date as date_cls, datetime
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-from theme import COLORS
 from models import GEXData
-from ui_history import _is_weekly_freeze_day
+from phase1 import credentials
+from phase1.trading_week import planning_week
 
 from range_finder.gex_bridge import (
     GEXContext, extract_gex_context, save_gex_to_range_finder,
@@ -25,36 +24,27 @@ from range_finder.data_collector import (
     build_event_flags as rf_build_event_flags,
     get_weekly_spx as rf_get_weekly_spx,
     fred_key_status as rf_fred_key_status,
-    capture_and_save_monday_anchor as rf_capture_monday_anchor,
-    FRED_API_KEY as RF_FRED_API_KEY,
+    live_vol_close as rf_live_vol_close,
 )
 from range_finder.feature_builder import (
     build_features as rf_build_features,
     get_features as rf_get_features,
-    assess_path_provenance as rf_assess_path_provenance,
+    select_forecast_row as rf_select_forecast_row,
 )
 from range_finder.gex_policy import (
     GEX_LIVE_SPREAD_INFLUENCE_ENABLED,
     GEX_NORMALIZED_FEATURE,
-    live_spread_feature_columns,
     uses_disabled_gex_feature,
 )
 from range_finder.har_model import (
-    MODEL_SPECS as RF_MODEL_SPECS, PI_ALPHA as RF_PI_ALPHA,
+    MODEL_SPECS as RF_MODEL_SPECS,
     GEX_MIN_WEEKS_FOR_FIT as RF_GEX_MIN_WEEKS,
     feature_has_enough_data as rf_feature_has_enough_data,
-    production_feature_columns,
-    fit_validation_and_production as rf_fit_validation_and_production,
-    forecast_next_week as rf_forecast_next_week,
     estimate_side_share_quantile as rf_estimate_side_share_quantile,
-    save_model as rf_save_model, load_model as rf_load_model,
 )
+from range_finder.model_persistence import load_model as rf_load_model
 from range_finder.spread_levels import (
-    build_spread_plan as rf_build_spread_plan,
-    build_spread_tiers as rf_build_spread_tiers,
-    update_outcome as rf_update_outcome,
     MIN_CREDIT_RATIO,
-    TICKER_CONFIG as RF_TICKER_CONFIG,
     SpreadPlan,
     SpreadTier,
 )
@@ -64,11 +54,22 @@ from range_finder.spread_levels import (
 # Spread Finder Tab — HAR placement with GEX retained as research context
 # ─────────────────────────────────────────────────────────────────────────────
 
+from range_finder.weekly_anchor import resolve_anchor as resolve_weekly_anchor
+from range_finder.spread_finder_rules import check_reference
+from range_finder.spread_finder_view import (
+    blocked_message as sf_blocked_message,
+    build_spread_finder_view,
+    regime_shift_message as sf_regime_shift_message,
+)
+from range_finder.forward_workbook import (
+    FT_MAX_TICKERS, build_forward_test_workbook, ft_class,
+)
 from range_finder.recommendations import (
     build_recommendations, displayed_tier, tier_bands, chain_entry_to_quotes,
+    FitReport, fit_and_save_specs, load_saved_fit,
 )
 
-from theme import SF_BG, SF_BULL, SF_BEAR, SF_NEUT, SF_WARN, SF_CARD
+from theme import SF_BULL, SF_BEAR, SF_NEUT
 
 
 @st.cache_resource(ttl=3600)
@@ -124,15 +125,10 @@ def _live_vol_close(proxy: str) -> float | None:
     VIX regime-shift circuit breaker: a stale or invented VIX silently
     disables the breaker exactly when a live spike should trip it. A 5-min
     TTL (vs the old cache-once-per-session behavior) means a mid-session
-    spike is actually seen while still sparing yfinance on every rerun.
+    spike is actually seen while still sparing the quote sources on every
+    rerun. Source order (Tradier, then yfinance) lives in data_collector.
     """
-    try:
-        vp_hist = yf.Ticker(proxy).history(period="5d")
-        if not vp_hist.empty:
-            return round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
-    except Exception:
-        pass
-    return None
+    return rf_live_vol_close(proxy)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -226,32 +222,36 @@ def _cached_weekly_setup(_conn, week_start: str, ticker: str):
     return None
 
 
-def _spread_finder_target_friday(ref_date: "date_cls | None" = None) -> "date_cls":
-    """Return the calendar Friday of the week the Spread Finder is planning for.
-
-    On Mon-Thu we're inside a live trading week — traders entering new
-    credit spreads want *this* week's Friday (the one that's 0-4 days
-    away).  On Fri-Sun the current week is effectively done, so we roll
-    forward to next Monday's week and pick its Friday.  The same rule is
-    applied in ``_render_spread_finder_tab`` when deriving ``week_start``
-    so both stay in sync.
-    """
-    today = ref_date or date_cls.today()
-    wd = today.weekday()
-    if wd <= 3:  # Mon-Thu → this week's Monday
-        monday = today - timedelta(days=wd)
-    else:        # Fri-Sun → next Monday
-        monday = today + timedelta(days=(7 - wd))
-    return monday + timedelta(days=4)
-
-
 def find_spread_finder_friday_exp(
     avail: "list[str]",
     ref_date: "date_cls | None" = None,
 ) -> "str | None":
     """Listed end-of-week expiration for the UI's planned trading week."""
-    from range_finder.trading_week import trading_week, listed_week_expiration
-    return listed_week_expiration(avail, trading_week(_spread_finder_target_friday(ref_date)))
+    from phase1.market_clock import now_ny
+    from phase1.trading_week import listed_week_expiration
+    return listed_week_expiration(avail, planning_week(ref_date or now_ny()))
+
+
+def spread_finder_weekly_em(avail, ref_date, *, weekly_exp, weekly_em_snap,
+                            compute_em) -> dict:
+    """Weekly EM for the week the Spread Finder is PLANNING.
+
+    Mon–Thu (and weekends, where the app's weekly EM already rolls forward)
+    the planned expiration is the app's weekly expiration, so the frozen
+    weekly snapshot applies. On Friday the app's weekly EM still describes
+    the expiring contract while the tab plans next week, so price the planned
+    expiration's straddle live instead (its chain is pre-fetched). Empty
+    rather than the wrong week's EM when that fails.
+    """
+    sf_exp = find_spread_finder_friday_exp(avail, ref_date)
+    if sf_exp is None:
+        return {}
+    if sf_exp == weekly_exp:
+        return weekly_em_snap or {}
+    try:
+        return compute_em(sf_exp) or {}
+    except Exception:
+        return {}
 
 
 def _chain_entry_to_quotes(entry: dict) -> dict:
@@ -267,7 +267,7 @@ def _build_chain_quotes_for_spreads(
     Friday chain that matches the Spread Finder's planned week.
 
     The target expiration is anchored to *the week the spread finder is
-    forecasting* (see ``_spread_finder_target_friday``), not to "whichever
+    forecasting* (``phase1.trading_week.planning_week``), not to "whichever
     expiration the user happened to pick in the sidebar".  Before this was
     added, a user who had ``0DTE`` or ``Tomorrow`` selected would see the
     spread finder silently fall back to today's chain — producing $0.00
@@ -305,16 +305,6 @@ def _build_chain_quotes_for_spreads(
     return _chain_entry_to_quotes(entry), target_exp
 
 
-def _tradier_token() -> str:
-    """Tradier API token from secrets/env (mirrors streamlit_app.get_credentials)."""
-    import os
-    try:
-        tok = st.secrets.get("TRADIER_TOKEN", "")
-    except Exception:
-        tok = ""
-    return tok or os.environ.get("TRADIER_TOKEN", "")
-
-
 def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tuple[dict, str | None]:
     """Fetch the Spread-Finder-planned-Friday chain for ONE ticker and build the
     strike -> {bid/ask} lookup, so the multi-ticker Excel export snaps to the
@@ -329,11 +319,12 @@ def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tup
     error) so the caller degrades cleanly to nominal/BSM strikes — exactly
     today's behavior — instead of blocking the export.
     """
-    token = _tradier_token()
+    from phase1 import credentials
+    token = credentials.tradier_token()
     if not token:
         return {}, None
     try:
-        from streamlit_app import get_expirations_cached
+        from ui_market_data import get_expirations_cached
         avail = get_expirations_cached(token, ticker) or []
     except Exception:
         avail = []
@@ -351,79 +342,13 @@ def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tup
     return (quotes, target_exp) if quotes else ({}, None)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Weekly forward-test workbook — ALL tickers, one week-named tab
-# ─────────────────────────────────────────────────────────────────────────────
-# One export carries the always-present default instruments plus any tickers
-# the user has added to the export list, one row each, on a sheet named after
-# the planning week's Monday. The intended workflow:
-#
-#   • First download = your MASTER workbook. It ships with a Scoreboard and
-#     an empty utility sheet (_FT_BLANK_SHEET) the Scoreboard needs.
-#   • Every following week: download the new export, right-click its week
-#     tab → Move or Copy → into the master (any position).
-#   • The Scoreboard is TICKER-KEYED, not positional: it matches every week
-#     tab's rows by Instrument name (SUMIF/COUNTIFS over INDIRECT built from
-#     the pre-listed Monday tab names, existence-sanitized in its hidden
-#     column L — see _write_ft_scoreboard). The ticker mix and row order are
-#     free to differ week to week; each instrument's score simply accumulates
-#     over the weeks it appears. Typing a ticker into a blank Scoreboard slot
-#     starts tracking it retroactively across every tab already in the book.
-#   • Upgrading an old positional (3D-sum) master: delete its Scoreboard and
-#     the WeeksStart/WeeksEnd bookends (obsolete), then Move/Copy a fresh
-#     export's Scoreboard AND FTBlank sheets in (Ctrl+click both tabs) —
-#     they're self-contained as a pair. Re-type any previously tracked
-#     tickers into blank Instrument slots; they re-score retroactively.
-#     Caveat: pre-rework week tabs carry the old unguarded Scored?/flag
-#     formulas, so a band-less row whose close was filled shows a 0 flag
-#     there — the Scoreboard's denominators filter those out (they require
-#     the tier's Low band cell to hold a number), but old tabs' Weeks
-#     Scored can still count band-less rows. Re-paste a new tab's O..S
-#     formulas over an old tab's rows to fully repair it.
-#
-# Per-week sheet layout:
-#   A Week(Mon) · B Instrument · C Class · D Ref/Open · E Weekly Close
-#   (user fills after Friday) · F Prev Close · G..N four tier bands
-#   (Low/High) · O..R CLOSE INSIDE? per tier (formulas) · S Scored?
-#   (formula) · T Notes
-
 # Always-present defaults, in display order: the index/ETF defaults followed by
 # the single-name defaults the Monday cron fits (NVDA/JPM/CAT). Mirrors
 # QUICK_TICKERS in ui_theme — keep the two in sync. The active/searched ticker
 # and any the user has added (session-state list under _FT_XLSX_EXTRA_KEY) are
 # appended.
 _FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "NVDA", "JPM", "CAT"]
-# Class-label overrides for the workbook "Class" column; anything else falls
-# back to the ticker_config category (Index/ETF/Stock).
-_FT_CLASS = {"SPX": "Index", "XSP": "Index", "SPY": "ETF",
-             "QQQ": "ETF", "NDX": "Index"}
-_FT_FIRST_DATA_ROW = 6          # first instrument row on each week sheet
-_FT_MAX_TICKERS = 40            # rows the Scoreboard scans on each week tab (B6:B45)
-_FT_LAST_DATA_ROW = _FT_FIRST_DATA_ROW + _FT_MAX_TICKERS - 1
-_FT_SB_FIRST_ROW = 6            # first instrument slot on the Scoreboard
-_FT_SB_SLOTS = 40               # slots incl. blanks the user can type a ticker into
-_FT_SB_LAST_ROW = _FT_SB_FIRST_ROW + _FT_SB_SLOTS - 1
-_FT_SB_ALL_ROW = _FT_SB_LAST_ROW + 1
-_FT_SB_WEEKS_BACK = 260         # Monday tab names pre-listed behind the export week
-                                # (5y — a fresh Scoreboard must cover every tab an
-                                # older master could have accumulated)
-_FT_SB_WEEKS_FWD = 156          # ...and ahead of it: the 3y runway before the
-                                # Scoreboard (which warns as it nears) needs swapping
-                                # for a fresh export's
-_FT_BLANK_SHEET = "FTBlank"     # empty utility sheet not-yet-pasted weeks resolve to
 _FT_XLSX_EXTRA_KEY = "_sf_xlsx_extra"   # session-state list of user-added tickers
-
-
-def _ft_class(ticker: str) -> str:
-    """Asset-class label for the workbook 'Class' column (Index/ETF/Stock)."""
-    t = (ticker or "").upper()
-    if t in _FT_CLASS:
-        return _FT_CLASS[t]
-    try:
-        from phase1.ticker_config import get_config
-        return str(get_config(t)["category"]).title()
-    except Exception:
-        return "Stock"
 
 
 def _default_model_for_ticker(ticker: str) -> str:
@@ -436,7 +361,7 @@ def _default_model_for_ticker(ticker: str) -> str:
     products default to M3_extended and single stocks to M2_vix. The user can
     still override via the dropdown — the choice is remembered per ticker.
     """
-    return "M2_vix" if _ft_class(ticker) == "Stock" else "M3_extended"
+    return "M2_vix" if ft_class(ticker) == "Stock" else "M3_extended"
 
 
 import re as _re
@@ -451,18 +376,6 @@ _TICKER_RE = _re.compile(r"^[A-Z0-9.]{1,6}$")
 
 def _valid_ticker_symbol(ticker: str) -> bool:
     return bool(_TICKER_RE.match((ticker or "").upper()))
-
-
-def _xlsx_safe_cell(text) -> str:
-    """Neutralize a leading spreadsheet formula trigger on any string cell.
-
-    Defense in depth behind _valid_ticker_symbol: Excel/Sheets treat a cell
-    beginning with = + - @ (or tab/CR) as a formula. Prefix such a value with
-    an apostrophe so it renders literally. Non-strings pass through unchanged.
-    """
-    if not isinstance(text, str) or not text:
-        return text
-    return "'" + text if text[0] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
 def _xlsx_extra_list() -> list:
@@ -514,7 +427,7 @@ def _prior_week_close(conn, ticker: str, week_start: str):
     doesn't exist in that table — so Prev Close was silently blank on
     every export.
     """
-    from phase1.ticker_config import uses_own_har, get_config, price_scale_divisor
+    from phase1.ticker_config import uses_own_har, price_scale_divisor
     try:
         if uses_own_har(ticker):
             from range_finder.data_collector import get_weekly_underlying
@@ -565,22 +478,18 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             out["error"] = "no feature data — run Weekly Setup on this ticker"
             return out
 
-        # Saved fit for the active spec. A scaled mini shares its parent's fit;
-        # the Monday cron may save under either key, so try the ticker first,
-        # then fall back to the feature-source parent (identical by construction).
+        # Saved fit for the active spec (a scaled mini rides its parent's fit
+        # only when it has none of its own).
         try:
-            payload = _cached_rf_load_model(model_choice, ticker)
-        except Exception:
-            if _src != ticker:
-                try:
-                    payload = _cached_rf_load_model(model_choice, _src)
-                    out["notes"].append(f"{ticker} via {_src} fit")
-                except Exception:
-                    out["error"] = f"no saved {model_choice} fit"
-                    return out
-            else:
-                out["error"] = f"no saved {model_choice} fit — run Weekly Setup on {ticker}"
-                return out
+            payload, _fit_src = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
+        except FileNotFoundError:
+            out["error"] = f"no saved {model_choice} fit — run Weekly Setup on {ticker}"
+            return out
+        except Exception as e:
+            out["error"] = f"saved {model_choice} fit unusable ({e}) — run Weekly Setup on {ticker}"
+            return out
+        if _fit_src != ticker:
+            out["notes"].append(f"{ticker} via {_fit_src} fit")
 
         if uses_disabled_gex_feature(payload["feature_cols"]):
             out["error"] = (
@@ -589,26 +498,9 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             )
             return out
 
-        wk_ts = pd.Timestamp(week_start)
-        if wk_ts not in df_feat.index:
-            out["error"] = (
-                f"forecast blocked: no feature row for {week_start}; "
-                "run Weekly Setup after the prior week closes"
-            )
-            return out
-        feature_row = df_feat.loc[wk_ts]
-        _fresh, _source_week, _required_week = rf_assess_path_provenance(
-            feature_row, wk_ts,
-        )
-        if not _fresh:
-            _source_label = (
-                _source_week.strftime("%Y-%m-%d")
-                if _source_week is not None else "missing"
-            )
-            out["error"] = (
-                f"forecast blocked: {week_start} path source is "
-                f"{_source_label}; requires {_required_week:%Y-%m-%d}"
-            )
+        feature_row, blocked = rf_select_forecast_row(df_feat, week_start)
+        if blocked is not None:
+            out["error"] = f"forecast blocked: {blocked.describe()}"
             return out
 
         # Reference price: Monday-open capture, else prior weekly close.
@@ -680,503 +572,6 @@ def _cached_nonactive_week_bands(week_start: str, model_choice: str, tickers: tu
     return [_collect_week_bands_for_ticker(t, model_choice, week_start) for t in tickers]
 
 
-def _ft_monday_tab_names(week_start: str) -> list[str]:
-    """Every Monday tab name the Scoreboard pre-scans, as ISO text strings.
-
-    Week tabs are named for their planning Monday (yyyy-mm-dd), so the whole
-    horizon is enumerable up front: _FT_SB_WEEKS_BACK Mondays behind the
-    export week (covers tabs already accumulated in an older master) through
-    _FT_SB_WEEKS_FWD ahead. A listed tab that doesn't exist yet is remapped
-    by the Scoreboard's hidden column-L sanitizer — IF(ISREF(INDIRECT(…)),
-    name, _FT_BLANK_SHEET) — to the shipped empty blank sheet, so every
-    INDIRECT target always exists and missing weeks contribute nothing.
-    (Deliberately no IFERROR: wrapping the SUMIF-over-INDIRECT array in
-    IFERROR collapses the whole SUMPRODUCT to 0 in real Excel — see
-    _write_ft_scoreboard.)
-    """
-    anchor = datetime.strptime(week_start, "%Y-%m-%d").date()
-    anchor -= timedelta(days=anchor.weekday())      # snap to Monday
-    first = anchor - timedelta(weeks=_FT_SB_WEEKS_BACK)
-    return [(first + timedelta(weeks=k)).isoformat()
-            for k in range(_FT_SB_WEEKS_BACK + _FT_SB_WEEKS_FWD + 1)]
-
-
-def _write_ft_scoreboard(sb, week_start: str, tickers: list[str]) -> None:
-    """Write the ticker-keyed Scoreboard onto worksheet ``sb``.
-
-    Row-agnostic by design: every formula matches instruments BY NAME
-    (column A) against the Instrument column of every week tab, so a ticker
-    can sit on a different row — or be absent — on any given week without
-    corrupting the tallies. Aggregation is SUMPRODUCT + SUMIF/COUNTIFS over
-    INDIRECT references built from the pre-listed Monday tab names (classic
-    multi-sheet conditional-sum pattern; no 365-only functions, works in
-    LibreOffice too). Excel refuses to array-lift that pattern once IFERROR
-    wraps it (verified empirically — the whole product silently collapses
-    to 0), so not-yet-pasted weeks CANNOT be skipped via error handling;
-    instead hidden column L sanitizes each name with ISREF, mapping missing
-    tabs to the shipped, empty _FT_BLANK_SHEET so every INDIRECT target
-    always exists. INDIRECT is volatile, so pasting a new week tab re-runs
-    the sanitizer and the tab is picked up immediately. Nothing references
-    another sheet except through INDIRECT strings, so Move/Copy of this
-    sheet (together with _FT_BLANK_SHEET) into an older master carries the
-    whole scoring system without creating external links.
-
-    Visible layout: A Instrument · B Weeks Scored · C..J (Wins, Hit %) per
-    tier, one row per slot, ALL row at the bottom; K1 self-diagnoses (live
-    tab count, duplicate-"(2)"-tab and horizon warnings). Hidden: L sanitized
-    week-tab names · M raw pre-listed Monday names · N..Q per-tier
-    scored-week denominators · R duplicate-tab detector. A week only enters
-    a tier's denominator when that tier's flag is numeric AND its Low band
-    cell holds a number — the band criterion keeps pre-rework tabs (whose
-    old unguarded flags emit 0 on band-less rows) from scoring false losses.
-    The sheet ships protected (no password) with only the Instrument slots
-    editable, so the plumbing can't be edited or shifted by accident.
-    """
-    from openpyxl.styles import (
-        Alignment, Border, Font, PatternFill, Protection, Side,
-    )
-
-    NAVY, MUTED = "1F3864", "595959"
-    HDR_FILL = PatternFill("solid", start_color=NAVY)
-    TIER_FILLS = [PatternFill("solid", start_color=c)
-                  for c in ("FCE4D6", "FFF2CC", "E2EFDA", "DDEBF7")]
-    thin = Side(style="thin", color="BFBFBF")
-    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
-    CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    names = _ft_monday_tab_names(week_start)
-    names_last = _FT_SB_FIRST_ROW + len(names) - 1
-
-    def _ind(col: str) -> str:
-        # e.g. INDIRECT("'"&$L$6:$L$266&"'!$B$6:$B$45") — one range per listed
-        # week tab, through the sanitized names in L, so every target exists
-        # (missing weeks point at the blank sheet and contribute nothing).
-        # Deliberately NO IFERROR: if the blank sheet gets deleted the board
-        # shows #REF! loudly instead of silently under-counting.
-        return (f'INDIRECT("\'"&$L${_FT_SB_FIRST_ROW}:$L${names_last}&"\'!'
-                f'${col}${_FT_FIRST_DATA_ROW}:${col}${_FT_LAST_DATA_ROW}")')
-
-    sb["A1"] = "HAR FORWARD TEST — SCOREBOARD"
-    sb["A1"].font = Font(bold=True, size=13, color=NAVY)
-    # A2/A3 deliberately NOT merged: unmerged text overflows across the empty
-    # cells to its right, while a merged cell clips at its own edge.
-    sb["A2"] = (
-        "Ticker-keyed: week tabs are matched on their Instrument column, so the "
-        "ticker mix AND row order are free to differ week to week. Each week: "
-        "download the new export, right-click its week tab → Move or Copy → into "
-        "this workbook, any position. One tab per Monday — re-importing a week? "
-        "Delete its old tab FIRST (Excel silently renames the paste to (2), "
-        "which the board ignores)."
-    )
-    sb["A2"].font = Font(italic=True, size=9, color=MUTED)
-    sb["A3"] = (
-        f"Track a new instrument any time: type its ticker into a blank "
-        f"Instrument cell — every week tab in the book re-scores instantly. "
-        f"Don't rename week tabs or insert rows/columns on them; keep the "
-        f"'{_FT_BLANK_SHEET}' sheet. Hit % counts only weeks where that tier "
-        f"had a band and a filled close. Weeks after {names[-1]} need a fresh "
-        f"export's Scoreboard (a warning appears here in time). Upgrading an "
-        f"old master: also delete its WeeksStart/WeeksEnd tabs and re-type its "
-        f"extra tickers here."
-    )
-    sb["A3"].font = Font(italic=True, size=9, color=MUTED)
-
-    # Self-diagnostics: live week-tab count, plus loud warnings for the two
-    # silent failure modes — a pasted duplicate that Excel renamed to "(2)"
-    # (invisible to the name-keyed scan) and the pre-listed name horizon
-    # running out.
-    _horizon_end = date_cls.fromisoformat(names[-1])
-    _warn_from = _horizon_end - timedelta(weeks=12)
-    sb["K1"] = (
-        f'="Week tabs found: "'
-        f'&SUMPRODUCT(--($L${_FT_SB_FIRST_ROW}:$L${names_last}<>"{_FT_BLANK_SHEET}"))'
-        f'&IF(SUM($R${_FT_SB_FIRST_ROW}:$R${names_last})>0,'
-        f'"   ⚠ a pasted week tab was renamed like {week_start} (2) — the board '
-        f'ignores it; delete the old tab, then rename the (2) tab to the plain '
-        f'date","")'
-        f'&IF(TODAY()>DATE({_warn_from.year},{_warn_from.month},{_warn_from.day}),'
-        f'"   ⚠ last pre-listed week is {names[-1]} — swap in a fresh export '
-        f'Scoreboard + {_FT_BLANK_SHEET}","")'
-    )
-    sb["K1"].font = Font(italic=True, size=9, color=MUTED)
-
-    _sb_groups = [("C", "D", "LOWER PI"), ("E", "F", "POINT EST"),
-                  ("G", "H", "80% PI UPPER"), ("I", "J", "EFFECTIVE")]
-    for (lo, hi, label), fill in zip(_sb_groups, TIER_FILLS):
-        sb.merge_cells(f"{lo}4:{hi}4")
-        c = sb[f"{lo}4"]
-        c.value = label
-        c.fill = fill
-        c.font = Font(bold=True, size=9)
-        c.alignment = CENTER
-    for col, label in [("A", "Instrument"), ("B", "Weeks Scored")] + [
-        (c, lbl) for grp in _sb_groups for c, lbl in ((grp[0], "Wins"), (grp[1], "Hit %"))
-    ]:
-        cell = sb[f"{col}5"]
-        cell.value = label
-        cell.fill = HDR_FILL
-        cell.font = Font(bold=True, size=9, color="FFFFFF")
-        cell.alignment = CENTER
-        cell.border = BOX
-    for col, label in [("L", "Week tabs (live)"), ("M", "Week tabs (all)"),
-                       ("N", "n LPI"), ("O", "n Point"),
-                       ("P", "n 80PI"), ("Q", "n Eff"), ("R", "dup?")]:
-        cell = sb[f"{col}5"]
-        cell.value = label
-        cell.font = Font(bold=True, size=8, color=MUTED)
-
-    # M: pre-listed Monday tab names, stored as TEXT (INDIRECT concatenates
-    # them into sheet references — Excel must never coerce one to a date
-    # serial). L: the sanitized live name every formula actually uses — the
-    # week tab itself when it exists, the blank sheet when it doesn't.
-    # R: flags a duplicate tab Excel renamed to "<Monday> (2)" (feeds K1).
-    for k, nm in enumerate(names):
-        r = _FT_SB_FIRST_ROW + k
-        c = sb[f"M{r}"]
-        c.number_format = "@"
-        c.value = nm
-        sb[f"L{r}"] = (f'=IF(ISREF(INDIRECT("\'"&$M{r}&"\'!$A$1")),'
-                       f'$M{r},"{_FT_BLANK_SHEET}")')
-        sb[f"R{r}"] = f'=IF(ISREF(INDIRECT("\'"&$M{r}&" (2)\'!$A$1")),1,0)'
-
-    # Instrument slots: export tickers first, the rest blank-but-armed — every
-    # slot carries the full formula set, guarded on column A being non-blank
-    # (IF short-circuits, so empty slots cost nothing to recalc). Slot cells
-    # are the only unlocked cells on the sheet (typing a ticker must survive
-    # the sheet protection below).
-    # (win col, hidden denominator col, week-tab flag col, band-Low col):
-    _win_cols = [("C", "N", "O", "G"), ("E", "O", "P", "I"),
-                 ("G", "P", "Q", "K"), ("I", "Q", "R", "M")]
-    for idx in range(_FT_SB_SLOTS):
-        r = _FT_SB_FIRST_ROW + idx
-        tick = f"$A{r}"
-        if idx < len(tickers):
-            sb[f"A{r}"] = _xlsx_safe_cell(tickers[idx])
-            sb[f"A{r}"].font = Font(bold=True)
-        sb[f"A{r}"].protection = Protection(locked=False)
-        sb[f"B{r}"] = (f'=IF({tick}="","",SUMPRODUCT('
-                       f'SUMIF({_ind("B")},{tick},{_ind("S")})))')
-        for win_col, den_col, flag_col, lo_col in _win_cols:
-            sb[f"{win_col}{r}"] = (
-                f'=IF({tick}="","",SUMPRODUCT('
-                f'COUNTIFS({_ind("B")},{tick},{_ind(flag_col)},1)))'
-            )
-            # Denominator: flags are numeric (0/1) only when the tier scored;
-            # ">=0" skips the ""-blanks bandless/unfilled rows produce. The
-            # extra band-Low ">0" criterion drops PRE-REWORK rows whose old
-            # unguarded flags emit 0 with no band at all (false losses).
-            sb[f"{den_col}{r}"] = (
-                f'=IF({tick}="","",SUMPRODUCT('
-                f'COUNTIFS({_ind("B")},{tick},{_ind(flag_col)},">=0",'
-                f'{_ind(lo_col)},">0")))'
-            )
-        for hit_col, (win_col, den_col, *_cols) in zip("DFHJ", _win_cols):
-            sb[f"{hit_col}{r}"] = (
-                f'=IF({tick}="","",IF({den_col}{r}=0,"—",{win_col}{r}/{den_col}{r}))'
-            )
-            sb[f"{hit_col}{r}"].number_format = "0%"
-        for col in "ABCDEFGHIJ":
-            sb[f"{col}{r}"].border = BOX
-            if col != "A":
-                sb[f"{col}{r}"].alignment = Alignment(horizontal="center")
-
-    # ALL row — pooled across every instrument slot.
-    ar = _FT_SB_ALL_ROW
-    lo_r, hi_r = _FT_SB_FIRST_ROW, _FT_SB_LAST_ROW
-    sb[f"A{ar}"] = "ALL"
-    sb[f"A{ar}"].font = Font(bold=True)
-    sb[f"B{ar}"] = f"=SUM(B{lo_r}:B{hi_r})"
-    for win_col, den_col, *_cols in _win_cols:
-        sb[f"{win_col}{ar}"] = f"=SUM({win_col}{lo_r}:{win_col}{hi_r})"
-        sb[f"{den_col}{ar}"] = f"=SUM({den_col}{lo_r}:{den_col}{hi_r})"
-    for hit_col, (win_col, den_col, *_cols) in zip("DFHJ", _win_cols):
-        sb[f"{hit_col}{ar}"] = f'=IF({den_col}{ar}=0,"—",{win_col}{ar}/{den_col}{ar})'
-        sb[f"{hit_col}{ar}"].number_format = "0%"
-    for col in "ABCDEFGHIJ":
-        sb[f"{col}{ar}"].border = BOX
-        if col != "A":
-            sb[f"{col}{ar}"].alignment = Alignment(horizontal="center")
-
-    sb.column_dimensions["A"].width = 12
-    sb.column_dimensions["B"].width = 13
-    for col in "CDEFGHIJ":
-        sb.column_dimensions[col].width = 9
-    for col in "LMNOPQR":
-        sb.column_dimensions[col].hidden = True
-    sb.freeze_panes = "A6"
-
-    # Guardrail: protect the sheet (no password) so the hidden plumbing and
-    # formulas can't be edited or shifted by accident — only the Instrument
-    # slots (unlocked above) accept typing. Formatting stays allowed;
-    # right-click the tab → Unprotect Sheet to override deliberately.
-    sb.protection.sheet = True
-    sb.protection.formatCells = False
-    sb.protection.formatColumns = False
-    sb.protection.formatRows = False
-
-
-def _write_ft_week_sheet(wb, week_start: str, rows: list[dict]):
-    """Write one week tab (named for its Monday) into ``wb``; returns it.
-
-    Self-contained on purpose: every formula references THIS sheet only, so
-    Move/Copy into the master never externalizes a reference. The Scoreboard
-    matches its rows by the Instrument column, so ``rows`` may carry any
-    ticker mix, in any order (capped at _FT_MAX_TICKERS — the Scoreboard
-    scans B6:B45). Every row of that window is written: exported tickers on
-    top, the rest blank-but-armed (formulas + styling in place) so a row the
-    user types in by hand — the only way to log the current week for a
-    freshly tracked ticker — scores exactly like an exported one. Ships
-    protected (no password): data cells editable, formula cells and the
-    sheet structure locked (the Scoreboard reads fixed positions).
-    """
-    from openpyxl.formatting.rule import CellIsRule
-    from openpyxl.styles import (
-        Alignment, Border, Font, PatternFill, Protection, Side,
-    )
-    from openpyxl.utils import get_column_letter
-    from openpyxl.worksheet.datavalidation import DataValidation
-
-    NAVY, MUTED = "1F3864", "595959"
-    HDR_FILL = PatternFill("solid", start_color=NAVY)
-    TIER_FILLS = [PatternFill("solid", start_color=c)
-                  for c in ("FCE4D6", "FFF2CC", "E2EFDA", "DDEBF7")]
-    GREY_FILL = PatternFill("solid", start_color="D9D9D9")
-    GREEN_FILL = PatternFill("solid", start_color="C6EFCE")
-    RED_FILL = PatternFill("solid", start_color="FFC7CE")
-    thin = Side(style="thin", color="BFBFBF")
-    BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
-    CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    rows = list(rows)[:_FT_MAX_TICKERS]
-    FIRST = _FT_FIRST_DATA_ROW
-    ws = wb.create_sheet(week_start)
-
-    ws["A1"] = f"HAR MODELS — WEEKLY RANGE FORWARD TEST — week of {week_start}"
-    ws["A1"].font = Font(bold=True, size=13, color=NAVY)
-    ws["A2"] = (
-        "One row per instrument. Each model tier gives its own Low/High band. "
-        "Win = weekly CLOSE inside that tier's band (intraday wicks ignored — set-and-forget). "
-        "Fill 'Weekly Close' (column E) after Friday's close; CLOSE INSIDE, Scored? and the "
-        "Scoreboard update automatically. The Scoreboard matches rows by Instrument name, "
-        "so row order doesn't matter — just don't rename this tab or insert rows/columns "
-        "(sheet is protected, no password, to keep the scored layout fixed; all data "
-        "cells stay editable — add extra instrument rows below the exported ones freely)."
-    )
-    ws["A2"].font = Font(italic=True, size=9, color=MUTED)
-    ws.merge_cells("A2:T2")
-
-    _tier_groups = [
-        ("G", "H", "LOWER PI (tightest — richest credit)"),
-        ("I", "J", "POINT ESTIMATE (HAR base)"),
-        ("K", "L", "80% PI UPPER (80% interval)"),
-        ("M", "N", "EFFECTIVE (PI + buffer — your condor)"),
-    ]
-    for (lo, hi, label), fill in zip(_tier_groups, TIER_FILLS):
-        ws.merge_cells(f"{lo}4:{hi}4")
-        c = ws[f"{lo}4"]
-        c.value = label
-        c.fill = fill
-        c.font = Font(bold=True, size=8)
-        c.alignment = CENTER
-    ws.merge_cells("O4:R4")
-    ws["O4"] = "CLOSE INSIDE? (per model)"
-    ws["O4"].fill = PatternFill("solid", start_color="B4C6E7")
-    ws["O4"].font = Font(bold=True, size=8)
-    ws["O4"].alignment = CENTER
-
-    _headers = [
-        ("A", "Week (Mon)"), ("B", "Instrument"), ("C", "Class"),
-        ("D", "Ref/Open ($)"), ("E", "Weekly Close ($)"), ("F", "Prev Close ($)"),
-        ("G", "Low"), ("H", "High"), ("I", "Low"), ("J", "High"),
-        ("K", "Low"), ("L", "High"), ("M", "Low"), ("N", "High"),
-        ("O", "Lower PI"), ("P", "Point"), ("Q", "80% PI"), ("R", "Eff"),
-        ("S", "Scored?"), ("T", "Notes"),
-    ]
-    for col, label in _headers:
-        cell = ws[f"{col}5"]
-        cell.value = label
-        cell.fill = HDR_FILL
-        cell.font = Font(bold=True, size=9, color="FFFFFF")
-        cell.alignment = CENTER
-        cell.border = BOX
-
-    _slot_cols = [("lower_pi", "G", "H"), ("point", "I", "J"),
-                  ("pi_upper", "K", "L"), ("effective", "M", "N")]
-    _week_date = None
-    try:
-        _week_date = datetime.strptime(week_start, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        pass
-
-    # Every scannable row (6..45) is written: exported tickers on top, the
-    # rest blank-but-armed so a row the user types in by hand scores exactly
-    # like an exported one (the Scoreboard reads the whole window either way).
-    for r in range(FIRST, _FT_LAST_DATA_ROW + 1):
-        row = rows[r - FIRST] if r - FIRST < len(rows) else None
-        if row is not None:
-            t = row.get("ticker", "?")
-            ws[f"A{r}"] = _week_date or week_start
-            ws[f"A{r}"].number_format = "yyyy-mm-dd"
-            ws[f"B{r}"] = _xlsx_safe_cell(t)
-            ws[f"B{r}"].font = Font(bold=True)
-            ws[f"C{r}"] = _ft_class(t)
-            if row.get("ref") is not None:
-                ws[f"D{r}"] = row["ref"]
-            if row.get("prev_close") is not None:
-                ws[f"F{r}"] = row["prev_close"]
-            bands = row.get("bands") or {}
-            for slot, lo_col, hi_col in _slot_cols:
-                band = bands.get(slot)
-                if band is not None:
-                    ws[f"{lo_col}{r}"] = band[0]
-                    ws[f"{hi_col}{r}"] = band[1]
-            note = " · ".join(row.get("notes") or [])
-            if row.get("error"):
-                note = (f"⚠ {row['error']}" + (f" · {note}" if note else ""))
-            ws[f"T{r}"] = note
-            ws[f"T{r}"].font = Font(size=8, color=MUTED)
-            ws[f"T{r}"].alignment = Alignment(wrap_text=True, vertical="center")
-
-        # E — Weekly Close: left blank for the user, shaded as fill-me.
-        ws[f"E{r}"].fill = GREY_FILL
-        for (slot, lo_col, hi_col), fill in zip(_slot_cols, TIER_FILLS):
-            ws[f"{lo_col}{r}"].fill = fill
-            ws[f"{hi_col}{r}"].fill = fill
-
-        # CLOSE INSIDE? flags — blank until the row has an instrument AND the
-        # close AND that tier's band are all NUMBERS (COUNT counts numbers
-        # only): a pasted close with a stray space or an 'n/a' band stays
-        # blank instead of scoring a false loss (any text compares above any
-        # number in Excel, so an unguarded compare emits 0). 1/0 once
-        # scoreable — the Scoreboard's denominators count exactly these
-        # numeric cells.
-        for (slot, lo_col, hi_col), flag_col in zip(_slot_cols, "OPQR"):
-            ws[f"{flag_col}{r}"] = (
-                f'=IF(OR($B{r}="",COUNT($E{r},{lo_col}{r},{hi_col}{r})<3),"",'
-                f'IF(AND($E{r}>={lo_col}{r},$E{r}<={hi_col}{r}),1,0))'
-            )
-            ws[f"{flag_col}{r}"].alignment = Alignment(horizontal="center")
-        # Scored? = instrument present, close is a number, ≥1 numeric band.
-        ws[f"S{r}"] = (f'=IF(OR($B{r}="",COUNT($E{r})=0,'
-                       f'COUNT($G{r}:$N{r})=0),"",1)')
-        ws[f"S{r}"].alignment = Alignment(horizontal="center")
-
-        for col_idx in range(1, 21):
-            cell = ws.cell(row=r, column=col_idx)
-            cell.border = BOX
-            if 4 <= col_idx <= 14 and not isinstance(cell.value, str):
-                cell.number_format = "#,##0.00"
-
-    # Green/red the CLOSE INSIDE cells once scored — the whole armed window,
-    # so hand-added rows colour like exported ones.
-    ws.conditional_formatting.add(
-        f"O{FIRST}:R{_FT_LAST_DATA_ROW}",
-        CellIsRule(operator="equal", formula=["1"], fill=GREEN_FILL),
-    )
-    ws.conditional_formatting.add(
-        f"O{FIRST}:R{_FT_LAST_DATA_ROW}",
-        CellIsRule(operator="equal", formula=["0"], fill=RED_FILL),
-    )
-
-    _widths = {"A": 11, "B": 11, "C": 7, "D": 10, "E": 11, "F": 10,
-               "S": 8, "T": 46}
-    for col_idx in range(7, 15):
-        _widths[get_column_letter(col_idx)] = 9
-    for col_idx in range(15, 19):
-        _widths[get_column_letter(col_idx)] = 8
-    for col, w in _widths.items():
-        ws.column_dimensions[col].width = w
-    ws.freeze_panes = "A6"
-
-    # Weekly Close must be a number — typed text silently un-scores the row
-    # (the COUNT guards keep flags blank rather than emit a false loss), so
-    # also reject it at entry. Paste bypasses validation; the formula guards
-    # stay authoritative.
-    dv = DataValidation(
-        type="decimal", operator="greaterThan", formula1="0", allowBlank=True,
-        showErrorMessage=True, errorTitle="Weekly Close must be a number",
-        error=("Type the Friday close as a plain number — text (even a stray "
-               "space) keeps the row from scoring."),
-    )
-    ws.add_data_validation(dv)
-    dv.add(f"E{FIRST}:E{_FT_LAST_DATA_ROW}")
-
-    # Guardrail: protect the sheet (no password). Data-entry cells stay
-    # unlocked (B..N instrument/class/ref/close/bands + T notes — enough to
-    # hand-add a full instrument row); the flag/Scored? formulas and the
-    # sheet STRUCTURE stay locked, because the Scoreboard reads fixed
-    # positions (B6:B45, flags O..R, Scored? S) and a single inserted
-    # row/column would silently garble every tally. Formatting stays
-    # allowed; right-click the tab → Unprotect Sheet to override.
-    for r in range(FIRST, _FT_LAST_DATA_ROW + 1):
-        for col in "BCDEFGHIJKLMNT":
-            ws[f"{col}{r}"].protection = Protection(locked=False)
-    ws.protection.sheet = True
-    ws.protection.formatCells = False
-    ws.protection.formatColumns = False
-    ws.protection.formatRows = False
-    return ws
-
-
-def _write_ft_blank_sheet(wb) -> None:
-    """Create the empty utility sheet unpasted weeks resolve to.
-
-    The Scoreboard's sanitizer (hidden column L) points every pre-listed
-    Monday whose tab isn't in the workbook yet at this sheet, so its scanned
-    region (rows 6-45) must stay empty — a note in row 1 is safely outside.
-    """
-    from openpyxl.styles import Font
-
-    bk = wb.create_sheet(_FT_BLANK_SHEET)
-    bk["A1"] = (
-        f"Keep this sheet (and keep it empty) — the Scoreboard resolves "
-        f"not-yet-added weeks here. If you copy the Scoreboard into another "
-        f"workbook, copy '{_FT_BLANK_SHEET}' along with it. The sheet is "
-        f"protected on purpose: anything typed into it would be counted once "
-        f"per missing week."
-    )
-    bk["A1"].font = Font(italic=True, size=9, color="595959")
-    bk.sheet_view.showGridLines = False
-    # Fully locked, no password: a stray row typed here would be multiplied
-    # by every not-yet-pasted Monday (~150-200x) with no error anywhere.
-    bk.protection.sheet = True
-
-
-def _build_forward_test_workbook(*, week_start: str, model_choice: str, rows: list[dict]) -> bytes:
-    """Assemble the multi-ticker forward-test workbook.
-
-    Sheets, in order: Scoreboard · <week_start> · FTBlank. `rows` is the
-    ordered list of per-ticker dicts to write (defaults first, then
-    user-added extras); each carries its own ``ticker`` (see
-    _collect_week_bands_for_ticker for the shape). The Scoreboard matches
-    week tabs by ticker name, so the mix and order may differ freely across
-    weeks (capped at _FT_MAX_TICKERS per week — the fixed range its formulas
-    scan). ``model_choice`` only flavors the notes the caller baked into
-    ``rows``.
-    """
-    from io import BytesIO
-
-    import openpyxl
-
-    rows = list(rows)[:_FT_MAX_TICKERS]
-    wb = openpyxl.Workbook()
-    sb = wb.active
-    sb.title = "Scoreboard"
-    # Slot labels feed SUMIF/COUNTIFS criteria directly — drop blanks rather
-    # than emit a placeholder ("?" is an Excel wildcard matching any 1-char
-    # instrument).
-    _slot_tickers = [t for t in (str(r.get("ticker") or "").strip()
-                                 for r in rows) if t]
-    _write_ft_scoreboard(sb, week_start, _slot_tickers)
-    _write_ft_week_sheet(wb, week_start, rows)
-    _write_ft_blank_sheet(wb)
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
 def _auto_warm_up_spread_model(conn, ticker: str, ticker_cfg: dict) -> bool:
     """Cold-start the weekly Spread Finder for a freshly-looked-up ticker.
 
@@ -1230,27 +625,9 @@ def _auto_warm_up_spread_model(conn, ticker: str, ticker_cfg: dict) -> bool:
     if df_feat is None or df_feat.empty:
         return False
 
-    fitted_any = False
-    for _spec in RF_MODEL_SPECS.keys():
-        feat_cols = live_spread_feature_columns(RF_MODEL_SPECS[_spec])
-        if _spec == "M4_full" and GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-            gex_col = GEX_NORMALIZED_FEATURE
-            if rf_feature_has_enough_data(df_feat, gex_col) and gex_col not in feat_cols:
-                feat_cols.append(gex_col)
-        avail_cols = production_feature_columns(df_feat, _spec)
-        if len(avail_cols) < 2:
-            continue
-        try:
-            _validation, _result, _metrics = rf_fit_validation_and_production(
-                df_feat, feature_cols=avail_cols, model_name=_spec
-            )
-            rf_save_model(_result, avail_cols, _spec, _metrics,
-                          conn=conn, ticker=ticker)
-            fitted_any = True
-        except Exception:
-            continue
+    report = fit_and_save_specs(conn, ticker, features=df_feat)
     _cached_rf_load_model.clear()
-    return fitted_any
+    return bool(report.fits)
 
 
 @st.fragment
@@ -1261,7 +638,6 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     slider, model-spec dropdown, credit width, etc.) only rerun this tab
     instead of triggering a full-page rerun that rebuilds the GEX chart,
     the sidebar, and re-fetches weekly/monthly EM."""
-    import yfinance as yf
     from phase1.market_clock import now_ny
 
     # resolve_config returns the chain-derived config registered by the main
@@ -1280,11 +656,10 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     from phase1.ticker_config import has_single_name_earnings as _has_sne
     if _has_sne(ticker):
         try:
-            from datetime import timedelta as _td_e
             from phase1.market_clock import now_ny as _now_ny_e
             # Check the SAME week the spread finder is planning for —
             # this week's Monday on Mon-Thu, next Monday on Fri-Sun
-            # (mirrors _spread_finder_target_friday / week_start below).
+            # (phase1.trading_week.planning_week, same as week_start below).
             # The old check always looked at NEXT Monday, so a Tuesday
             # user planning this week's spreads never saw the warning
             # for earnings landing on Wednesday.
@@ -1294,13 +669,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             # 20:00 ET, so a late-evening ET user would otherwise be shown
             # the wrong planning week (and miss/false-fire the warning) for
             # 4 hours every day. Everything else in the tab keys off ET.
-            _today = _now_ny_e().date()
-            _wd_e = _today.weekday()
-            if _wd_e <= 3:
-                _plan_monday = _today - _td_e(days=_wd_e)
-            else:
-                _plan_monday = _today + _td_e(days=7 - _wd_e)
-            _plan_week = _plan_monday.strftime("%Y-%m-%d")
+            _plan_week = planning_week(_now_ny_e()).key
             _conn_e = _get_rf_conn()
             _cur_e = _conn_e.cursor()
             _cur_e.execute(
@@ -1334,162 +703,44 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     live_vix_raw = _live_vol_close(_vol_proxy)
     live_vix = live_vix_raw if live_vix_raw is not None else 18.0
 
-    # ── Monday open freeze logic ──
-    # On the weekly freeze day (Monday or Tue after holiday) at market open,
-    # capture the true daily-candle Open as the weekly reference. Rest of
-    # the week uses that frozen value. Before Monday open (weekends), use
-    # the live spot (Friday close).
+    # ── Weekly anchor (range_finder.weekly_anchor) ──
+    # Mon–Thu strikes lock to the planning week's first-session daily Open:
+    # the persisted weekly_setup row wins; a missing row is captured (and
+    # persisted) from the true daily bar once the first session has opened.
+    # Fri–Sun the tab plans next week, whose open doesn't exist yet, so the
+    # latest price stands in.
     run_now = now_ny()
-    is_freeze_day = _is_weekly_freeze_day(run_now)
-    is_market_open = data.market_open
-
-    mon_open_key = f"sf_monday_open_{ticker}"
-    mon_vix_key = f"sf_monday_vix_{ticker}"
-    mon_open_week_key = f"sf_monday_open_week_{ticker}"
-
-    # Determine which week we're in (use ISO week number)
-    current_week = run_now.isocalendar()[1]
-
-    def _daily_open_today(symbol: str):
-        """Today's daily-candle Open, or None if Yahoo hasn't published
-        it yet (happens briefly after 9:30 while the first tick settles)."""
-        try:
-            hist = yf.Ticker(symbol).history(period="5d")
-        except Exception:
-            return None
-        if hist is None or hist.empty or "Open" not in hist.columns:
-            return None
-        today = run_now.date()
-        for ts, row in hist.iterrows():
-            if hasattr(ts, "date") and ts.date() == today:
-                op = row.get("Open")
-                if op is not None and not (isinstance(op, float) and op != op):
-                    return float(op)
-        return None
-
-    # Freeze Monday's open on the freeze day when market is open
-    if is_freeze_day and is_market_open:
-        stored_week = st.session_state.get(mon_open_week_key)
-        if stored_week != current_week:
-            # First market-hours refresh on the freeze day — lock the
-            # TRUE daily-candle Open, not whatever tick `spot` happens to
-            # land on while this refresh is running. Fall back to spot
-            # only if yfinance hasn't returned today's bar yet.
-            #
-            # Per-ticker yfinance symbols come from ticker_config:
-            # SPX/XSP read ^SPX (XSP scales /10); QQQ reads QQQ; AMZN/AMD
-            # read their own symbols. Vol proxy is VIX for everyone except
-            # QQQ, which uses VXN.
-            from phase1.ticker_config import price_scale_divisor as _scale_div_fn
-            _yf_underlying = ticker_cfg.get("yf_symbol", "^GSPC")
-            _yf_vol_proxy  = ticker_cfg.get("vol_proxy_yf", "^VIX")
-            _scale_div     = _scale_div_fn(ticker)
-
-            underlying_daily_open = _daily_open_today(_yf_underlying)
-            if underlying_daily_open is not None:
-                # A scaled mini (XSP→SPX) reads its parent's symbol and
-                # divides by its scale_divisor; everyone else divides by 1.0.
-                frozen_spot = round(underlying_daily_open / _scale_div, 2)
-            else:
-                frozen_spot = round(spot, 2)
-
-            vol_proxy_daily_open = _daily_open_today(_yf_vol_proxy)
-            frozen_vix_val = round(vol_proxy_daily_open, 2) if vol_proxy_daily_open is not None else live_vix
-
-            st.session_state[mon_open_key] = frozen_spot
-            st.session_state[mon_vix_key] = frozen_vix_val
-            st.session_state[mon_open_week_key] = current_week
-
-    # Determine the reference price/VIX and their source label.
-    #
-    # The Monday-open anchor only applies while we're planning THIS week's
-    # spreads (Mon-Thu). From Friday on, the planner targets NEXT week
-    # (see week_start below), and anchoring next week's strikes to the
-    # *current* week's Monday open carries up to a full week of drift —
-    # the best available proxy for next Monday's open is simply the
-    # latest price (Friday's close over the weekend).
-    _planning_this_week = run_now.weekday() <= 3
-    frozen_open = st.session_state.get(mon_open_key)
-    frozen_vix = st.session_state.get(mon_vix_key)
-    frozen_week = st.session_state.get(mon_open_week_key)
+    anchor = resolve_weekly_anchor(
+        _get_rf_conn(), ticker, run_now,
+        read_setup=_cached_weekly_setup, live_vix=live_vix, cfg=ticker_cfg,
+    )
+    if anchor.captured:
+        _cached_weekly_setup.clear()
     self_heal_msg = None
+    if anchor.self_healed:
+        self_heal_msg = (
+            f"ℹ️ No Monday-open capture existed for the week of "
+            f"{anchor.week_start} (the Monday setup job didn't run for "
+            f"{ticker}), so the anchor was captured retroactively "
+            f"from Monday's daily bar — strikes are now locked to it "
+            f"for the week. Run **Weekly Setup** if this recurs."
+        )
 
-    if _planning_this_week and frozen_week == current_week and frozen_open:
-        default_ref = frozen_open
-        default_vix = frozen_vix or live_vix
-        ref_source = "Mon open (frozen)"
+    if anchor.locked:
+        default_ref = anchor.open
+        default_vix = anchor.vix or live_vix
+        ref_source = {"db": "Mon open (from DB)", "captured": "Mon open"}[anchor.status]
+        if anchor.self_healed:
+            ref_source = "Mon open (self-healed)"
     else:
-        # Mid-week (Mon-Thu) the strikes must stay anchored to THIS week's
-        # Monday open even when the in-session freeze was lost (a fresh browser
-        # session drops session state). Two-step recovery:
-        #   1) restore the Monday open + VIX from weekly_setup, and
-        #   2) if that row is missing (the Monday cron never ran, or this is a
-        #      ticker the cron doesn't fit), capture it RETROACTIVELY from
-        #      yfinance and persist it — so we lock to Monday instead of
-        #      silently drifting on live spot for the rest of the week.
-        # _cached_weekly_setup wraps the SELECT in a 15 min cross-session cache
-        # so widget reruns / auto-refresh ticks don't keep firing at Neon.
-        restored_open = None
-        restored_vix = None
-        self_healed = False
-        if _planning_this_week:
-            from datetime import timedelta as _td
-            this_monday = (run_now - _td(days=run_now.weekday())).date()
-            week_start_str = this_monday.strftime("%Y-%m-%d")
-            rf_conn = _get_rf_conn()
-            # 1) Restore a previously-captured Monday anchor.
-            try:
-                cached_setup = _cached_weekly_setup(rf_conn, week_start_str, ticker)
-                if cached_setup is not None:
-                    restored_open, restored_vix = cached_setup
-            except Exception:
-                pass
-            # 2) Self-heal a missing capture. No spot_fallback on purpose — we
-            #    only persist a TRUE Monday daily-candle Open, never a mid-week
-            #    live price masquerading as the weekly anchor. If yfinance has
-            #    no Monday bar, the capture raises and we fall through to the
-            #    live-spot display for the day (nothing bad gets persisted).
-            if not restored_open:
-                try:
-                    healed_open, healed_vix, _src = rf_capture_monday_anchor(
-                        rf_conn, ticker, week_start_str, this_monday,
-                        spot_fallback=None, live_vix_fallback=live_vix,
-                        cfg=ticker_cfg,
-                    )
-                    if healed_open:
-                        restored_open, restored_vix = healed_open, healed_vix
-                        self_healed = True
-                        _cached_weekly_setup.clear()
-                        self_heal_msg = (
-                            f"ℹ️ No Monday-open capture existed for the week of "
-                            f"{week_start_str} (the Monday setup job didn't run for "
-                            f"{ticker}), so the anchor was captured retroactively "
-                            f"from Monday's daily bar — strikes are now locked to it "
-                            f"for the week. Run **Weekly Setup** if this recurs."
-                        )
-                except Exception:
-                    pass
-            # Mirror whatever we landed on into the session freeze so labels read
-            # "Mon open" and later reruns skip the DB / yfinance round-trip.
-            if restored_open:
-                st.session_state[mon_open_key] = restored_open
-                if restored_vix:
-                    st.session_state[mon_vix_key] = restored_vix
-                st.session_state[mon_open_week_key] = current_week
-
-        if restored_open:
-            default_ref = restored_open
-            default_vix = restored_vix or live_vix
-            ref_source = "Mon open (self-healed)" if self_healed else "Mon open (from DB)"
+        default_ref = round(spot, 2)
+        default_vix = live_vix
+        if run_now.weekday() >= 5:
+            ref_source = "Fri close (next-week plan)"
+        elif run_now.weekday() == 4:
+            ref_source = "live spot (next-week plan)"
         else:
-            default_ref = round(spot, 2)
-            default_vix = live_vix
-            if run_now.weekday() >= 5:
-                ref_source = "Fri close (next-week plan)"
-            elif run_now.weekday() == 4:
-                ref_source = "live spot (next-week plan)"
-            else:
-                ref_source = "live spot"
+            ref_source = "live spot"
 
     # ── Reference-price sanity guard ──
     # The ref is sticky (keyed session state, frozen Monday captures, a DB
@@ -1500,27 +751,11 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # hand here, so validate against it: hard-correct values that can only
     # be data corruption (no weekly market move is that big), and surface
     # a warning for large-but-conceivable gaps so the user double-checks.
-    _REF_RESET_DEV = 0.25   # >25% off spot: corruption, not a market move
-    _REF_WARN_DEV  = 0.12   # >12%: extreme — keep it, but make the user look
-
-    def _ref_deviation(v) -> "float | None":
-        """|v/spot - 1|, or None when v isn't a usable price."""
-        if not spot or spot <= 0:
-            return None
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            return None
-        if v <= 0:
-            return None
-        return abs(v / spot - 1.0)
-
+    # Thresholds and the judgement live in range_finder.spread_finder_rules.
     ref_guard_msg = None
-    if spot and spot > 0:
-        _dev_default = _ref_deviation(default_ref)
-        if _dev_default is None or _dev_default > _REF_RESET_DEV:
-            default_ref = round(spot, 2)
-            ref_source = "live spot (auto-corrected)"
+    if check_reference(default_ref, spot).status == "reset":
+        default_ref = round(spot, 2)
+        ref_source = "live spot (auto-corrected)"
 
     # ── Auto-update reference price and VIX when ticker changes ──
     # Also evict the ticker we're *leaving*'s cached HAR fit so the
@@ -1534,44 +769,51 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     vix_key = f"sf_vix_level_{ticker}"
     prev_ticker = st.session_state.get("_sf_prev_ticker")
     if prev_ticker != ticker:
-        st.session_state[ref_key] = default_ref
-        st.session_state[vix_key] = default_vix
         if prev_ticker:
             for _suffix in ("sf_model_result_", "sf_model_features_",
                             "sf_model_metrics_", "sf_model_name_"):
                 st.session_state.pop(f"{_suffix}{prev_ticker}", None)
         st.session_state["_sf_prev_ticker"] = ticker
 
-    # Also update the defaults on first render if not yet set
-    if ref_key not in st.session_state:
+    # Seed the inputs whenever the anchor they came from changes — ticker
+    # switch, first render, the week rolling, or the anchor locking (a
+    # session opened before Monday's open must pick up the lock). A manual
+    # override survives until then; an unlocked anchor's seed (open=None)
+    # doesn't move with live spot, so the input doesn't chase ticks.
+    seed_key = f"sf_ref_seed_{ticker}"
+    _seed = (anchor.week_start, anchor.open)
+    if (prev_ticker != ticker or ref_key not in st.session_state
+            or st.session_state.get(seed_key) != _seed):
         st.session_state[ref_key] = default_ref
+        st.session_state[vix_key] = default_vix
+        st.session_state[seed_key] = _seed
     if vix_key not in st.session_state:
         st.session_state[vix_key] = default_vix
 
     # Validate whatever the session is actually carrying (stale seed from a
     # broken feed, fat-fingered edit, corrupt weekly_setup restore) — the
     # default-ref heal above can't see a value written on an earlier rerun.
-    if spot and spot > 0:
-        _cur_ref = st.session_state.get(ref_key)
-        _dev_cur = _ref_deviation(_cur_ref)
-        if _dev_cur is None or _dev_cur > _REF_RESET_DEV:
-            ref_guard_msg = (
-                f"⚠️ The stored {ticker} reference (`{_cur_ref}`) was "
-                f"{'unusable' if _dev_cur is None else f'{_dev_cur:.0%} away from live spot'} "
-                f"(spot ≈ {spot:,.2f}) — strikes built from it would be nonsense, "
-                f"so it was reset to **{default_ref:,.2f}** ({ref_source}). "
-                "If this keeps happening, the Monday-open capture in "
-                "`weekly_setup` for this week is bad — re-run **Weekly Setup** "
-                "to overwrite it."
-            )
-            st.session_state[ref_key] = default_ref
-        elif _dev_cur > _REF_WARN_DEV:
-            ref_guard_msg = (
-                f"⚠️ The {ticker} reference ({float(_cur_ref):,.2f}) is "
-                f"{_dev_cur:.0%} away from live spot ({spot:,.2f}). That's an "
-                "extreme gap for a weekly anchor — verify the reference before "
-                "trusting the strikes below."
-            )
+    _cur_ref = st.session_state.get(ref_key)
+    _ref_check = check_reference(_cur_ref, spot)
+    _dev_cur = _ref_check.deviation
+    if _ref_check.status == "reset":
+        ref_guard_msg = (
+            f"⚠️ The stored {ticker} reference (`{_cur_ref}`) was "
+            f"{'unusable' if _dev_cur is None else f'{_dev_cur:.0%} away from live spot'} "
+            f"(spot ≈ {spot:,.2f}) — strikes built from it would be nonsense, "
+            f"so it was reset to **{default_ref:,.2f}** ({ref_source}). "
+            "If this keeps happening, the Monday-open capture in "
+            "`weekly_setup` for this week is bad — re-run **Weekly Setup** "
+            "to overwrite it."
+        )
+        st.session_state[ref_key] = default_ref
+    elif _ref_check.status == "warn":
+        ref_guard_msg = (
+            f"⚠️ The {ticker} reference ({float(_cur_ref):,.2f}) is "
+            f"{_dev_cur:.0%} away from live spot ({spot:,.2f}). That's an "
+            "extreme gap for a weekly anchor — verify the reference before "
+            "trusting the strikes below."
+        )
 
     st.html(
         f'<div class="sf-section-title">{ticker} Weekly Credit Spread Finder</div>'
@@ -1622,7 +864,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         )
 
     with col_ctrl2:
-        vix_source = "Mon open" if (frozen_week == current_week and frozen_vix) else "last close"
+        vix_source = "Mon open" if (anchor.locked and anchor.vix) else "last close"
         vix_input = st.number_input(
             f"VIX Level ({vix_source})",
             min_value=5.0, max_value=100.0, step=0.5,
@@ -1731,7 +973,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 # a missing key whenever FRED itself had a 500. Also
                 # surface the key status so you can eyeball whether
                 # Streamlit actually picked up the secret.
-                if not RF_FRED_API_KEY:
+                if not credentials.fred_api_key():
                     st.warning(
                         "FRED fetch skipped: FRED_API_KEY is not set. "
                         "Add it under Streamlit Cloud → Manage app → Secrets, "
@@ -1874,91 +1116,61 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             if len(_specs_to_fit) > 1 else f"4/4 — Fitting {model_choice}..."
         )
 
-        _selected_result = None
-        _selected_avail  = None
-        _selected_metrics = None
+        # GEX calibration status for the spec the user is looking at. Live
+        # fits never consume GEX while the policy switch is off (BUG-06);
+        # production_feature_columns applies the same switch inside the fit.
+        if model_choice == "M4_full":
+            gex_col = GEX_NORMALIZED_FEATURE
+            _weeks = (int(df_feat[gex_col].notna().sum())
+                      if gex_col in df_feat.columns else 0)
+            if not GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
+                st.caption(
+                    f"GEX calibration: Pending — {_weeks} stored weeks "
+                    "remain available for research, but GEX is not "
+                    "applied to live fits, buffers, or strikes."
+                )
+            elif rf_feature_has_enough_data(df_feat, gex_col):
+                st.caption(
+                    f"ℹ️ M4_full: using {_weeks} weeks of stored GEX "
+                    "history as a training feature."
+                )
+            else:
+                st.caption(
+                    f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
+                    f"fold `gex_normalized` into the fit. Keep clicking **Save GEX** "
+                    f"each week; in the meantime M4 runs without the GEX feature."
+                )
 
         with st.spinner(_spinner_label):
-            for _spec in _specs_to_fit:
-                try:
-                    # BUG-06 filters GEX from every live fit while preserving
-                    # the stored column for the pending historical study.
-                    feat_cols = live_spread_feature_columns(RF_MODEL_SPECS[_spec])
-
-                    # Keep the former M4 injection path behind the same policy
-                    # switch as run_full_pipeline. The false branch documents
-                    # the research retention without consuming the feature.
-                    if _spec == "M4_full":
-                        gex_col = GEX_NORMALIZED_FEATURE
-                        if (
-                            GEX_LIVE_SPREAD_INFLUENCE_ENABLED
-                            and rf_feature_has_enough_data(df_feat, gex_col)
-                        ):
-                            if gex_col not in feat_cols:
-                                feat_cols.append(gex_col)
-                                # Only surface the "using N weeks of GEX" note
-                                # when fitting the spec the user is looking at
-                                # — otherwise the Weekly Setup run spams the
-                                # UI with notes about every background spec.
-                                if _spec == model_choice:
-                                    st.caption(
-                                        f"ℹ️ M4_full: using {int(df_feat[gex_col].notna().sum())} "
-                                        f"weeks of stored GEX history as a training feature."
-                                    )
-                        elif GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-                            _weeks = int(df_feat[gex_col].notna().sum()) if gex_col in df_feat.columns else 0
-                            if _spec == model_choice:
-                                st.caption(
-                                    f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
-                                    f"fold `gex_normalized` into the fit. Keep clicking **Save GEX** "
-                                    f"each week; in the meantime M4 runs without the GEX feature."
-                                )
-                        elif _spec == model_choice:
-                            _weeks = (
-                                int(df_feat[gex_col].notna().sum())
-                                if gex_col in df_feat.columns else 0
-                            )
-                            st.caption(
-                                f"GEX calibration: Pending — {_weeks} stored weeks "
-                                "remain available for research, but GEX is not "
-                                "applied to live fits, buffers, or strikes."
-                            )
-
-                    avail_cols = production_feature_columns(df_feat, _spec)
-                    if len(avail_cols) < 2:
-                        if _spec == model_choice:
-                            st.warning(f"{_spec}: only {len(avail_cols)} usable features — skipped")
-                        continue
-
-                    _validation, _result, _metrics = (
-                        rf_fit_validation_and_production(
-                            df_feat, feature_cols=avail_cols, model_name=_spec
-                        )
-                    )
-                    for _save_ticker in _tickers_to_save:
-                        rf_save_model(_result, avail_cols, _spec, _metrics,
-                                      conn=conn, ticker=_save_ticker)
-                    # New fit landed in Postgres — drop any cached
-                    # unpickle for this (spec, ticker) pair so a later
-                    # tab switch sees the fresh weights instead of
-                    # serving the previous fit until the 1-hour TTL
-                    # expires.
-                    _cached_rf_load_model.clear()
-
-                    if _spec == model_choice:
-                        _selected_result  = _result
-                        _selected_avail   = avail_cols
-                        _selected_metrics = _metrics
-                except Exception as e:
-                    st.error(f"{_spec} fitting failed: {e}")
+            try:
+                _report = fit_and_save_specs(
+                    conn, ticker, specs=_specs_to_fit,
+                    save_tickers=_tickers_to_save, features=df_feat,
+                )
+            except Exception as e:     # a save failed mid-way (DB)
+                st.error(f"Saving fits failed: {e}")
+                _report = FitReport()
+        # New fits landed in Postgres — drop cached unpickles so a later tab
+        # switch sees the fresh weights instead of the previous fit until the
+        # 1-hour TTL expires.
+        _cached_rf_load_model.clear()
+        for _spec, _reason in _report.skipped.items():
+            if _reason.startswith("fit failed"):
+                st.error(f"{_spec} fitting failed: {_reason}")
+            elif _spec == model_choice:
+                st.warning(f"{_spec}: {_reason} — skipped")
+        _selected = _report.fits.get(model_choice)
+        _selected_result = _selected.result if _selected else None
+        _selected_avail = _selected.feature_cols if _selected else None
+        _selected_metrics = _selected.metrics if _selected else None
 
         # Summary line for the Weekly Setup path so the user can see which
         # specs landed in Postgres at a glance.
         if do_weekly:
             _ticker_note = " × ".join(_tickers_to_save)
             st.success(
-                f"Fitted {len(_specs_to_fit)} specs for {_ticker_note} "
-                f"({len(_specs_to_fit) * len(_tickers_to_save)} rows saved)"
+                f"Fitted {len(_report.fits)}/{len(_specs_to_fit)} specs for "
+                f"{_ticker_note} ({len(_report.fits) * len(_tickers_to_save)} rows saved)"
             )
 
         # Prime session state with the currently-selected spec's fit so
@@ -1987,17 +1199,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     # Try to load model from session or disk
     if _mdl_result_key not in st.session_state:
-        from phase1.ticker_config import feature_source_ticker as _fsrc
         try:
-            try:
-                payload = _cached_rf_load_model(model_choice, ticker)
-            except FileNotFoundError:
-                # A scaled mini (XSP→SPX) rides its parent's fit
-                # (identical by construction) when it has no row of its own.
-                _parent = _fsrc(ticker)
-                if _parent == ticker:
-                    raise
-                payload = _cached_rf_load_model(model_choice, _parent)
+            payload, _fit_src = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
             st.session_state[_mdl_result_key]  = payload["result"]
             st.session_state[_mdl_feat_key]    = payload["feature_cols"]
             st.session_state[_mdl_metrics_key] = payload["metrics"]
@@ -2034,145 +1237,37 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # roll into "tomorrow" a few hours before NY does and end up looking
     # at a different expiration than the one the pre-fetch cached.
     #
-    # Mon-Thu: plan THIS week's spreads (week_start = this Monday, expiring
-    # this Friday).  Fri-Sun: this week is done, so roll forward to next
-    # Monday's week.  This has to match _spread_finder_target_friday above.
-    _wd = run_now.weekday()
-    if _wd <= 3:                           # Mon-Thu
-        monday_dt = run_now - timedelta(days=_wd)
-    else:                                  # Fri-Sun
-        monday_dt = run_now + timedelta(days=(7 - _wd))
-    week_start = monday_dt.strftime("%Y-%m-%d")
+    # Mon-Thu: plan THIS week's spreads; Fri-Sun: roll to next week
+    # (phase1.trading_week.planning_week — the export, chain pre-fetch and
+    # earnings check ask the same question).
+    week_start = planning_week(run_now).key
     sf_ref_date = run_now.date()
 
-    # ── Get feature row ──
-    # Look up the row in the already-cached `df_feat` instead of issuing a
-    # fresh `SELECT * FROM model_features WHERE week_start = ?` on every
-    # render. `df_feat` is loaded by `_cached_rf_get_features` (10 min TTL)
-    # and indexed by `week_start` (DatetimeIndex), so this is a pure
-    # in-memory lookup and saves one Neon roundtrip per Spread Finder pass.
-    feature_row = None
-    try:
-        _wk_ts = pd.Timestamp(week_start)
-        if _wk_ts in df_feat.index:
-            feature_row = df_feat.loc[_wk_ts]
-    except Exception:
-        feature_row = None
-    if feature_row is None:
-        _fallback_idx = df_feat.index[-1]
-        _fallback_label = (
-            _fallback_idx.strftime("%Y-%m-%d")
-            if hasattr(_fallback_idx, "strftime") else str(_fallback_idx)
-        )
-        st.error(
-            f"⚠️ **Forecast blocked:** no feature row exists for {week_start}. "
-            f"The newest persisted row is {_fallback_label}. Run **Weekly "
-            "Setup** (or **Refresh Data** + **Rebuild Features**) before "
-            "using this week's strikes."
-        )
-        _render_gex_context_panel(gex_ctx, spot)
-        return
-
-    _path_fresh, _path_source, _path_required = rf_assess_path_provenance(
-        feature_row, _wk_ts,
-    )
-    if not _path_fresh:
-        _source_label = (
-            _path_source.strftime("%Y-%m-%d")
-            if _path_source is not None else "missing"
-        )
-        st.error(
-            f"⚠️ **Forecast blocked:** the {week_start} row uses weekly path "
-            f"inputs from **{_source_label}**, but it requires "
-            f"**{_path_required:%Y-%m-%d}**. A provisional next-week row "
-            "created before Friday's close cannot be reused after the week "
-            "rolls. Run **Weekly Setup** (or **Refresh Data** + **Rebuild "
-            "Features**) to refresh the HAR inputs. The saved Monday-open "
-            "strike anchor will remain unchanged."
-        )
-        _render_gex_context_panel(gex_ctx, spot)
-        return
-
-    # ── Regime-shift circuit breaker ──────────────────────────────────────
-    # HAR features are lagged by one week — vix_close in feature_row is
-    # last Friday's close. When IV spikes overnight (e.g., VIX 15 → 40 on
-    # a news shock), the model's input features still reflect the pre-spike
-    # world for a full week, so the forecast's PI is anchored to the wrong
-    # vol regime and the Spread Finder will place strikes dangerously
-    # close to spot. The live weekly expected move (from the straddle) is
-    # drawn on the strike map as a reference band and shorts inside it are
-    # flagged, but that doesn't stop the user from trusting the "model says
-    # range will be 2%" read.
-    #
-    # Detect the shift by comparing the live VIX to the trailing VIX
-    # already in the feature row. Ratio > 1.5 is the threshold — that's
-    # roughly a 2σ move on the weekly VIX change distribution.
-    #
-    # Use live_vix_raw (the genuine fetched value), NOT live_vix — the latter
-    # falls back to a fabricated 18.0 when the fetch fails, and comparing a
-    # made-up number against the trailing VIX would either miss a real spike
-    # or invent a phantom one. If we have no live VIX, we simply can't judge
-    # a regime shift, so the breaker stays silent.
-    _trailing_vix = None
-    try:
-        _trailing_vix_raw = feature_row.get("vix_close")
-        if _trailing_vix_raw is not None:
-            _trailing_vix = float(_trailing_vix_raw)
-    except Exception:
-        pass
-
-    regime_shift = None
-    if _trailing_vix and _trailing_vix > 0 and live_vix_raw and live_vix_raw > 0:
-        _vix_ratio = live_vix_raw / _trailing_vix
-        if _vix_ratio >= 1.5:
-            regime_shift = {
-                "severity": "extreme" if _vix_ratio >= 2.0 else "elevated",
-                "live_vix": live_vix_raw,
-                "trailing_vix": _trailing_vix,
-                "ratio": _vix_ratio,
-            }
-
-    if regime_shift is not None:
-        _sev_word = regime_shift["severity"]
-        st.error(
-            f"⚠️ **VIX regime shift detected ({_sev_word})** — "
-            f"live VIX **{regime_shift['live_vix']:.1f}** vs trailing "
-            f"feature VIX **{regime_shift['trailing_vix']:.1f}** "
-            f"(**{regime_shift['ratio']:.2f}×**).\n\n"
-            f"The HAR model's features lag by one week, so the forecast below "
-            f"is anchored to the pre-spike vol regime. Short strikes sized "
-            f"against this forecast are likely **too narrow**. Check the live "
-            f"weekly expected-move band on the strike map (it reflects the "
-            f"current straddle) and treat any short strike inside it as too "
-            f"risky — or, better, skip the trade until features catch up."
-        )
-    # ── Build forecast → plan → tiers from the latest GEX refresh ──
-    # We intentionally DO NOT cache these on a session-state key any more.
-    # Everything below is cheap arithmetic on top of the already-loaded HAR
-    # model (the expensive validation + production fits are gated behind the
-    # "Forecast" button and cached separately via rf_load_model), so
-    # recomputing on every page rerun lets the spread finder pick up fresh
-    # chain bid/ask as soon as fetch_all_data refreshes data.chain_cache
-    # (i.e. on auto-refresh, "Refresh Now", or any normal rerun — no need
-    # to click "Forecast" again to get updated credits).
-    #
-    # Risk-tier switching stays snappy because the _risk_tier_fragment
-    # below is wrapped in @st.fragment and only re-reads the spread_tiers
-    # we stash in session_state — the outer recompute doesn't happen on
-    # tier toggles.
-    # Per-side band share: empirical side-share quantile (falls back to the
-    # legacy /2 split when weekly history is unavailable). Cached 1h.
-    side_share_q = _cached_side_share_q(ticker)
-
+    # ── Forecast → plan → tiers (range_finder.spread_finder_view) ──
+    # Recomputed every rerun on purpose: it's cheap arithmetic on the already
+    # loaded fit, and it lets fresh chain bid/ask from fetch_all_data land
+    # without clicking Forecast again. Tier switching stays snappy because
+    # _risk_tier_fragment below only re-reads the stashed tiers.
+    # live_vix_raw — the genuine fetch, NOT the 18.0 display default — feeds
+    # the regime-shift breaker (HAR features lag a week; an overnight IV
+    # spike leaves the forecast anchored to the pre-spike regime).
     chain_quotes, chain_exp = _build_chain_quotes_for_spreads(
         data, ticker, ref_date=sf_ref_date,
     )
-    forecast, plan, spread_tiers = build_recommendations(
-        result=result, feature_row=feature_row, feature_cols=feat_cols,
-        reference=spx_close_input, vix=vix_input, week_start=week_start,
-        ticker=ticker, side_share_q=side_share_q, chain_quotes=chain_quotes,
+    view = build_spread_finder_view(
+        features=df_feat, week_start=week_start, result=result,
+        feature_cols=feat_cols, reference=spx_close_input, vix=vix_input,
+        live_vix=live_vix_raw, ticker=ticker,
+        side_share_q=_cached_side_share_q(ticker), chain_quotes=chain_quotes,
         weekly_em=weekly_em, conn=conn, model_name=model_choice,
     )
+    if not view.ready:
+        st.error(sf_blocked_message(view))
+        _render_gex_context_panel(gex_ctx, spot)
+        return
+    if view.regime_shift is not None:
+        st.error(sf_regime_shift_message(view.regime_shift))
+    forecast, plan, spread_tiers = view.forecast, view.plan, view.tiers
 
     gex_adj = adjust_spread_with_gex(plan, gex_ctx)
 
@@ -2249,12 +1344,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # nothing gets silently swept in/out when switching tickers.
     _extras = [t for t in _xlsx_extra_list() if t not in _FT_DEFAULT_TICKERS]
     _export_tickers = _FT_DEFAULT_TICKERS + _extras
-    if len(_export_tickers) > _FT_MAX_TICKERS:
+    if len(_export_tickers) > FT_MAX_TICKERS:
         # The Scoreboard scans a fixed 40-row window per week tab, so the
         # workbook builder truncates silently — surface the drop here instead.
         st.caption(
-            f"⚠ The export caps at {_FT_MAX_TICKERS} tickers — dropped: "
-            f"{', '.join(_export_tickers[_FT_MAX_TICKERS:])}. Remove some "
+            f"⚠ The export caps at {FT_MAX_TICKERS} tickers — dropped: "
+            f"{', '.join(_export_tickers[FT_MAX_TICKERS:])}. Remove some "
             "added tickers to include them."
         )
 
@@ -2347,7 +1442,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             _xlsx_sig_key = f"_sf_xlsx_sig_{week_start}_{active_model}"
             _xlsx_bytes_key = f"_sf_xlsx_bytes_{week_start}_{active_model}"
             if st.session_state.get(_xlsx_sig_key) != _sig:
-                st.session_state[_xlsx_bytes_key] = _build_forward_test_workbook(
+                st.session_state[_xlsx_bytes_key] = build_forward_test_workbook(
                     week_start=week_start, model_choice=active_model, rows=_ft_rows,
                 )
                 st.session_state[_xlsx_sig_key] = _sig

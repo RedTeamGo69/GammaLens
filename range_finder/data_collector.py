@@ -11,36 +11,28 @@
 # =============================================================================
 
 import math
-import os
 import logging
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
 
+from phase1 import credentials
+
 # =============================================================================
 # CONFIG
 # =============================================================================
-
-# Read FRED key from Streamlit secrets or environment
-FRED_API_KEY = ""
-try:
-    import streamlit as st
-    FRED_API_KEY = st.secrets.get("FRED_API_KEY", "")
-except Exception:
-    pass
-if not FRED_API_KEY:
-    FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
-
 
 def fred_key_status() -> str:
     """Human-readable description of where the FRED key was (or wasn't)
     resolved from, without leaking the key itself. Use in UI captions /
     log lines so "is my key actually loaded?" is diagnosable without
-    having to crack open the secrets panel."""
-    if not FRED_API_KEY:
+    having to crack open the secrets panel. Resolved per call (the key used
+    to be frozen at import)."""
+    key = credentials.fred_api_key()
+    if not key:
         return "not set (neither st.secrets['FRED_API_KEY'] nor $FRED_API_KEY)"
-    return f"configured ({len(FRED_API_KEY)} chars; FRED keys are normally 32)"
+    return f"configured ({len(key)} chars; FRED keys are normally 32)"
 
 # How many years of history to pull on initial load
 HISTORY_YEARS = 6
@@ -88,6 +80,24 @@ def init_db():
 # SPX + VIX DATA
 # =============================================================================
 
+def _weekly_vol_proxy(yf_symbol: str, years: float, columns: list) -> pd.DataFrame:
+    """Weekly OHLC for a vol index through bar_sources (Tradier primary,
+    yfinance fallback), renamed to ``columns``. Empty (all-NaN on join) when
+    every source fails — the caller's Cboe overlay is the primary for these
+    series, so a missing seed must not kill the fetch."""
+    from range_finder.bar_sources import fetch_weekly_bars, tradier_symbol_for
+    try:
+        bars = fetch_weekly_bars(yf_symbol, tradier_symbol_for(yf_symbol),
+                                 years, yf_symbol)
+    except Exception as e:
+        log.warning(f"{yf_symbol} weekly bars unavailable ({e}) — "
+                    "relying on the Cboe overlay")
+        return pd.DataFrame(columns=columns, dtype=float)
+    out = bars[["open", "high", "low", "close"]].copy()
+    out.columns = columns
+    return out
+
+
 def fetch_spx_vix(years: int = HISTORY_YEARS) -> pd.DataFrame:
     """
     Pull weekly SPX and VIX OHLC from yfinance.
@@ -116,18 +126,7 @@ def fetch_spx_vix(years: int = HISTORY_YEARS) -> pd.DataFrame:
     # the primary source. An empty yfinance response degrades to all-NaN
     # columns for Cboe to fill rather than killing the whole fetch.
     log.info(f"Fetching VIX weekly OHLC from {start.date()} to {end.date()}")
-    vix_raw = yf.download("^VIX", start=start, end=end, interval="1wk", progress=False, timeout=60)
-    if isinstance(vix_raw.columns, pd.MultiIndex):
-        vix_raw.columns = vix_raw.columns.get_level_values(0)
-
-    vix_cols = ["vix_open", "vix_high", "vix_low", "vix_close"]
-    if not vix_raw.empty and "Close" in vix_raw.columns:
-        vix = vix_raw[["Open", "High", "Low", "Close"]].copy()
-        vix.columns = vix_cols
-        vix.index = pd.to_datetime(vix.index).normalize()
-    else:
-        log.warning("yfinance VIX weekly returned empty — relying on Cboe overlay")
-        vix = pd.DataFrame(columns=vix_cols)
+    vix = _weekly_vol_proxy("^VIX", years, ["vix_open", "vix_high", "vix_low", "vix_close"])
 
     # Merge on date index (left join: SPX bars define the weeks; VIX columns
     # may be NaN until the Cboe overlay fills them)
@@ -254,22 +253,9 @@ def fetch_underlying_weekly(
     base = base[["open", "high", "low", "close", "volume"]].copy()
 
     log.info(f"[{ticker}] Fetching weekly vol proxy ({vol_proxy_yf})")
-    vp_raw = yf.download(vol_proxy_yf, start=start, end=end, interval="1wk",
-                         progress=False, timeout=60)
-    if isinstance(vp_raw.columns, pd.MultiIndex):
-        vp_raw.columns = vp_raw.columns.get_level_values(0)
-
-    if not vp_raw.empty:
-        vp = vp_raw[["Open", "High", "Low", "Close"]].copy()
-        vp.columns = ["vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"]
-        # base comes from bar_sources pre-normalized — align vp before joining
-        vp.index = pd.to_datetime(vp.index).normalize()
-        df = base.join(vp, how="left")
-    else:
-        log.warning(f"[{ticker}] vol proxy {vol_proxy_yf} returned empty — vol_proxy_* will be NaN")
-        for col in ("vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"):
-            base[col] = pd.NA
-        df = base
+    vp = _weekly_vol_proxy(vol_proxy_yf, years, [
+        "vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"])
+    df = base.join(vp, how="left")
 
     df.index.name = "week_start"
     df.index = pd.to_datetime(df.index).normalize()
@@ -371,32 +357,13 @@ def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
 # week's Monday* when the cron didn't run, so mid-week views stay locked instead
 # of drifting on live spot.
 
-# yfinance symbol -> Tradier symbol for the anchor-open lookup. Plain
-# symbols (no ^) ARE their own Tradier symbols; ^VXN is deliberately absent
-# (Tradier can't quote it — Cboe serves it below).
-_YF_TO_TRADIER_INDEX = {
-    "^GSPC":  "SPX",
-    "^NDX":   "NDX",
-    "^VIX":   "VIX",
-    "^VIX1D": "VIX1D",
-    "^VIX9D": "VIX9D",
-    "^VIX3M": "VIX3M",
-}
-
-
-def _yf_to_tradier_symbol(symbol: str) -> "str | None":
-    """Tradier symbol for a yfinance symbol, or None if Tradier can't serve it."""
-    if not symbol.startswith("^"):
-        return symbol
-    return _YF_TO_TRADIER_INDEX.get(symbol)
-
-
 def _open_from_tradier(symbol: str, target_date) -> "float | None":
     """Daily-candle Open on `target_date` from Tradier /markets/history."""
-    tradier_symbol = _yf_to_tradier_symbol(symbol)
+    from range_finder.bar_sources import tradier_symbol_for
+    tradier_symbol = tradier_symbol_for(symbol)
     if not tradier_symbol:
         return None
-    token = _tradier_token()
+    token = credentials.tradier_token()
     if not token:
         return None
     iso = target_date.strftime("%Y-%m-%d")
@@ -487,6 +454,59 @@ def _daily_open_on(symbol: str, target_date) -> "float | None":
             log.info(f"daily open {symbol} @ {target_date}: {op:.2f} "
                      f"via {fn.__name__.replace('_open_from_', '')}")
             return op
+    return None
+
+
+# ── Live vol-proxy close (VIX regime-shift breaker input) ─────────────────────
+# Same source discipline as the anchor opens: Tradier quote first, yfinance
+# only for proxies Tradier can't quote (^VXN). Cboe is deliberately absent —
+# its CDN history is end-of-day, and a stale value here would silently disable
+# the breaker exactly when an intraday spike should trip it.
+
+def _live_from_tradier(symbol: str) -> "float | None":
+    """Latest last→close→prevclose from a Tradier quote, or None."""
+    from range_finder.bar_sources import tradier_symbol_for
+    tradier_symbol = tradier_symbol_for(symbol)
+    if not tradier_symbol:
+        return None
+    token = credentials.tradier_token()
+    if not token:
+        return None
+    from phase1.data_client import TradierDataClient, resolve_quote_spot
+    value = resolve_quote_spot(TradierDataClient(token).get_full_quote(tradier_symbol))
+    return value if value > 0 else None
+
+
+def _live_from_yf(symbol: str) -> "float | None":
+    """Latest daily close from a 5-day yfinance window (fallback only)."""
+    hist = yf.Ticker(symbol).history(period="5d")
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None
+    closes = hist["Close"].dropna()
+    if closes.empty:
+        return None
+    value = float(closes.iloc[-1])
+    return value if value > 0 else None
+
+
+# Tests replace this list wholesale (see range_finder/tests/conftest.py).
+_LIVE_VOL_SOURCES = [_live_from_tradier, _live_from_yf]
+
+
+def live_vol_close(symbol: str) -> "float | None":
+    """Live vol-proxy level, or None when every source is empty or fails.
+
+    Callers must treat None as "no live VIX" and NOT substitute a number: the
+    Spread Finder's regime-shift breaker keys off this value.
+    """
+    for fn in _LIVE_VOL_SOURCES:
+        try:
+            value = fn(symbol)
+        except Exception as e:
+            log.warning(f"live vol close {symbol} via {fn.__name__} failed: {e}")
+            continue
+        if value is not None:
+            return round(value, 2)
     return None
 
 
@@ -650,7 +670,7 @@ def fetch_fred_macro(years: int = HISTORY_YEARS) -> pd.DataFrame:
     """
     from fredapi import Fred
 
-    fred  = Fred(api_key=FRED_API_KEY)
+    fred  = Fred(api_key=credentials.fred_api_key())
     end   = datetime.today()
     start = end - timedelta(days=years * 365 + 30)
 
@@ -786,19 +806,6 @@ def get_event_flags(conn) -> pd.DataFrame:
     )
     df.set_index("week_start", inplace=True)
     return df
-
-
-def _tradier_token() -> str:
-    """Resolve the Tradier token from Streamlit secrets or environment
-    (same pattern as FRED_API_KEY above). Empty string when unset."""
-    token = ""
-    try:
-        import streamlit as st
-        token = st.secrets.get("TRADIER_TOKEN", "")
-    except Exception:
-        pass
-    return token or os.environ.get("TRADIER_TOKEN", "")
-
 
 # =============================================================================
 # SUMMARY

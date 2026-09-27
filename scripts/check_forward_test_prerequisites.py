@@ -22,7 +22,7 @@ from range_finder.forward_test.config import UNIVERSE, utcnow
 from range_finder.forward_test.provider import TradierProvider, epoch_time, valid_ohlc
 from range_finder.forward_test.store import Store
 from range_finder.forward_test.capture import contract_chain
-from range_finder.trading_week import NY, trading_week, listed_week_expiration
+from phase1.trading_week import NY, trading_week, listed_week_expiration
 from range_finder.cboe_data import fetch_cboe_index_history
 from range_finder.event_calendars import FOMC_DATES, CPI_DATES, NFP_DATES
 

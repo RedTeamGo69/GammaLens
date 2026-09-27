@@ -8,7 +8,7 @@ import pytest
 from range_finder.forward_test.history_policy import (
     HistoryUnavailable, _frame, validated_tradier_history)
 from range_finder.tests.test_forward_history_policy import archived_windows
-from range_finder.trading_week import trading_week
+from phase1.trading_week import trading_week
 
 
 def validate(ticker, data=None, *, as_of=None):

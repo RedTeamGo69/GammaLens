@@ -20,8 +20,8 @@
 #
 # SAFE BY CONSTRUCTION: the backfill only upserts additional PAST rows into
 # weekly_spx / model_features. Every production fit path (Monday cron, UI,
-# bootstrap, run_full_pipeline) pins its read window to
-# har_model.TRAIN_WINDOW_YEARS, so nothing retrains on the deeper history
+# bootstrap — all via recommendations.load_production_features) pins its read
+# window to har_model.TRAIN_WINDOW_YEARS, so nothing retrains on the deeper history
 # until that constant is deliberately flipped.
 #
 # Decision procedure (printed as the epilogue): adopt a winner ONLY if it

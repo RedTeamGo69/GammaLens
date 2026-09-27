@@ -16,7 +16,7 @@ from range_finder.forward_test.runner import run_study
 from range_finder.forward_test.scoring import score_forecast
 from range_finder.forward_test.results import load_results, metrics, scoreboard, build_workbook
 from range_finder.recommendations import TIER_KEYS, build_recommendations, tier_bands, chain_entry_to_quotes
-from range_finder.trading_week import trading_week, listed_week_expiration
+from phase1.trading_week import trading_week, listed_week_expiration
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider, prepared_fixture, scoring_fixture
 
 

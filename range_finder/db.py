@@ -7,7 +7,6 @@
 # that's purely a convenience for the query authors, NOT a sqlite fallback.
 # =============================================================================
 
-import os
 import time
 import logging
 
@@ -20,43 +19,6 @@ log = logging.getLogger(__name__)
 # is alive. The per-cursor() exception fallback below catches the rare
 # case where Neon dropped the connection between probes.
 _ALIVE_PROBE_INTERVAL_SECONDS = 60.0
-
-
-# ---------------------------------------------------------------------------
-# Connection string resolution
-# ---------------------------------------------------------------------------
-
-_pg_conn_str = None
-
-try:
-    import streamlit as st
-    _pg_conn_str = st.secrets.get("DATABASE_URL", "")
-except Exception:
-    pass
-
-if not _pg_conn_str:
-    _pg_conn_str = os.environ.get("DATABASE_URL", "")
-
-
-def _require_postgres():
-    """Raise a clear error if DATABASE_URL is missing or psycopg2 is unavailable."""
-    if not _pg_conn_str:
-        raise RuntimeError(
-            "DATABASE_URL is not set. This app requires Postgres — set DATABASE_URL "
-            "in Streamlit secrets or as an environment variable."
-        )
-    try:
-        import psycopg2  # noqa: F401
-    except ImportError as e:
-        raise RuntimeError(
-            "psycopg2 is not installed. This app requires Postgres — "
-            "`pip install psycopg2-binary`."
-        ) from e
-
-
-def get_backend() -> str:
-    """Return the active backend name. Always 'postgres' now that sqlite is removed."""
-    return "postgres"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +47,7 @@ def _to_float(v):
 # ---------------------------------------------------------------------------
 # Postgres connection wrapper
 # ---------------------------------------------------------------------------
+
 
 class PGCursor:
     """Wraps a psycopg2 cursor, translating ? → %s in queries."""
@@ -147,8 +110,8 @@ class PGConnectionWrapper:
         self._connect()
 
     def _connect(self):
-        import psycopg2
-        self._conn = psycopg2.connect(self._conn_str, sslmode="require")
+        from phase1.pg import connect
+        self._conn = connect(self._conn_str)
         self._last_alive_check_ts = time.monotonic()
         # autocommit=True so read-only paths (e.g. saved_models / model_features
         # SELECTs from the Spread Finder) don't leave the connection sitting in
@@ -158,8 +121,7 @@ class PGConnectionWrapper:
         # statement UPSERTs with ON CONFLICT DO UPDATE (see data_collector.py,
         # feature_builder.py, model_persistence.py, spread_persistence.py), so
         # statement-level autocommit is safe — the trailing `conn.commit()`
-        # calls become harmless no-ops.
-        self._conn.autocommit = True
+        # calls become harmless no-ops. (phase1.pg.connect's default.)
 
     def _ensure_alive(self):
         # Cheap local check first (no roundtrip): if the wrapper has no
@@ -239,8 +201,8 @@ class PGConnectionWrapper:
 
 def get_connection():
     """Return a Postgres connection wrapped for placeholder translation."""
-    _require_postgres()
-    wrapped = PGConnectionWrapper(_pg_conn_str)
+    from phase1.pg import require_database_url
+    wrapped = PGConnectionWrapper(require_database_url())
     log.info("Range finder connected to Postgres")
     return wrapped
 
@@ -250,62 +212,64 @@ _INIT_ADVISORY_LOCK_KEY = 776699
 
 
 def _acquire_init_advisory_lock(conn) -> None:
-    """Block until the session owns the schema-init advisory lock.
+    """Block until this TRANSACTION owns the schema-init advisory lock.
+
+    Transaction-scoped on purpose: DATABASE_URL is Neon's pooled endpoint
+    (PgBouncer, transaction mode) and this wrapper runs in autocommit, so a
+    session lock's acquire and unlock could be routed to different server
+    connections — unlock then reported "not held" and the lock leaked. Every
+    Monday weekly setup after 2026-08-31 failed that way. The xact lock is
+    released by the transaction's COMMIT/ROLLBACK; there is no unlock call.
 
     ``PGCursor`` intentionally retains its historical numeric adaptation,
     which turns Python integers into floats. PostgreSQL does not implicitly
-    resolve ``pg_advisory_lock(double precision)`` to the bigint overload, so
-    this one overload-sensitive call casts explicitly instead of changing
-    parameter semantics for every range-finder query.
+    resolve the double-precision overload to the bigint one, so this call
+    casts explicitly instead of changing parameter semantics for every
+    range-finder query.
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT pg_advisory_lock(CAST(? AS bigint))",
+        "SELECT pg_advisory_xact_lock(CAST(? AS bigint))",
         (_INIT_ADVISORY_LOCK_KEY,),
     )
     if cur.fetchone() is None:
-        raise RuntimeError("pg_advisory_lock returned no result row")
+        raise RuntimeError("pg_advisory_xact_lock returned no result row")
 
-
-def _release_init_advisory_lock(conn) -> None:
-    """Release the session lock and prove PostgreSQL reported success."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT pg_advisory_unlock(CAST(? AS bigint))",
-        (_INIT_ADVISORY_LOCK_KEY,),
-    )
-    row = cur.fetchone()
-    if not row or row[0] is not True:
-        raise RuntimeError("pg_advisory_unlock reported that the lock was not held")
 
 def init_all_tables(conn) -> None:
     """Create all range finder tables if they don't exist (Postgres DDL).
 
-    Serialized behind a session-level Postgres advisory lock. Eight matrix
-    jobs fire this concurrently every Monday; without serialization their
-    CREATE / ALTER / migration DDL raced on Neon's throttled free tier,
+    Serialized behind a transaction-scoped Postgres advisory lock. Eight
+    matrix jobs fire this concurrently every Monday; without serialization
+    their CREATE / ALTER / migration DDL raced on Neon's throttled free tier,
     where the pile-up stretched a normally-instant init to 15+ minutes and
-    delayed the 9:30 snapshot. pg_advisory_lock makes the others wait for
-    the first to finish (after which every statement is a cheap no-op via
-    IF NOT EXISTS / duplicate-column guards). Postgres is the only supported
-    backend, so failure to acquire or release this serialization mechanism is
-    a hard initialization error rather than an unlocked best-effort fallback.
+    delayed the 9:30 snapshot. The lock makes the others wait for the first
+    to finish (after which every statement is a cheap no-op via IF NOT
+    EXISTS / duplicate-column guards).
+
+    The whole body runs in ONE explicit transaction (BEGIN…COMMIT sent as
+    statements, because psycopg2's commit() is a no-op under autocommit): a
+    transaction pins a single pooled server connection, the DDL applies
+    atomically, and the lock releases at COMMIT/ROLLBACK. Failure to take the
+    lock is a hard initialization error, not an unlocked fallback.
     """
+    cur = conn.cursor()
+    cur.execute("BEGIN")
     try:
-        _acquire_init_advisory_lock(conn)
-    except Exception as exc:
-        raise RuntimeError(
-            "Failed to acquire Postgres schema init lock"
-        ) from exc
-    try:
-        _init_all_tables_body(conn)
-    finally:
         try:
-            _release_init_advisory_lock(conn)
+            _acquire_init_advisory_lock(conn)
         except Exception as exc:
             raise RuntimeError(
-                "Failed to release Postgres schema init lock"
+                "Failed to acquire Postgres schema init lock"
             ) from exc
+        _init_all_tables_body(conn)
+    except BaseException:
+        try:
+            cur.execute("ROLLBACK")
+        except Exception:
+            log.warning("ROLLBACK after failed schema init also failed")
+        raise
+    cur.execute("COMMIT")
 
 
 def _init_all_tables_body(conn) -> None:

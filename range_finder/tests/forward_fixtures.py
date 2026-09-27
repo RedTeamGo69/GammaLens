@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from range_finder.feature_builder import build_features
-from range_finder.trading_week import trading_week
+from phase1.trading_week import trading_week
 from range_finder.forward_test.provider import frame_records
 
 REFERENCES = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.,

@@ -4,7 +4,7 @@ import json
 import os
 from uuid import uuid4
 
-from range_finder.trading_week import NY, trading_week
+from phase1.trading_week import NY, trading_week
 from .capture import capture_model
 from .config import (DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
                      SCORER_VERSION, methodology, study_universe)

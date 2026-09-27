@@ -7,7 +7,7 @@ import forward_test
 from range_finder.forward_test.config import DEFAULT_STUDY_ID, UNIVERSE
 from range_finder.forward_test.store import Store
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider
-from range_finder.trading_week import trading_week
+from phase1.trading_week import trading_week
 
 
 def test_default_cli_targets_restart_only(tmp_path, monkeypatch):

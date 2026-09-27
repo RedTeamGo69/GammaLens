@@ -18,7 +18,7 @@ from phase1.data_client import TradierDataClient
 from range_finder.cboe_data import fetch_cboe_index_history, resample_cboe_weekly
 from range_finder.event_calendars import event_flag_rows, FOMC_DATES, CPI_DATES, NFP_DATES
 from range_finder.feature_builder import build_features
-from range_finder.trading_week import NY, UTC, listed_week_expiration, trading_week
+from phase1.trading_week import NY, UTC, listed_week_expiration, trading_week
 from .config import UNIVERSE
 from .history_policy import validated_tradier_history
 

@@ -13,6 +13,7 @@ from datetime import date, datetime
 from typing import Any
 
 from phase1.confidence import build_run_confidence
+from phase1.data_client import resolve_quote_spot
 from phase1.config import NY_TZ
 from phase1.expected_move import build_expected_move_analysis
 import phase1.gex_engine as gex_engine
@@ -63,18 +64,6 @@ def canonical_gamma_expirations(
     )[:CANONICAL_EXPIRATION_COUNT]
 
 
-def _spot_from_full_quote(quote: dict) -> float:
-    """Preserve TradierDataClient.get_spot_price's last→close→prevclose rule."""
-    for field in ("last", "close", "prevclose"):
-        try:
-            value = float(quote.get(field) or 0.0)
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > 0:
-            return value
-    return 0.0
-
-
 def calculate_gamma_archive_observation(
     *,
     client,
@@ -108,7 +97,7 @@ def calculate_gamma_archive_observation(
         )
 
     quote = client.get_full_quote(ticker)
-    quote_spot = _spot_from_full_quote(quote)
+    quote_spot = resolve_quote_spot(quote)
     nearest_expiration = target_expirations[0]
     spot_info = get_reference_spot_details(
         ticker=ticker,

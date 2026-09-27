@@ -94,6 +94,51 @@ def _execute_required_weekly_setup(setup_fn, *args, **kwargs) -> bool:
     return True
 
 
+def _late_run_plan(completion, is_week_first_trading_day):
+    """``(run_weekly_setup, fail_reason)`` for a run after the morning window.
+
+    GitHub starts the backup ``schedule:`` fires ~4 hours late, so they land
+    in the afternoon. The weekly setup is recoverable then (its anchor is the
+    first session's daily bar; fits don't depend on the hour). The opening
+    EM snapshots are not — a mid-day straddle is a different number — so
+    their absence becomes a failure: that is the dead-man's-switch
+    notification the backup exists for.
+    """
+    if completion is None:
+        return False, "could not read today's capture state"
+    run_setup = bool(is_week_first_trading_day and not completion["weekly_setup"])
+    missing = [k for k in ("daily_em", "weekly_em") if not completion[k]]
+    if missing:
+        return run_setup, (f"opening capture missing ({', '.join(missing)}) — the "
+                           "primary 9:28 ET run did not capture at the open; "
+                           "it cannot be reconstructed after the window")
+    return run_setup, None
+
+
+def _late_recovery(ticker, run_now, completion, is_week_first_trading_day,
+                   fred_key) -> int:
+    """Run what a late backup can still do correctly; return the exit code."""
+    run_setup, fail_reason = _late_run_plan(completion, is_week_first_trading_day)
+    if run_setup:
+        _logger.info(f"{ticker}: late backup — weekly setup missing, running it now")
+        try:
+            _execute_required_weekly_setup(
+                _run_weekly_spread_setup, ticker, None, run_now, fred_key,
+                None, None, None, None, late_recovery=True,
+            )
+            setup_key = setup_week(run_now).key
+            if not _weekly_setup_artifacts_complete(ticker, setup_key):
+                raise RuntimeError(f"weekly artifacts still missing for {ticker}/{setup_key}")
+        except Exception as e:
+            _logger.error(f"{ticker}: late weekly setup failed: {e}")
+            return 1
+    if fail_reason:
+        _logger.error(f"{ticker}: {fail_reason}")
+        return 1
+    _logger.info(f"{ticker}: late backup — nothing left to recover, exiting green")
+    return 0
+
+
 def capture_snapshot():
     """Run the full GEX pipeline and save a snapshot + EM to Postgres."""
 
@@ -103,8 +148,7 @@ def capture_snapshot():
         _logger.error("TRADIER_TOKEN not set — aborting")
         sys.exit(1)
 
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
+    if not credentials.database_url():
         _logger.error("DATABASE_URL not set — nowhere to save snapshot")
         sys.exit(1)
 
@@ -141,9 +185,12 @@ def capture_snapshot():
     time_val = hour * 60 + minute  # minutes since midnight
     market_open  = 9 * 60 + 20     # 9:20 AM (small buffer)
     market_close = 10 * 60 + 15    # 10:15 AM (tolerate runner startup delay)
-    if not force_weekly_setup and (time_val < market_open or time_val > market_close):
-        _logger.info(f"Outside morning capture window ({run_now.strftime('%I:%M %p ET')}) — skipping")
+    if not force_weekly_setup and time_val < market_open:
+        _logger.info(f"Before the morning capture window ({run_now.strftime('%I:%M %p ET')}) — skipping")
         sys.exit(0)
+    # After the window: a (GitHub-delayed) backup fire. It never captures
+    # opening data, but recovers what it can — see _late_run_plan below.
+    is_late = not force_weekly_setup and time_val > market_close
 
     # Skip weekends (shouldn't happen with Mon-Fri cron, but just in case)
     if not force_weekly_setup and run_now.weekday() >= 5:
@@ -189,6 +236,7 @@ def capture_snapshot():
     # that's the dead-man's switch. A DB hiccup during the check proceeds
     # with capture (idempotent ON CONFLICT writes make a duplicate harmless);
     # skipping on error would be the dangerous direction.
+    _completion = None
     if not force_weekly_setup:
         try:
             from phase1.gex_history import get_em_snapshot, get_weekly_em_date_key
@@ -212,6 +260,10 @@ def capture_snapshot():
             raise
         except Exception as _e:
             _logger.warning(f"Dedup guard check failed ({_e}) — proceeding with capture")
+
+    if is_late:
+        sys.exit(_late_recovery(ticker, run_now, _completion,
+                                is_week_first_trading_day, fred_key))
 
     # ── Pre-open warm-up ──
     # The cron fires slightly before 9:30 so the runner is already booted by
@@ -608,7 +660,7 @@ def _log_calibration_plan(conn, df_feat, cal_fit, week_start,
 
 
 def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
-                              levels, regime_info):
+                              levels, regime_info, *, late_recovery=False):
     """Run the full spread finder pipeline: refresh data, rebuild features,
     save GEX, fit model, log the Monday plan, and persist Monday open + VIX."""
     from range_finder.db import get_connection, init_all_tables
@@ -736,15 +788,18 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # (Monday 9:31) as the training rows. The lag-1 features (VIX, HV,
     # macro) are shifted inside build_features and are unaffected by this
     # ordering.
-    _logger.info("  2/4 Saving GEX to range finder...")
-    _gex_saved = False
-    try:
-        gex_ctx = extract_gex_context(levels, spot, regime_info)
-        save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
-        _gex_saved = True
-    except Exception as e:
-        _logger.warning(f"  GEX save failed ({e}) — features will rebuild "
-                        "without this week's GEX row (train mean fills in)")
+    if late_recovery:
+        # A mid-day reading would break the "every GEX row is Monday 9:31"
+        # timestamp parity above; leave the week's GEX row missing instead.
+        _logger.info("  2/4 Late recovery — skipping GEX save (not an opening reading)")
+    else:
+        _logger.info("  2/4 Saving GEX to range finder...")
+        try:
+            gex_ctx = extract_gex_context(levels, spot, regime_info)
+            save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
+        except Exception as e:
+            _logger.warning(f"  GEX save failed ({e}) — features will rebuild "
+                            "without this week's GEX row (train mean fills in)")
 
     # ── Step 3: Rebuild features ──
     _logger.info(f"  3/4 Rebuilding feature matrix ({ticker})...")
@@ -806,8 +861,11 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     _logger.info("  Saving Monday open + VIX...")
     try:
         from range_finder.weekly_anchor import capture_setup_anchor
+        # Late recovery never falls back to a mid-day spot: the true first-
+        # session daily bar exists by then, and if it doesn't, fail loudly.
         anchor = capture_setup_anchor(conn, ticker, run_now,
-                                      spot_fallback=spot, cfg=cfg)
+                                      spot_fallback=None if late_recovery else spot,
+                                      cfg=cfg)
         monday_open, monday_vix = anchor.open, anchor.vix
         _logger.info(
             f"  Monday open saved: {ticker}={monday_open:.2f} ({anchor.source}), "

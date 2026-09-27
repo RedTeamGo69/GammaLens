@@ -9,17 +9,16 @@ on:
   # before fetching spot + chains. cron-job.org handles DST automatically
   # via America/New_York. Can also be triggered manually from the UI.
   #
-  # BACKUP (dead-man's switch): the schedule pair below. GitHub cron is UTC
-  # and does NOT shift with US DST, so each entry lands at ~9:45 ET in one
-  # DST half and ~8:45/10:45 ET in the other — the out-of-window fire exits
-  # green at the script's 9:20-10:15 ET window guard in seconds. When the
-  # primary already ran, the in-window backup hits the already-captured
-  # guard (em_snapshots row exists) and exits green without touching
-  # Tradier. When cron-job.org silently dies (expired PAT, account lapse,
-  # outage), NO run would otherwise exist — GitHub failure e-mails only
-  # fire for runs that exist — so the backup both performs the capture
-  # (~15 min late, from real daily-open bars where it matters) and restores
-  # failure notifications.
+  # BACKUP (dead-man's switch): the schedule pair below. GitHub cron is UTC,
+  # doesn't shift with DST, and in practice starts these ~4 hours LATE
+  # (13:45 UTC fires ~17:45 UTC), so they land after the 9:20-10:15 ET
+  # capture window. scheduled_snapshot.py treats a late fire as recovery,
+  # not capture: if today's artifacts all exist it exits green; if the
+  # week's first-session weekly setup is missing it runs it (the anchor is
+  # the daily bar, so late is still correct); if the opening EM snapshots
+  # are missing it FAILS, because they can't be reconstructed mid-day —
+  # that failure e-mail is the notification when cron-job.org silently dies
+  # (expired PAT, account lapse, outage).
   schedule:
     - cron: "45 13 * * 1-5"   # 9:45 ET during EDT (Mar-Nov)
     - cron: "45 14 * * 1-5"   # 9:45 ET during EST (Nov-Mar)

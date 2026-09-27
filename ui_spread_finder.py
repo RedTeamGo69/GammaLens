@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from models import GEXData
-from phase1.trading_week import is_first_session, planning_week
+from phase1.trading_week import planning_week
 
 from range_finder.gex_bridge import (
     GEXContext, extract_gex_context, save_gex_to_range_finder,
@@ -23,7 +23,6 @@ from range_finder.data_collector import (
     build_event_flags as rf_build_event_flags,
     get_weekly_spx as rf_get_weekly_spx,
     fred_key_status as rf_fred_key_status,
-    capture_and_save_monday_anchor as rf_capture_monday_anchor,
     live_vol_close as rf_live_vol_close,
     FRED_API_KEY as RF_FRED_API_KEY,
 )
@@ -55,6 +54,7 @@ from range_finder.spread_levels import (
 # Spread Finder Tab — HAR placement with GEX retained as research context
 # ─────────────────────────────────────────────────────────────────────────────
 
+from range_finder.weekly_anchor import resolve_anchor as resolve_weekly_anchor
 from range_finder.recommendations import (
     build_recommendations, displayed_tier, tier_bands, chain_entry_to_quotes,
     FitReport, fit_and_save_specs, load_saved_fit,
@@ -1213,7 +1213,6 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     slider, model-spec dropdown, credit width, etc.) only rerun this tab
     instead of triggering a full-page rerun that rebuilds the GEX chart,
     the sidebar, and re-fetches weekly/monthly EM."""
-    import yfinance as yf
     from phase1.market_clock import now_ny
 
     # resolve_config returns the chain-derived config registered by the main
@@ -1279,162 +1278,44 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     live_vix_raw = _live_vol_close(_vol_proxy)
     live_vix = live_vix_raw if live_vix_raw is not None else 18.0
 
-    # ── Monday open freeze logic ──
-    # On the weekly freeze day (Monday or Tue after holiday) at market open,
-    # capture the true daily-candle Open as the weekly reference. Rest of
-    # the week uses that frozen value. Before Monday open (weekends), use
-    # the live spot (Friday close).
+    # ── Weekly anchor (range_finder.weekly_anchor) ──
+    # Mon–Thu strikes lock to the planning week's first-session daily Open:
+    # the persisted weekly_setup row wins; a missing row is captured (and
+    # persisted) from the true daily bar once the first session has opened.
+    # Fri–Sun the tab plans next week, whose open doesn't exist yet, so the
+    # latest price stands in.
     run_now = now_ny()
-    is_freeze_day = is_first_session(run_now)
-    is_market_open = data.market_open
-
-    mon_open_key = f"sf_monday_open_{ticker}"
-    mon_vix_key = f"sf_monday_vix_{ticker}"
-    mon_open_week_key = f"sf_monday_open_week_{ticker}"
-
-    # Determine which week we're in (use ISO week number)
-    current_week = run_now.isocalendar()[1]
-
-    def _daily_open_today(symbol: str):
-        """Today's daily-candle Open, or None if Yahoo hasn't published
-        it yet (happens briefly after 9:30 while the first tick settles)."""
-        try:
-            hist = yf.Ticker(symbol).history(period="5d")
-        except Exception:
-            return None
-        if hist is None or hist.empty or "Open" not in hist.columns:
-            return None
-        today = run_now.date()
-        for ts, row in hist.iterrows():
-            if hasattr(ts, "date") and ts.date() == today:
-                op = row.get("Open")
-                if op is not None and not (isinstance(op, float) and op != op):
-                    return float(op)
-        return None
-
-    # Freeze Monday's open on the freeze day when market is open
-    if is_freeze_day and is_market_open:
-        stored_week = st.session_state.get(mon_open_week_key)
-        if stored_week != current_week:
-            # First market-hours refresh on the freeze day — lock the
-            # TRUE daily-candle Open, not whatever tick `spot` happens to
-            # land on while this refresh is running. Fall back to spot
-            # only if yfinance hasn't returned today's bar yet.
-            #
-            # Per-ticker yfinance symbols come from ticker_config:
-            # SPX/XSP read ^SPX (XSP scales /10); QQQ reads QQQ; AMZN/AMD
-            # read their own symbols. Vol proxy is VIX for everyone except
-            # QQQ, which uses VXN.
-            from phase1.ticker_config import price_scale_divisor as _scale_div_fn
-            _yf_underlying = ticker_cfg.get("yf_symbol", "^GSPC")
-            _yf_vol_proxy  = ticker_cfg.get("vol_proxy_yf", "^VIX")
-            _scale_div     = _scale_div_fn(ticker)
-
-            underlying_daily_open = _daily_open_today(_yf_underlying)
-            if underlying_daily_open is not None:
-                # A scaled mini (XSP→SPX) reads its parent's symbol and
-                # divides by its scale_divisor; everyone else divides by 1.0.
-                frozen_spot = round(underlying_daily_open / _scale_div, 2)
-            else:
-                frozen_spot = round(spot, 2)
-
-            vol_proxy_daily_open = _daily_open_today(_yf_vol_proxy)
-            frozen_vix_val = round(vol_proxy_daily_open, 2) if vol_proxy_daily_open is not None else live_vix
-
-            st.session_state[mon_open_key] = frozen_spot
-            st.session_state[mon_vix_key] = frozen_vix_val
-            st.session_state[mon_open_week_key] = current_week
-
-    # Determine the reference price/VIX and their source label.
-    #
-    # The Monday-open anchor only applies while we're planning THIS week's
-    # spreads (Mon-Thu). From Friday on, the planner targets NEXT week
-    # (see week_start below), and anchoring next week's strikes to the
-    # *current* week's Monday open carries up to a full week of drift —
-    # the best available proxy for next Monday's open is simply the
-    # latest price (Friday's close over the weekend).
-    _planning_this_week = run_now.weekday() <= 3
-    frozen_open = st.session_state.get(mon_open_key)
-    frozen_vix = st.session_state.get(mon_vix_key)
-    frozen_week = st.session_state.get(mon_open_week_key)
+    anchor = resolve_weekly_anchor(
+        _get_rf_conn(), ticker, run_now,
+        read_setup=_cached_weekly_setup, live_vix=live_vix, cfg=ticker_cfg,
+    )
+    if anchor.captured:
+        _cached_weekly_setup.clear()
     self_heal_msg = None
+    if anchor.self_healed:
+        self_heal_msg = (
+            f"ℹ️ No Monday-open capture existed for the week of "
+            f"{anchor.week_start} (the Monday setup job didn't run for "
+            f"{ticker}), so the anchor was captured retroactively "
+            f"from Monday's daily bar — strikes are now locked to it "
+            f"for the week. Run **Weekly Setup** if this recurs."
+        )
 
-    if _planning_this_week and frozen_week == current_week and frozen_open:
-        default_ref = frozen_open
-        default_vix = frozen_vix or live_vix
-        ref_source = "Mon open (frozen)"
+    if anchor.locked:
+        default_ref = anchor.open
+        default_vix = anchor.vix or live_vix
+        ref_source = {"db": "Mon open (from DB)", "captured": "Mon open"}[anchor.status]
+        if anchor.self_healed:
+            ref_source = "Mon open (self-healed)"
     else:
-        # Mid-week (Mon-Thu) the strikes must stay anchored to THIS week's
-        # Monday open even when the in-session freeze was lost (a fresh browser
-        # session drops session state). Two-step recovery:
-        #   1) restore the Monday open + VIX from weekly_setup, and
-        #   2) if that row is missing (the Monday cron never ran, or this is a
-        #      ticker the cron doesn't fit), capture it RETROACTIVELY from
-        #      yfinance and persist it — so we lock to Monday instead of
-        #      silently drifting on live spot for the rest of the week.
-        # _cached_weekly_setup wraps the SELECT in a 15 min cross-session cache
-        # so widget reruns / auto-refresh ticks don't keep firing at Neon.
-        restored_open = None
-        restored_vix = None
-        self_healed = False
-        if _planning_this_week:
-            from datetime import timedelta as _td
-            this_monday = (run_now - _td(days=run_now.weekday())).date()
-            week_start_str = this_monday.strftime("%Y-%m-%d")
-            rf_conn = _get_rf_conn()
-            # 1) Restore a previously-captured Monday anchor.
-            try:
-                cached_setup = _cached_weekly_setup(rf_conn, week_start_str, ticker)
-                if cached_setup is not None:
-                    restored_open, restored_vix = cached_setup
-            except Exception:
-                pass
-            # 2) Self-heal a missing capture. No spot_fallback on purpose — we
-            #    only persist a TRUE Monday daily-candle Open, never a mid-week
-            #    live price masquerading as the weekly anchor. If yfinance has
-            #    no Monday bar, the capture raises and we fall through to the
-            #    live-spot display for the day (nothing bad gets persisted).
-            if not restored_open:
-                try:
-                    healed_open, healed_vix, _src = rf_capture_monday_anchor(
-                        rf_conn, ticker, week_start_str, this_monday,
-                        spot_fallback=None, live_vix_fallback=live_vix,
-                        cfg=ticker_cfg,
-                    )
-                    if healed_open:
-                        restored_open, restored_vix = healed_open, healed_vix
-                        self_healed = True
-                        _cached_weekly_setup.clear()
-                        self_heal_msg = (
-                            f"ℹ️ No Monday-open capture existed for the week of "
-                            f"{week_start_str} (the Monday setup job didn't run for "
-                            f"{ticker}), so the anchor was captured retroactively "
-                            f"from Monday's daily bar — strikes are now locked to it "
-                            f"for the week. Run **Weekly Setup** if this recurs."
-                        )
-                except Exception:
-                    pass
-            # Mirror whatever we landed on into the session freeze so labels read
-            # "Mon open" and later reruns skip the DB / yfinance round-trip.
-            if restored_open:
-                st.session_state[mon_open_key] = restored_open
-                if restored_vix:
-                    st.session_state[mon_vix_key] = restored_vix
-                st.session_state[mon_open_week_key] = current_week
-
-        if restored_open:
-            default_ref = restored_open
-            default_vix = restored_vix or live_vix
-            ref_source = "Mon open (self-healed)" if self_healed else "Mon open (from DB)"
+        default_ref = round(spot, 2)
+        default_vix = live_vix
+        if run_now.weekday() >= 5:
+            ref_source = "Fri close (next-week plan)"
+        elif run_now.weekday() == 4:
+            ref_source = "live spot (next-week plan)"
         else:
-            default_ref = round(spot, 2)
-            default_vix = live_vix
-            if run_now.weekday() >= 5:
-                ref_source = "Fri close (next-week plan)"
-            elif run_now.weekday() == 4:
-                ref_source = "live spot (next-week plan)"
-            else:
-                ref_source = "live spot"
+            ref_source = "live spot"
 
     # ── Reference-price sanity guard ──
     # The ref is sticky (keyed session state, frozen Monday captures, a DB
@@ -1479,17 +1360,24 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     vix_key = f"sf_vix_level_{ticker}"
     prev_ticker = st.session_state.get("_sf_prev_ticker")
     if prev_ticker != ticker:
-        st.session_state[ref_key] = default_ref
-        st.session_state[vix_key] = default_vix
         if prev_ticker:
             for _suffix in ("sf_model_result_", "sf_model_features_",
                             "sf_model_metrics_", "sf_model_name_"):
                 st.session_state.pop(f"{_suffix}{prev_ticker}", None)
         st.session_state["_sf_prev_ticker"] = ticker
 
-    # Also update the defaults on first render if not yet set
-    if ref_key not in st.session_state:
+    # Seed the inputs whenever the anchor they came from changes — ticker
+    # switch, first render, the week rolling, or the anchor locking (a
+    # session opened before Monday's open must pick up the lock). A manual
+    # override survives until then; an unlocked anchor's seed (open=None)
+    # doesn't move with live spot, so the input doesn't chase ticks.
+    seed_key = f"sf_ref_seed_{ticker}"
+    _seed = (anchor.week_start, anchor.open)
+    if (prev_ticker != ticker or ref_key not in st.session_state
+            or st.session_state.get(seed_key) != _seed):
         st.session_state[ref_key] = default_ref
+        st.session_state[vix_key] = default_vix
+        st.session_state[seed_key] = _seed
     if vix_key not in st.session_state:
         st.session_state[vix_key] = default_vix
 
@@ -1567,7 +1455,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         )
 
     with col_ctrl2:
-        vix_source = "Mon open" if (frozen_week == current_week and frozen_vix) else "last close"
+        vix_source = "Mon open" if (anchor.locked and anchor.vix) else "last close"
         vix_input = st.number_input(
             f"VIX Level ({vix_source})",
             min_value=5.0, max_value=100.0, step=0.5,

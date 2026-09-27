@@ -610,8 +610,6 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
                               levels, regime_info):
     """Run the full spread finder pipeline: refresh data, rebuild features,
     save GEX, fit model, log the Monday plan, and persist Monday open + VIX."""
-    import yfinance as yf
-
     from range_finder.db import get_connection, init_all_tables
     from range_finder.data_collector import (
         fetch_spx_vix, save_spx_vix,
@@ -800,52 +798,18 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         raise RuntimeError("Model fitting stage failed") from e
 
     # ── Save Monday open + VIX to DB ──
-    # Prefer the true daily-candle Open over the live mid-move `spot` /
-    # live-last VIX tick. Yahoo publishes today's Open within seconds of
-    # 9:30 ET, so by the time this cron actually runs the daily bar is
-    # almost always available. Fall back to `spot` / live VIX only if
-    # the bar is still empty (which mostly happens when the workflow
-    # fires before Yahoo's first tick). The capture + persist logic is shared
-    # with the UI mid-week self-heal (capture_and_save_monday_anchor) so the
-    # cron and the on-demand path can never drift apart.
+    # The week's first-session daily Open (Tradier → Cboe → yfinance), pinned
+    # to the first session even on a forced mid-week/weekend run, with live
+    # spot / live VIX only as last resorts so the required weekly_setup row
+    # always exists. Shared resolver with the UI: range_finder.weekly_anchor.
     _logger.info("  Saving Monday open + VIX...")
-    monday_open = None
-    monday_vix = None
     try:
-        from range_finder.data_collector import capture_and_save_monday_anchor
-
-        # Live vol-proxy last close as the VIX fallback for the rare case where
-        # the daily-Open bar isn't published yet at 9:30 (mirrors the prior
-        # inline behavior; the underlying falls back to `spot`).
-        _vix_fallback = None
-        try:
-            _vp_hist = yf.Ticker(cfg["vol_proxy_yf"]).history(period="5d")
-            if not _vp_hist.empty:
-                _vix_fallback = round(float(_vp_hist["Close"].dropna().iloc[-1]), 2)
-        except Exception:
-            pass
-
-        week = setup_week(run_now)
-        week_start = week.key
-
-        # Anchor to the week's FIRST TRADING SESSION, not run_now.date().
-        # On a normal Monday (or Tuesday-after-holiday) cron those are the
-        # same day, so behavior is unchanged — but a FORCE_WEEKLY_SETUP
-        # dispatch is allowed on any weekday ("refresh after a code change"),
-        # and passing run_now.date() there would persist e.g. Wednesday's open
-        # as this week's frozen Monday anchor via save_weekly_setup's
-        # ON CONFLICT DO UPDATE, silently re-snapping every ticker's strikes
-        # mid-week. Resolving the first session off the exchange calendar keeps
-        # the anchor pinned to Monday (or the true first trading day) regardless
-        # of when the job runs.
-        anchor_date = week.first_session_day
-
-        monday_open, monday_vix, open_source = capture_and_save_monday_anchor(
-            conn, ticker, week_start, anchor_date,
-            spot_fallback=spot, live_vix_fallback=_vix_fallback, cfg=cfg,
-        )
+        from range_finder.weekly_anchor import capture_setup_anchor
+        anchor = capture_setup_anchor(conn, ticker, run_now,
+                                      spot_fallback=spot, cfg=cfg)
+        monday_open, monday_vix = anchor.open, anchor.vix
         _logger.info(
-            f"  Monday open saved: {ticker}={monday_open:.2f} ({open_source}), "
+            f"  Monday open saved: {ticker}={monday_open:.2f} ({anchor.source}), "
             f"VIX={monday_vix:.2f}"
         )
     except Exception as e:
@@ -857,7 +821,8 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         try:
             _log_calibration_plan(conn, df_feat, _cal_fit, setup_week(run_now).key,
                                   monday_open, monday_vix, spot,
-                                  run_date=run_now.date(), anchor_date=anchor_date)
+                                  run_date=run_now.date(),
+                                  anchor_date=setup_week(run_now).first_session_day)
         except Exception as e:
             _logger.warning(f"  Plan logging failed: {e} (calibration row skipped)")
 

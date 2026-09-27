@@ -55,7 +55,12 @@ from range_finder.spread_levels import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 from range_finder.weekly_anchor import resolve_anchor as resolve_weekly_anchor
-from range_finder.spread_finder_rules import check_reference, detect_regime_shift
+from range_finder.spread_finder_rules import check_reference
+from range_finder.spread_finder_view import (
+    blocked_message as sf_blocked_message,
+    build_spread_finder_view,
+    regime_shift_message as sf_regime_shift_message,
+)
 from range_finder.forward_workbook import (
     FT_MAX_TICKERS, build_forward_test_workbook, ft_class,
 )
@@ -1238,97 +1243,31 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     week_start = planning_week(run_now).key
     sf_ref_date = run_now.date()
 
-    # ── Get feature row ──
-    # Look up the row in the already-cached `df_feat` instead of issuing a
-    # fresh `SELECT * FROM model_features WHERE week_start = ?` on every
-    # render. `df_feat` is loaded by `_cached_rf_get_features` (10 min TTL)
-    # and indexed by `week_start` (DatetimeIndex), so this is a pure
-    # in-memory lookup and saves one Neon roundtrip per Spread Finder pass.
-    feature_row, _blocked = rf_select_forecast_row(df_feat, week_start)
-    if _blocked is not None and _blocked.reason == "missing":
-        _newest = (_blocked.newest_week.strftime("%Y-%m-%d")
-                   if _blocked.newest_week is not None else "none")
-        st.error(
-            f"⚠️ **Forecast blocked:** no feature row exists for {week_start}. "
-            f"The newest persisted row is {_newest}. Run **Weekly "
-            "Setup** (or **Refresh Data** + **Rebuild Features**) before "
-            "using this week's strikes."
-        )
-        _render_gex_context_panel(gex_ctx, spot)
-        return
-    if _blocked is not None:
-        _source_label = (
-            _blocked.source_week.strftime("%Y-%m-%d")
-            if _blocked.source_week is not None else "missing"
-        )
-        st.error(
-            f"⚠️ **Forecast blocked:** the {week_start} row uses weekly path "
-            f"inputs from **{_source_label}**, but it requires "
-            f"**{_blocked.required_week:%Y-%m-%d}**. A provisional next-week row "
-            "created before Friday's close cannot be reused after the week "
-            "rolls. Run **Weekly Setup** (or **Refresh Data** + **Rebuild "
-            "Features**) to refresh the HAR inputs. The saved Monday-open "
-            "strike anchor will remain unchanged."
-        )
-        _render_gex_context_panel(gex_ctx, spot)
-        return
-
-    # ── Regime-shift circuit breaker ──────────────────────────────────────
-    # HAR features are lagged by one week — vix_close in feature_row is
-    # last Friday's close. When IV spikes overnight (e.g., VIX 15 → 40 on
-    # a news shock), the model's input features still reflect the pre-spike
-    # world for a full week, so the forecast's PI is anchored to the wrong
-    # vol regime and the Spread Finder will place strikes dangerously
-    # close to spot. The live weekly expected move (from the straddle) is
-    # drawn on the strike map as a reference band and shorts inside it are
-    # flagged, but that doesn't stop the user from trusting the "model says
-    # range will be 2%" read.
-    #
-    # Compare the live VIX to the trailing VIX already in the feature row
-    # (range_finder.spread_finder_rules). live_vix_raw — the genuine fetch,
-    # NOT the 18.0 display default — or the breaker would judge an invented
-    # number.
-    regime_shift = detect_regime_shift(live_vix_raw, feature_row.get("vix_close"))
-    if regime_shift is not None:
-        st.error(
-            f"⚠️ **VIX regime shift detected ({regime_shift.severity})** — "
-            f"live VIX **{regime_shift.live_vix:.1f}** vs trailing "
-            f"feature VIX **{regime_shift.trailing_vix:.1f}** "
-            f"(**{regime_shift.ratio:.2f}×**).\n\n"
-            f"The HAR model's features lag by one week, so the forecast below "
-            f"is anchored to the pre-spike vol regime. Short strikes sized "
-            f"against this forecast are likely **too narrow**. Check the live "
-            f"weekly expected-move band on the strike map (it reflects the "
-            f"current straddle) and treat any short strike inside it as too "
-            f"risky — or, better, skip the trade until features catch up."
-        )
-    # ── Build forecast → plan → tiers from the latest GEX refresh ──
-    # We intentionally DO NOT cache these on a session-state key any more.
-    # Everything below is cheap arithmetic on top of the already-loaded HAR
-    # model (the expensive validation + production fits are gated behind the
-    # "Forecast" button and cached separately via rf_load_model), so
-    # recomputing on every page rerun lets the spread finder pick up fresh
-    # chain bid/ask as soon as fetch_all_data refreshes data.chain_cache
-    # (i.e. on auto-refresh, "Refresh Now", or any normal rerun — no need
-    # to click "Forecast" again to get updated credits).
-    #
-    # Risk-tier switching stays snappy because the _risk_tier_fragment
-    # below is wrapped in @st.fragment and only re-reads the spread_tiers
-    # we stash in session_state — the outer recompute doesn't happen on
-    # tier toggles.
-    # Per-side band share: empirical side-share quantile (falls back to the
-    # legacy /2 split when weekly history is unavailable). Cached 1h.
-    side_share_q = _cached_side_share_q(ticker)
-
+    # ── Forecast → plan → tiers (range_finder.spread_finder_view) ──
+    # Recomputed every rerun on purpose: it's cheap arithmetic on the already
+    # loaded fit, and it lets fresh chain bid/ask from fetch_all_data land
+    # without clicking Forecast again. Tier switching stays snappy because
+    # _risk_tier_fragment below only re-reads the stashed tiers.
+    # live_vix_raw — the genuine fetch, NOT the 18.0 display default — feeds
+    # the regime-shift breaker (HAR features lag a week; an overnight IV
+    # spike leaves the forecast anchored to the pre-spike regime).
     chain_quotes, chain_exp = _build_chain_quotes_for_spreads(
         data, ticker, ref_date=sf_ref_date,
     )
-    forecast, plan, spread_tiers = build_recommendations(
-        result=result, feature_row=feature_row, feature_cols=feat_cols,
-        reference=spx_close_input, vix=vix_input, week_start=week_start,
-        ticker=ticker, side_share_q=side_share_q, chain_quotes=chain_quotes,
+    view = build_spread_finder_view(
+        features=df_feat, week_start=week_start, result=result,
+        feature_cols=feat_cols, reference=spx_close_input, vix=vix_input,
+        live_vix=live_vix_raw, ticker=ticker,
+        side_share_q=_cached_side_share_q(ticker), chain_quotes=chain_quotes,
         weekly_em=weekly_em, conn=conn, model_name=model_choice,
     )
+    if not view.ready:
+        st.error(sf_blocked_message(view))
+        _render_gex_context_panel(gex_ctx, spot)
+        return
+    if view.regime_shift is not None:
+        st.error(sf_regime_shift_message(view.regime_shift))
+    forecast, plan, spread_tiers = view.forecast, view.plan, view.tiers
 
     gex_adj = adjust_spread_with_gex(plan, gex_ctx)
 

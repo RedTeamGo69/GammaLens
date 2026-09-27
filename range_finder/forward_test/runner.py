@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from phase1.trading_week import NY, trading_week
 from .capture import capture_model
-from .config import (DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
+from .config import (CASH_INDEX_ROOTS, DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
                      SCORER_VERSION, methodology, study_universe)
 from .scoring import score_forecast
 from .provider import valid_ohlc
@@ -120,7 +120,7 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
                 partial_session = first_available is not None and session.day == first_available.astimezone(NY).date()
                 if old and valid_ohlc(old.get("daily")) and not partial_session:
                     age = (now.astimezone(NY).date() - session.day).days
-                    if age > 4 and (ticker != "SPX" or session != week.sessions[-1]):
+                    if age > 4 and (ticker not in CASH_INDEX_ROOTS or session != week.sessions[-1]):
                         continue
                 try:
                     payload = provider.observe(ticker, session,

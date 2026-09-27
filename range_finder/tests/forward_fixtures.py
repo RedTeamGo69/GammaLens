@@ -7,13 +7,15 @@ import pandas as pd
 
 from range_finder.feature_builder import build_features
 from phase1.trading_week import trading_week
+from range_finder.forward_test.config import CASH_INDEX_ROOTS
 from range_finder.forward_test.provider import frame_records
 
 REFERENCES = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.,
               "META": 600., "TSLA": 350., "HOOD": 100.,
               "NVDA": 225., "GOOGL": 345., "MSFT": 515., "AMZN": 250., "AVGO": 350., "MU": 1080.,
               "WMT": 108., "COST": 920., "XOM": 160., "CVX": 205., "JPM": 345., "BAC": 57.,
-              "UNH": 375., "GEV": 960., "GE": 325.}
+              "UNH": 375., "GEV": 960., "GE": 325.,
+              "QQQ": 745., "NDX": 30660., "CRWV": 88.}
 
 
 class Clock:
@@ -46,8 +48,8 @@ def prepared_fixture(ticker, week, clock):
            "earnings": pd.DataFrame(), "gex": pd.DataFrame()}
     features = build_features(None, ticker=ticker, inputs=raw, as_of=clock(), persist=False)
     expiration = str(week.sessions[-1].day)
-    root = "SPXW" if ticker == "SPX" else ticker
-    increment = 5 if ticker == "SPX" else 1
+    root = CASH_INDEX_ROOTS.get(ticker, ticker)
+    increment = {"SPX": 5, "NDX": 50}.get(ticker, 1)
     strikes = np.arange(ref * .65 // increment * increment, ref * 1.35, increment)
     chain = {"status": "ok", "calls": [], "puts": []}
     for side, code in (("calls", "C"), ("puts", "P")):

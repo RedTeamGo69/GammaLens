@@ -52,16 +52,17 @@ def test_declared_delay_is_recorded_and_bounded():
     provider.close()
 
 
-def test_spx_requires_pm_series_and_full_contract_identity():
+@pytest.mark.parametrize('ticker,pm_root', [('SPX','SPXW'), ('NDX','NDXP')])
+def test_cash_index_requires_pm_series_and_full_contract_identity(ticker, pm_root):
     week=trading_week(date(2026,9,14))  # third Friday
-    clock=Clock(week.capture_start); prepared=prepared_fixture('SPX',week,clock)
-    chain,root=contract_chain(prepared['chain'],'SPX',prepared['expiration'])
-    assert root=='SPXW'
+    clock=Clock(week.capture_start); prepared=prepared_fixture(ticker,week,clock)
+    chain,root=contract_chain(prepared['chain'],ticker,prepared['expiration'])
+    assert root==pm_root
     for side in ('calls','puts'):
         for option in prepared['chain'][side]:
-            option['root']='SPX'
-    with pytest.raises(ValueError,match='SPXW'):
-        contract_chain(prepared['chain'],'SPX',prepared['expiration'])
+            option['root']=ticker  # the AM-settled monthly root
+    with pytest.raises(ValueError,match=pm_root):
+        contract_chain(prepared['chain'],ticker,prepared['expiration'])
 
 
 @pytest.mark.parametrize('field,value',[('symbol',None),('expiration_date','2026-09-18'),('contract_size',10),('root','AAPL1')])

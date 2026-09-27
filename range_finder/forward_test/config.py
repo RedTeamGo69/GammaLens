@@ -20,10 +20,20 @@ OPEN_UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
 BALANCED_ADDITIONS = ("NVDA", "GOOGL", "MSFT", "AMZN", "AVGO", "MU",  # top-10 market cap
                       "WMT", "COST", "XOM", "CVX", "JPM", "BAC",      # staples, energy, financials
                       "UNH", "GEV", "GE")                             # health, industrials
-UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS)
+# v5, 2026-09-27: user-requested Nasdaq-100 exposure (QQQ, NDX) plus CRWV.
+# Friday 9/25 chain, 10/2 expiry: ATM spread QQQ ~1%, NDXP ~3.6%, CRWV 3-6%.
+# NDX traded only ~1.6k NDXP contracts, below the ~3k screen, but each is ~40x a
+# QQQ contract's notional. NDX weeklies are PM-settled NDXP, like SPX's SPXW.
+# PLTR was the user's first pick but Tradier serves an impossible 2023-06-05 bar
+# (open 14.365 < low 14.39), which fails closed like LLY/FCX; CRWV replaced it.
+NASDAQ_ADDITIONS = ("QQQ", "NDX", "CRWV")
+UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, *NASDAQ_ADDITIONS)
+# Cash-settled indices: weekly contracts trade under a PM-settled root, and the
+# final session settles to the official close rather than a physical delivery.
+CASH_INDEX_ROOTS = {"SPX": "SPXW", "NDX": "NDXP"}
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v4-balanced"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v5-nasdaq"
 SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14

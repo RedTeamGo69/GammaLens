@@ -14,7 +14,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from range_finder.data_collector import (
     get_weekly_spx,
@@ -208,7 +207,8 @@ def compute_hv_windows(daily_df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
-    """Pull weekly closes for VIX9D and VIX3M — Cboe primary, yfinance fallback.
+    """Pull weekly closes for VIX9D and VIX3M — Cboe primary, then validated
+    bar_sources bars (Tradier, then yfinance).
 
     Cboe's official CSVs carry VIX9D back to 2011 and VIX3M back to 2009
     (far deeper than yfinance's reliable coverage), which also unlocks longer
@@ -228,17 +228,17 @@ def fetch_vix_term_structure(years: int = 6) -> pd.DataFrame:
         except Exception as e:
             log.warning(f"Cboe {cboe_index} unavailable ({e}) — "
                         f"falling back to yfinance {yf_symbol}")
-        # Fallback: yfinance weekly bars.
-        raw = yf.download(yf_symbol, start=start, end=end, interval="1wk", progress=False)
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        if raw.empty:
-            log.warning(f"{name} returned empty — will be NULL in features")
+        # Fallback: validated weekly bars (Tradier, then yfinance).
+        from range_finder.bar_sources import fetch_weekly_bars, tradier_symbol_for
+        try:
+            bars = fetch_weekly_bars(yf_symbol, tradier_symbol_for(yf_symbol),
+                                     years, name)
+        except Exception as e:
+            log.warning(f"{name} unavailable ({e}) — will be NULL in features")
             return pd.Series(dtype=float, name=name)
-        s = raw["Close"].copy()
+        s = bars["close"].copy()
         s.name = name
-        s.index = pd.to_datetime(s.index).normalize()
-        return s
+        return s[s.index >= pd.Timestamp(start)]
 
     vix9d = fetch_series("VIX9D", "^VIX9D", "vix9d_close")
     vix3m = fetch_series("VIX3M", "^VIX3M", "vix3m_close")

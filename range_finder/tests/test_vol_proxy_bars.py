@@ -56,3 +56,25 @@ def test_spx_vix_seed_uses_the_seam(bar_calls):
     df = dc.fetch_spx_vix(years=1)
     assert bar_calls == [("^GSPC", "SPX"), ("^VIX", "VIX")]
     assert df["vix_close"].iloc[0] == pytest.approx(21.0)
+
+
+def test_term_structure_fallback_uses_the_seam(monkeypatch):
+    """Cboe is primary for VIX9D/VIX3M; the fallback goes through bar_sources
+    (Tradier, then yfinance) instead of a raw yf.download."""
+    import range_finder.cboe_data as cboe
+    import range_finder.feature_builder as fb
+
+    def cboe_down(index, name):
+        raise ConnectionError("cdn down")
+
+    calls = []
+
+    def bars(yf_symbol, tradier_symbol, years, label):
+        calls.append((yf_symbol, tradier_symbol))
+        return _bars(18.0)
+
+    monkeypatch.setattr(cboe, "fetch_cboe_weekly_closes", cboe_down)
+    monkeypatch.setattr(bs, "fetch_weekly_bars", bars)
+    out = fb.fetch_vix_term_structure(years=1)
+    assert calls == [("^VIX9D", "VIX9D"), ("^VIX3M", "VIX3M")]
+    assert out["vix9d_close"].notna().any()

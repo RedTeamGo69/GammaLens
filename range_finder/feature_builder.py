@@ -8,6 +8,7 @@
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -65,6 +66,56 @@ def assess_path_provenance(feature_row: pd.Series, forecast_week) -> tuple:
     except (TypeError, ValueError):
         return False, None, required_week
     return source_week == required_week, source_week, required_week
+
+
+def _week_label(ts) -> str:
+    return ts.strftime("%Y-%m-%d") if ts is not None else "missing"
+
+
+@dataclass(frozen=True)
+class ForecastRowBlocked:
+    """Why a week's feature row may not be forecast off.
+
+    ``reason`` is ``"missing"`` (no row for the week) or ``"stale_path"``
+    (the row exists but its HAR path is not the immediately prior week's).
+    """
+    reason: str
+    week: pd.Timestamp
+    newest_week: "pd.Timestamp | None" = None
+    source_week: "pd.Timestamp | None" = None
+    required_week: "pd.Timestamp | None" = None
+
+    def describe(self) -> str:
+        if self.reason == "missing":
+            return (f"no feature row for {_week_label(self.week)} "
+                    f"(newest is {_week_label(self.newest_week)})")
+        return (f"{_week_label(self.week)} path source is "
+                f"{_week_label(self.source_week)}; requires "
+                f"{_week_label(self.required_week)}")
+
+
+def select_forecast_row(features: pd.DataFrame, week_start) -> tuple:
+    """``(row, None)`` when ``week_start``'s row is servable, else
+    ``(None, ForecastRowBlocked)``.
+
+    The single serving rule for every forecaster (UI tab, export, forward
+    capture, cron). Never falls back to another week's row: a stale row
+    produces confident-looking strikes off last week's volatility path.
+    """
+    week = pd.Timestamp(week_start).normalize()
+    if features is None or features.empty or week not in features.index:
+        newest = None
+        if features is not None and not features.empty:
+            newest = pd.Timestamp(features.index.max())
+        return None, ForecastRowBlocked("missing", week, newest_week=newest)
+    row = features.loc[week]
+    fresh, source_week, required_week = assess_path_provenance(row, week)
+    if not fresh:
+        return None, ForecastRowBlocked(
+            "stale_path", week,
+            source_week=source_week, required_week=required_week,
+        )
+    return row, None
 
 
 # =============================================================================

@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from datetime import timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _logger = logging.getLogger(__name__)
@@ -480,10 +481,11 @@ def capture_snapshot():
                 ticker, spot, run_now, fred_key, client, avail,
                 levels, regime_info,
             )
-            if not _weekly_setup_artifacts_complete(ticker, weekly_key):
+            setup_week = _setup_week_start(run_now)
+            if not _weekly_setup_artifacts_complete(ticker, setup_week):
                 raise RuntimeError(
                     f"Required weekly artifacts were not persisted for "
-                    f"{ticker}/{weekly_key}"
+                    f"{ticker}/{setup_week}"
                 )
         except Exception as e:
             _logger.error(f"Weekly spread finder setup failed: {e}")
@@ -538,6 +540,91 @@ def _safe_float(val):
         return f if f == f else None   # NaN != NaN
     except (TypeError, ValueError):
         return None
+
+
+def _setup_week_start(run_now) -> str:
+    """Monday of the week the weekly setup writes (anchor, plan, fit check).
+
+    Always the CURRENT calendar week, including on a forced weekend run —
+    next week's Monday open does not exist yet. Deliberately not
+    get_weekly_em_date_key, which rolls forward on weekends.
+    """
+    return (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
+
+
+def _side_share_q(conn):
+    """Per-side band-share quantile from completed SPX weekly history, or
+    None (legacy /2 split) when history is thin/unavailable."""
+    try:
+        from range_finder.feature_builder import _load_weekly_for_ticker
+        from range_finder.har_model import estimate_side_share_quantile
+        est = estimate_side_share_quantile(_load_weekly_for_ticker(conn, "SPX"))
+        _logger.info(f"  Side-share quantile: q={est['q']} "
+                     f"(n={est['n']}, beta={est['beta']})")
+        return est["q"]
+    except Exception as e:
+        _logger.warning(f"  Side-share estimate failed ({e}) — using legacy /2 split")
+        return None
+
+
+def _log_calibration_plan(conn, df_feat, cal_fit, week_start,
+                          monday_open, monday_vix, spot,
+                          run_date=None, anchor_date=None) -> bool:
+    """Forecast the week with the production spec and log the plan to
+    spread_log; returns whether a row was written.
+
+    Builds the plan the way the UI would (no chain snap — the logged strikes
+    are the model's raw placement). Next Monday's Step 1b scores it against
+    the realized range: this is the write half of the loop that
+    range_finder/calibration.py reads. The week's row must pass the shared
+    serving rule — falling back to another week's row would score a plan the
+    UI would have refused to show, poisoning the coverage audit.
+    """
+    from range_finder.feature_builder import select_forecast_row
+    from range_finder.har_model import forecast_next_week
+    from range_finder.spread_levels import build_spread_plan, log_spread_plan
+
+    # Only the week's first session logs the plan. spread_log upserts on
+    # (week_start, ticker), so a forced mid-week or weekend refresh would
+    # otherwise overwrite Monday's plan — and a weekend refit has already
+    # trained on that week's outcome (lookahead into the coverage audit).
+    if run_date is not None and anchor_date is not None and run_date != anchor_date:
+        _logger.info(f"  Calibration plan not re-logged: {run_date} is not "
+                     f"the week's first session ({anchor_date})")
+        return False
+
+    feature_row, blocked = select_forecast_row(df_feat, week_start)
+    if blocked is not None:
+        _logger.error(f"  Calibration plan NOT logged: {blocked.describe()}")
+        return False
+
+    result, cal_cols = cal_fit
+    spx_ref = monday_open or spot
+    # Per-side share keeps the logged strikes on the SAME placement the UI
+    # shows, so the audit scores the placement actually used.
+    side_q = _side_share_q(conn)
+    forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref,
+                                  side_share_q=side_q)
+    plan = build_spread_plan(
+        forecast, feature_row,
+        week_start=week_start,
+        vix_level=monday_vix,
+        spx_open=monday_open,
+        ticker="SPX",
+        side_share_q=side_q,
+    )
+    log_spread_plan(
+        conn, plan,
+        ticker="SPX",
+        model_name=_CALIBRATION_SPEC,
+        lower_pct=forecast.get("lower_pct"),
+    )
+    _logger.info(
+        f"  Plan logged for {week_start} ({_CALIBRATION_SPEC}): "
+        f"point={forecast['point_pct']:.4f} "
+        f"PI=[{forecast['lower_pct']:.4f}, {forecast['upper_pct']:.4f}]"
+    )
+    return True
 
 
 def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
@@ -786,9 +873,8 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         except Exception:
             pass
 
-        days_since_monday = run_now.weekday()
-        monday = run_now - timedelta(days=days_since_monday)
-        week_start = monday.strftime("%Y-%m-%d")
+        monday = run_now - timedelta(days=run_now.weekday())
+        week_start = _setup_week_start(run_now)
 
         # Anchor to the week's FIRST TRADING SESSION, not run_now.date().
         # On a normal Monday (or Tuesday-after-holiday) cron those are the
@@ -825,64 +911,11 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         raise RuntimeError("Monday open/VIX save failed") from e
 
     # ── Step 5: Log this week's plan for the calibration audit (SPX only) ──
-    # Forecast the week with the production spec, build the plan the way the
-    # UI would (no chain snap — the logged strikes are the model's raw
-    # placement), and persist forecast bounds + strikes to spread_log. Next
-    # Monday's Step 1b scores it against the realized range. This is the
-    # write half of the loop that range_finder/calibration.py reads.
     if ticker == "SPX" and _cal_fit is not None:
         try:
-            from range_finder.feature_builder import get_feature_for_week
-
-            week_start = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
-            result, cal_cols = _cal_fit
-
-            feature_row = get_feature_for_week(conn, week_start, ticker="SPX")
-            if feature_row is None:
-                feature_row = df_feat.iloc[-1]
-                _logger.warning(f"  No feature row for {week_start} — "
-                                "logging plan off the latest available row")
-
-            spx_ref = monday_open or spot
-
-            # Per-side band share from completed weekly history (falls back
-            # to the legacy /2 when history is thin/unavailable). The logged
-            # strikes therefore reflect the SAME placement the UI shows, and
-            # the calibration audit scores the placement actually used.
-            _side_q = None
-            try:
-                from range_finder.feature_builder import _load_weekly_for_ticker
-                from range_finder.har_model import estimate_side_share_quantile
-                _q_est = estimate_side_share_quantile(
-                    _load_weekly_for_ticker(conn, "SPX"))
-                _side_q = _q_est["q"]
-                _logger.info(f"  Side-share quantile: q={_side_q} "
-                             f"(n={_q_est['n']}, beta={_q_est['beta']})")
-            except Exception as _e:
-                _logger.warning(f"  Side-share estimate failed ({_e}) — "
-                                f"using legacy /2 split")
-
-            forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref,
-                                          side_share_q=_side_q)
-            plan = build_spread_plan(
-                forecast, feature_row,
-                week_start=week_start,
-                vix_level=monday_vix,
-                spx_open=monday_open,
-                ticker="SPX",
-                side_share_q=_side_q,
-            )
-            log_spread_plan(
-                conn, plan,
-                ticker="SPX",
-                model_name=_CALIBRATION_SPEC,
-                lower_pct=forecast.get("lower_pct"),
-            )
-            _logger.info(
-                f"  Plan logged for {week_start} ({_CALIBRATION_SPEC}): "
-                f"point={forecast['point_pct']:.4f} "
-                f"PI=[{forecast['lower_pct']:.4f}, {forecast['upper_pct']:.4f}]"
-            )
+            _log_calibration_plan(conn, df_feat, _cal_fit, _setup_week_start(run_now),
+                                  monday_open, monday_vix, spot,
+                                  run_date=run_now.date(), anchor_date=anchor_date)
         except Exception as e:
             _logger.warning(f"  Plan logging failed: {e} (calibration row skipped)")
 

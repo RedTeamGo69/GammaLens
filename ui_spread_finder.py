@@ -32,7 +32,7 @@ from range_finder.data_collector import (
 from range_finder.feature_builder import (
     build_features as rf_build_features,
     get_features as rf_get_features,
-    assess_path_provenance as rf_assess_path_provenance,
+    select_forecast_row as rf_select_forecast_row,
 )
 from range_finder.gex_policy import (
     GEX_LIVE_SPREAD_INFLUENCE_ENABLED,
@@ -585,26 +585,9 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             )
             return out
 
-        wk_ts = pd.Timestamp(week_start)
-        if wk_ts not in df_feat.index:
-            out["error"] = (
-                f"forecast blocked: no feature row for {week_start}; "
-                "run Weekly Setup after the prior week closes"
-            )
-            return out
-        feature_row = df_feat.loc[wk_ts]
-        _fresh, _source_week, _required_week = rf_assess_path_provenance(
-            feature_row, wk_ts,
-        )
-        if not _fresh:
-            _source_label = (
-                _source_week.strftime("%Y-%m-%d")
-                if _source_week is not None else "missing"
-            )
-            out["error"] = (
-                f"forecast blocked: {week_start} path source is "
-                f"{_source_label}; requires {_required_week:%Y-%m-%d}"
-            )
+        feature_row, blocked = rf_select_forecast_row(df_feat, week_start)
+        if blocked is not None:
+            out["error"] = f"forecast blocked: {blocked.describe()}"
             return out
 
         # Reference price: Monday-open capture, else prior weekly close.
@@ -2047,40 +2030,27 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # render. `df_feat` is loaded by `_cached_rf_get_features` (10 min TTL)
     # and indexed by `week_start` (DatetimeIndex), so this is a pure
     # in-memory lookup and saves one Neon roundtrip per Spread Finder pass.
-    feature_row = None
-    try:
-        _wk_ts = pd.Timestamp(week_start)
-        if _wk_ts in df_feat.index:
-            feature_row = df_feat.loc[_wk_ts]
-    except Exception:
-        feature_row = None
-    if feature_row is None:
-        _fallback_idx = df_feat.index[-1]
-        _fallback_label = (
-            _fallback_idx.strftime("%Y-%m-%d")
-            if hasattr(_fallback_idx, "strftime") else str(_fallback_idx)
-        )
+    feature_row, _blocked = rf_select_forecast_row(df_feat, week_start)
+    if _blocked is not None and _blocked.reason == "missing":
+        _newest = (_blocked.newest_week.strftime("%Y-%m-%d")
+                   if _blocked.newest_week is not None else "none")
         st.error(
             f"⚠️ **Forecast blocked:** no feature row exists for {week_start}. "
-            f"The newest persisted row is {_fallback_label}. Run **Weekly "
+            f"The newest persisted row is {_newest}. Run **Weekly "
             "Setup** (or **Refresh Data** + **Rebuild Features**) before "
             "using this week's strikes."
         )
         _render_gex_context_panel(gex_ctx, spot)
         return
-
-    _path_fresh, _path_source, _path_required = rf_assess_path_provenance(
-        feature_row, _wk_ts,
-    )
-    if not _path_fresh:
+    if _blocked is not None:
         _source_label = (
-            _path_source.strftime("%Y-%m-%d")
-            if _path_source is not None else "missing"
+            _blocked.source_week.strftime("%Y-%m-%d")
+            if _blocked.source_week is not None else "missing"
         )
         st.error(
             f"⚠️ **Forecast blocked:** the {week_start} row uses weekly path "
             f"inputs from **{_source_label}**, but it requires "
-            f"**{_path_required:%Y-%m-%d}**. A provisional next-week row "
+            f"**{_blocked.required_week:%Y-%m-%d}**. A provisional next-week row "
             "created before Friday's close cannot be reused after the week "
             "rolls. Run **Weekly Setup** (or **Refresh Data** + **Rebuild "
             "Features**) to refresh the HAR inputs. The saved Monday-open "

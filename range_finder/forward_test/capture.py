@@ -8,7 +8,7 @@ import pandas as pd
 
 from phase1.ticker_config import register_dynamic_config
 from range_finder import gex_policy
-from range_finder.feature_builder import assess_path_provenance, COVID_START, COVID_END
+from range_finder.feature_builder import select_forecast_row, COVID_START, COVID_END
 from range_finder.har_model import (MODEL_SPECS, TRAIN_WINDOW_YEARS, production_feature_columns,
                                    fit_production_model, estimate_side_share_quantile, train_window_min_date)
 from range_finder.model_persistence import SCHEMA_VERSION, IncompatibleModelError
@@ -40,11 +40,10 @@ def completed_features(features, week, as_of=None):
     minimum = pd.Timestamp(train_window_min_date(as_of=as_of or week.capture_start))
     train = features.loc[(features.index < cutoff) & (features.index >= minimum)].copy()
     train = train.loc[(train.index < COVID_START) | (train.index > COVID_END)]
-    if cutoff not in features.index:
-        raise ValueError("Target-week feature row unavailable")
-    row = features.loc[cutoff].copy()
-    if not assess_path_provenance(row, cutoff)[0]:
-        raise ValueError("Feature path does not come from the prior completed week")
+    row, blocked = select_forecast_row(features, cutoff)
+    if blocked is not None:
+        raise ValueError(f"Target-week feature row not servable: {blocked.describe()}")
+    row = row.copy()
     # No target-week high/low/range may enter the forecast or its audit vector.
     row = row.drop(labels=["log_range", "range_pct"], errors="ignore")
     return train, row

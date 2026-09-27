@@ -8,7 +8,7 @@ import pandas as pd
 from range_finder.forward_test.provider import TradierProvider
 from range_finder.forward_test.capture import capture_model, contract_chain
 from range_finder.tests.forward_fixtures import Clock, prepared_fixture
-from range_finder.trading_week import trading_week
+from phase1.trading_week import trading_week
 
 
 @pytest.mark.parametrize('ticker,bar',[

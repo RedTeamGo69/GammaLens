@@ -13,7 +13,7 @@ import streamlit as st
 
 from theme import COLORS
 from models import GEXData
-from ui_history import _is_weekly_freeze_day
+from phase1.trading_week import is_first_session, planning_week
 
 from range_finder.gex_bridge import (
     GEXContext, extract_gex_context, save_gex_to_range_finder,
@@ -222,32 +222,14 @@ def _cached_weekly_setup(_conn, week_start: str, ticker: str):
     return None
 
 
-def _spread_finder_target_friday(ref_date: "date_cls | None" = None) -> "date_cls":
-    """Return the calendar Friday of the week the Spread Finder is planning for.
-
-    On Mon-Thu we're inside a live trading week — traders entering new
-    credit spreads want *this* week's Friday (the one that's 0-4 days
-    away).  On Fri-Sun the current week is effectively done, so we roll
-    forward to next Monday's week and pick its Friday.  The same rule is
-    applied in ``_render_spread_finder_tab`` when deriving ``week_start``
-    so both stay in sync.
-    """
-    today = ref_date or date_cls.today()
-    wd = today.weekday()
-    if wd <= 3:  # Mon-Thu → this week's Monday
-        monday = today - timedelta(days=wd)
-    else:        # Fri-Sun → next Monday
-        monday = today + timedelta(days=(7 - wd))
-    return monday + timedelta(days=4)
-
-
 def find_spread_finder_friday_exp(
     avail: "list[str]",
     ref_date: "date_cls | None" = None,
 ) -> "str | None":
     """Listed end-of-week expiration for the UI's planned trading week."""
-    from range_finder.trading_week import trading_week, listed_week_expiration
-    return listed_week_expiration(avail, trading_week(_spread_finder_target_friday(ref_date)))
+    from phase1.market_clock import now_ny
+    from phase1.trading_week import listed_week_expiration
+    return listed_week_expiration(avail, planning_week(ref_date or now_ny()))
 
 
 def spread_finder_weekly_em(avail, ref_date, *, weekly_exp, weekly_em_snap,
@@ -285,7 +267,7 @@ def _build_chain_quotes_for_spreads(
     Friday chain that matches the Spread Finder's planned week.
 
     The target expiration is anchored to *the week the spread finder is
-    forecasting* (see ``_spread_finder_target_friday``), not to "whichever
+    forecasting* (``phase1.trading_week.planning_week``), not to "whichever
     expiration the user happened to pick in the sidebar".  Before this was
     added, a user who had ``0DTE`` or ``Tomorrow`` selected would see the
     spread finder silently fall back to today's chain — producing $0.00
@@ -1281,11 +1263,10 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     from phase1.ticker_config import has_single_name_earnings as _has_sne
     if _has_sne(ticker):
         try:
-            from datetime import timedelta as _td_e
             from phase1.market_clock import now_ny as _now_ny_e
             # Check the SAME week the spread finder is planning for —
             # this week's Monday on Mon-Thu, next Monday on Fri-Sun
-            # (mirrors _spread_finder_target_friday / week_start below).
+            # (phase1.trading_week.planning_week, same as week_start below).
             # The old check always looked at NEXT Monday, so a Tuesday
             # user planning this week's spreads never saw the warning
             # for earnings landing on Wednesday.
@@ -1295,13 +1276,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             # 20:00 ET, so a late-evening ET user would otherwise be shown
             # the wrong planning week (and miss/false-fire the warning) for
             # 4 hours every day. Everything else in the tab keys off ET.
-            _today = _now_ny_e().date()
-            _wd_e = _today.weekday()
-            if _wd_e <= 3:
-                _plan_monday = _today - _td_e(days=_wd_e)
-            else:
-                _plan_monday = _today + _td_e(days=7 - _wd_e)
-            _plan_week = _plan_monday.strftime("%Y-%m-%d")
+            _plan_week = planning_week(_now_ny_e()).key
             _conn_e = _get_rf_conn()
             _cur_e = _conn_e.cursor()
             _cur_e.execute(
@@ -1341,7 +1316,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # the week uses that frozen value. Before Monday open (weekends), use
     # the live spot (Friday close).
     run_now = now_ny()
-    is_freeze_day = _is_weekly_freeze_day(run_now)
+    is_freeze_day = is_first_session(run_now)
     is_market_open = data.market_open
 
     mon_open_key = f"sf_monday_open_{ticker}"
@@ -2035,15 +2010,10 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # roll into "tomorrow" a few hours before NY does and end up looking
     # at a different expiration than the one the pre-fetch cached.
     #
-    # Mon-Thu: plan THIS week's spreads (week_start = this Monday, expiring
-    # this Friday).  Fri-Sun: this week is done, so roll forward to next
-    # Monday's week.  This has to match _spread_finder_target_friday above.
-    _wd = run_now.weekday()
-    if _wd <= 3:                           # Mon-Thu
-        monday_dt = run_now - timedelta(days=_wd)
-    else:                                  # Fri-Sun
-        monday_dt = run_now + timedelta(days=(7 - _wd))
-    week_start = monday_dt.strftime("%Y-%m-%d")
+    # Mon-Thu: plan THIS week's spreads; Fri-Sun: roll to next week
+    # (phase1.trading_week.planning_week — the export, chain pre-fetch and
+    # earnings check ask the same question).
+    week_start = planning_week(run_now).key
     sf_ref_date = run_now.date()
 
     # ── Get feature row ──

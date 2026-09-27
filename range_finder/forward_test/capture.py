@@ -156,10 +156,10 @@ def capture_model(prepared, model, week, model_version, now):
 
 
 def trading_week_prior_close(week):
-    from range_finder.trading_week import trading_week
+    from phase1.trading_week import trading_week
     return trading_week(week.monday - timedelta(days=7)).evaluation_close
 
 
 def training_outcome_close(day):
-    from range_finder.trading_week import trading_week
+    from phase1.trading_week import trading_week
     return trading_week(day).evaluation_close

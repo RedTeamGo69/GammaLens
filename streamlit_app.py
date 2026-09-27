@@ -380,11 +380,12 @@ def _build_em_stamp(display_em_label, ticker, run_time, market_ctx) -> str:
 def main():
     # Lazy imports to avoid circular dependency (ui_spread_finder imports from streamlit_app)
     from ui_history import (
-        _is_weekly_freeze_day, _is_monthly_freeze_day,
+        _is_monthly_freeze_day,
         _apply_typed_em_snapshot, _apply_em_snapshot,
     )
     from ui_spread_finder import _render_spread_finder_tab, spread_finder_weekly_em
     from ui_tv_export import render_tv_export_section
+    from phase1.trading_week import is_first_session
 
     inject_global_css()
     inject_pwa_head()
@@ -515,10 +516,11 @@ def main():
     elif "Tomorrow" in mode:
         selected = [dte1] if dte1 else []
     elif "week" in mode:
-        days_to_fri = (4 - run_now.weekday()) % 7
-        fri = (run_now + timedelta(days=days_to_fri)).strftime("%Y-%m-%d")
+        from phase1.trading_week import em_week
+        fri_date = em_week(run_now).friday
+        fri = fri_date.strftime("%Y-%m-%d")
         if future_exps and future_exps[0] > fri:
-            fri = (run_now + timedelta(days=days_to_fri + 7)).strftime("%Y-%m-%d")
+            fri = (fri_date + timedelta(days=7)).strftime("%Y-%m-%d")
         selected = [e for e in future_exps if e <= fri]
     elif "OpEx" in mode:
         cycle_end = find_monthly_expiration(future_exps, run_now.date())
@@ -639,7 +641,7 @@ def main():
     weekly_date_key = get_weekly_em_date_key(run_now)
     weekly_em_snap = _apply_typed_em_snapshot(
         weekly_em_live, is_market_open, spot, ticker,
-        "weekly", weekly_date_key, _is_weekly_freeze_day(run_now),
+        "weekly", weekly_date_key, is_first_session(run_now),
     )
 
     monthly_exp = find_monthly_expiration(data.avail, run_now.date())

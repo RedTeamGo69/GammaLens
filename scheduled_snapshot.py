@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
-from datetime import timedelta
+from phase1.trading_week import is_first_session, setup_week
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _logger = logging.getLogger(__name__)
@@ -164,15 +164,9 @@ def capture_snapshot():
     # trading day — exactly the SPX/XSP weekly-setup cadence. Skipping them on
     # the other weekdays avoids 4 no-op runs/week (and the Neon compute they'd
     # wake). FORCE_WEEKLY_SETUP overrides. Computed here (before the 9:30 wait,
-    # the Tradier chain fetch, and GEX compute) so a skip is cheap. is_monday /
-    # is_tuesday_after_holiday are reused by the weekly-setup block below.
-    is_monday = run_now.weekday() == 0
-    is_tuesday_after_holiday = False
-    if run_now.weekday() == 1:
-        monday = run_now - __import__('datetime').timedelta(days=1)
-        mon_session = get_session_state(CASH_CALENDAR, monday)
-        is_tuesday_after_holiday = mon_session.market_open is None
-    is_week_first_trading_day = is_monday or is_tuesday_after_holiday
+    # the Tradier chain fetch, and GEX compute) so a skip is cheap; the
+    # weekly-setup block below reuses it.
+    is_week_first_trading_day = is_first_session(run_now)
 
     from phase1.ticker_config import get_config as _get_cfg
     if (_get_cfg(ticker).get("category") == "stock"
@@ -391,11 +385,11 @@ def capture_snapshot():
     from phase1.expected_move import find_weekly_expiration, find_monthly_expiration, compute_em_for_expiration
     from phase1.gex_history import get_weekly_em_date_key, get_monthly_em_date_key, get_em_snapshot
 
-    # is_monday / is_tuesday_after_holiday are computed once near the top of
-    # capture_snapshot (the single-name cadence gate needs them before the
-    # market-open wait), so they're reused here rather than recomputed.
+    # is_week_first_trading_day is computed once near the top of
+    # capture_snapshot (the single-name cadence gate needs it before the
+    # market-open wait), so it's reused here rather than recomputed.
     weekly_key = get_weekly_em_date_key(run_now)
-    should_capture_weekly = is_monday or is_tuesday_after_holiday
+    should_capture_weekly = is_week_first_trading_day
     if not should_capture_weekly:
         # Backfill path: no snap yet for this week → capture today.
         try:
@@ -470,8 +464,8 @@ def capture_snapshot():
     # FORCE_WEEKLY_SETUP (set at top of function) lets a manual
     # workflow_dispatch trigger a full rebuild on any day — useful for
     # bootstrapping a fresh Postgres without waiting for Monday's cron.
-    if is_monday or is_tuesday_after_holiday or force_weekly_setup:
-        if force_weekly_setup and not (is_monday or is_tuesday_after_holiday):
+    if is_week_first_trading_day or force_weekly_setup:
+        if force_weekly_setup and not is_week_first_trading_day:
             _logger.info("FORCE_WEEKLY_SETUP=1 — running weekly spread finder setup on non-Monday")
         else:
             _logger.info("Running weekly spread finder setup...")
@@ -481,11 +475,11 @@ def capture_snapshot():
                 ticker, spot, run_now, fred_key, client, avail,
                 levels, regime_info,
             )
-            setup_week = _setup_week_start(run_now)
-            if not _weekly_setup_artifacts_complete(ticker, setup_week):
+            setup_key = setup_week(run_now).key
+            if not _weekly_setup_artifacts_complete(ticker, setup_key):
                 raise RuntimeError(
                     f"Required weekly artifacts were not persisted for "
-                    f"{ticker}/{setup_week}"
+                    f"{ticker}/{setup_key}"
                 )
         except Exception as e:
             _logger.error(f"Weekly spread finder setup failed: {e}")
@@ -540,16 +534,6 @@ def _safe_float(val):
         return f if f == f else None   # NaN != NaN
     except (TypeError, ValueError):
         return None
-
-
-def _setup_week_start(run_now) -> str:
-    """Monday of the week the weekly setup writes (anchor, plan, fit check).
-
-    Always the CURRENT calendar week, including on a forced weekend run —
-    next week's Monday open does not exist yet. Deliberately not
-    get_weekly_em_date_key, which rolls forward on weekends.
-    """
-    return (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
 
 
 def _side_share_q(conn):
@@ -632,7 +616,6 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     """Run the full spread finder pipeline: refresh data, rebuild features,
     save GEX, fit model, log the Monday plan, and persist Monday open + VIX."""
     import yfinance as yf
-    from datetime import timedelta
 
     from range_finder.db import get_connection, init_all_tables
     from range_finder.data_collector import (
@@ -649,11 +632,10 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     )
     from range_finder.har_model import (
         fit_validation_and_production,
-        save_model, MODEL_SPECS, forecast_next_week,
+        save_model, MODEL_SPECS,
         feature_has_enough_data,
     )
     from range_finder.gex_policy import live_spread_feature_columns
-    from range_finder.spread_levels import build_spread_plan, log_spread_plan
     from phase1.ticker_config import (
         get_config, uses_own_har, has_single_name_earnings,
         feature_source_ticker,
@@ -729,7 +711,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     if ticker == "SPX":
         try:
             from range_finder.spread_levels import update_expiration_outcome
-            this_monday = (run_now - timedelta(days=run_now.weekday())).strftime("%Y-%m-%d")
+            this_monday = setup_week(run_now).key
             cur = conn.cursor()
             cur.execute(
                 "SELECT week_start FROM spread_log "
@@ -873,8 +855,8 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         except Exception:
             pass
 
-        monday = run_now - timedelta(days=run_now.weekday())
-        week_start = _setup_week_start(run_now)
+        week = setup_week(run_now)
+        week_start = week.key
 
         # Anchor to the week's FIRST TRADING SESSION, not run_now.date().
         # On a normal Monday (or Tuesday-after-holiday) cron those are the
@@ -886,17 +868,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         # mid-week. Resolving the first session off the exchange calendar keeps
         # the anchor pinned to Monday (or the true first trading day) regardless
         # of when the job runs.
-        anchor_date = monday.date()
-        try:
-            from phase1.market_clock import get_schedule
-            from phase1.config import CASH_CALENDAR
-            _friday = (monday + timedelta(days=4)).strftime("%Y-%m-%d")
-            _week_sched = get_schedule(CASH_CALENDAR, week_start, _friday)
-            if not _week_sched.empty:
-                anchor_date = _week_sched.index[0].date()
-        except Exception as _e:
-            _logger.warning(f"  Anchor-date calendar lookup failed ({_e}); "
-                            f"using Monday {anchor_date}")
+        anchor_date = week.first_session_day
 
         monday_open, monday_vix, open_source = capture_and_save_monday_anchor(
             conn, ticker, week_start, anchor_date,
@@ -913,7 +885,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # ── Step 5: Log this week's plan for the calibration audit (SPX only) ──
     if ticker == "SPX" and _cal_fit is not None:
         try:
-            _log_calibration_plan(conn, df_feat, _cal_fit, _setup_week_start(run_now),
+            _log_calibration_plan(conn, df_feat, _cal_fit, setup_week(run_now).key,
                                   monday_open, monday_vix, spot,
                                   run_date=run_now.date(), anchor_date=anchor_date)
         except Exception as e:

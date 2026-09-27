@@ -5,7 +5,7 @@ These helpers freeze the daily / weekly / OpEx-cycle expected move at the
 appropriate session start, persist the captured value to Postgres, and restore
 it on subsequent renders so the chart's EM markers stay stable through each
 session. Imported by `streamlit_app.py` (daily/weekly/monthly freeze) and
-`ui_spread_finder.py` (Monday-open spot freeze via `_is_weekly_freeze_day`).
+`ui_spread_finder.py`. The weekly freeze day is phase1.trading_week.is_first_session.
 """
 from __future__ import annotations
 
@@ -26,17 +26,6 @@ def _is_trading_day(dt_obj):
     sess = get_session_state(CASH_CALENDAR, dt_obj if hasattr(dt_obj, 'hour') else None)
     # If market_open is None, the schedule was empty → holiday
     return sess.market_open is not None
-
-
-def _is_weekly_freeze_day(now_et):
-    """True if today is Monday (or Tuesday if Monday was a holiday)."""
-    if now_et.weekday() == 0:  # Monday
-        return True
-    if now_et.weekday() == 1:  # Tuesday — check if Monday was a holiday
-        monday = now_et - timedelta(days=1)
-        if not _is_trading_day(monday):
-            return True
-    return False
 
 
 def _is_monthly_freeze_day(now_et):

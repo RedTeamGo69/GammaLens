@@ -21,7 +21,7 @@ def main():
     args = parser.parse_args()
     from range_finder.forward_test.config import utcnow, methodology, UNIVERSE, MODELS, COHORT
     from range_finder.forward_test.store import Store
-    from range_finder.trading_week import trading_week
+    from phase1.trading_week import trading_week
     store = Store.postgres(database_url())
     try:
         if args.command == "migrate":

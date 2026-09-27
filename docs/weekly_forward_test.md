@@ -130,7 +130,7 @@ To pause after activation, set `FORWARD_TEST_ENABLED=false`. Leave the immutable
 ## Changed files and preserved work
 
 - Entry point and UI: `forward_test.py`, `ui_forward_test.py`, `streamlit_app.py`, `ui_theme.py`.
-- Shared production extraction: `range_finder/recommendations.py`, `range_finder/trading_week.py`, `range_finder/har_model.py`, `range_finder/feature_builder.py`, `range_finder/event_calendars.py`, `ui_spread_finder.py`. The expiry helper now requires the actual listed final-session date instead of its old +/-3-day fallback.
+- Shared production extraction: `range_finder/recommendations.py`, `phase1/trading_week.py`, `range_finder/har_model.py`, `range_finder/feature_builder.py`, `range_finder/event_calendars.py`, `ui_spread_finder.py`. The expiry helper now requires the actual listed final-session date instead of its old +/-3-day fallback.
 - Contract audit metadata: `phase1/data_client.py`.
 - New study package: `range_finder/forward_test/{__init__,config,provider,capture,store,runner,scoring,results}.py`.
 - Schema: `migrations/001_forward_test.sql`, `migrations/002_forward_test_immutability.sql`.

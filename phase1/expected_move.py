@@ -117,9 +117,8 @@ def find_weekly_expiration(avail_exps: list[str], ref_date: date) -> str | None:
     when the week has no remaining listed expiry is honest: the weekly EM is
     genuinely unavailable, and callers render "na" instead of a lie.
     """
-    days_to_fri = (4 - ref_date.weekday()) % 7
-    friday_date = ref_date + timedelta(days=days_to_fri)
-    friday = friday_date.strftime("%Y-%m-%d")
+    from phase1.trading_week import em_week
+    friday = em_week(ref_date).friday.strftime("%Y-%m-%d")
 
     # Exact Friday match
     if friday in avail_exps:

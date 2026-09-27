@@ -13,7 +13,7 @@ import pytest
 from range_finder.forward_test.history_policy import (CATALOG, OHLC, SYMBOLS,
     HistoryUnavailable, _choose, _frame, price_snapshot, validated_history)
 from range_finder.forward_test.provider import valid_ohlc
-from range_finder.trading_week import NY, trading_week
+from phase1.trading_week import NY, trading_week
 
 
 @lru_cache

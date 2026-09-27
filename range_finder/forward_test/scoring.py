@@ -10,7 +10,7 @@ never establish absence. Whole-week daily extremes are labeled separately.
 """
 from datetime import datetime, timedelta
 
-from range_finder.trading_week import NY
+from phase1.trading_week import NY
 from .config import DATA_READY_MINUTES
 from .provider import valid_ohlc, finite_price
 

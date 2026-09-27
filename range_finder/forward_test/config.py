@@ -52,13 +52,13 @@ def methodology():
     """Content identity excludes unrelated UI/research work and fit dates."""
     root = Path(__file__).resolve().parents[2]
     paths = ["har_model.py", "feature_builder.py", "spread_levels.py",
-             "gex_policy.py", "recommendations.py", "trading_week.py",
+             "gex_policy.py", "recommendations.py",
              "conformal.py", "event_calendars.py", "forward_test/capture.py",
              "forward_test/provider.py", "forward_test/config.py",
              "forward_test/history_policy.py"]
     hashes = {p: sha256((root / "range_finder" / p).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
               for p in paths}
-    for p in ("phase1/ticker_config.py", "phase1/quote_filters.py"):
+    for p in ("phase1/ticker_config.py", "phase1/quote_filters.py", "phase1/trading_week.py"):
         hashes[p] = sha256((root / p).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     config = {"protocol": 1, "universe": UNIVERSE, "models": MODELS,
               "capture_minutes_after_open": [0, 45], "tracking_policy": "first_session_open",

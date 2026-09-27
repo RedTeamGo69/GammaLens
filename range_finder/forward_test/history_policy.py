@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
 
-from range_finder.trading_week import NY
+from phase1.trading_week import NY
 
 POLICY_VERSION = 'tradier-reviewed-whole-bars-v1'
 TRADIER_POLICY_VERSION = 'tradier-primary-history-v2'
@@ -166,7 +166,7 @@ def _primary_frames(ticker, start, end, daily_start, primary_weekly, primary_dai
         _fail('weekly history must start at the beginning of its exchange week')
     # Reject an incomplete final week; daily closes from an in-progress week
     # must not be promoted into a completed weekly training outcome.
-    from range_finder.trading_week import trading_week
+    from phase1.trading_week import trading_week
     if trading_week(end).sessions[-1].day != end:
         _fail('history ends before the final exchange session of its week')
     if as_of.tzinfo is None or trading_week(end).evaluation_close > as_of:

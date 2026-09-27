@@ -498,7 +498,7 @@ def build_features(conn, exclude_covid: bool = True,
         last_bar_week + pd.Timedelta(days=4, hours=16)
     ).tz_localize("America/New_York")
     if as_of is not None:
-        from range_finder.trading_week import trading_week
+        from phase1.trading_week import trading_week
         _last_bar_friday_close = trading_week(last_bar_week.date()).evaluation_close
     last_bar_is_complete = (as_of if as_of is not None else _ny_now()) >= _last_bar_friday_close
 

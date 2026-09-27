@@ -83,14 +83,3 @@ def test_off_schedule_run_does_not_overwrite_mondays_plan(plan_calls):
     )
     assert logged is False
     assert plan_calls["logged"] == []
-
-
-def test_setup_week_start_is_the_week_the_setup_writes():
-    """The post-check must look where the setup wrote: on a forced weekend
-    run that is the week just ended, not the upcoming EM week."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    ny = ZoneInfo("America/New_York")
-    assert snapshot._setup_week_start(datetime(2026, 6, 15, 9, 45, tzinfo=ny)) == "2026-06-15"
-    assert snapshot._setup_week_start(datetime(2026, 6, 17, 9, 45, tzinfo=ny)) == "2026-06-15"
-    assert snapshot._setup_week_start(datetime(2026, 6, 20, 11, 0, tzinfo=ny)) == "2026-06-15"

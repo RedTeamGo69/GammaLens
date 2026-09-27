@@ -10,7 +10,10 @@ from phase1.trading_week import trading_week
 from range_finder.forward_test.provider import frame_records
 
 REFERENCES = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.,
-              "META": 600., "TSLA": 350., "HOOD": 100.}
+              "META": 600., "TSLA": 350., "HOOD": 100.,
+              "NVDA": 225., "GOOGL": 345., "MSFT": 515., "AMZN": 250., "AVGO": 350., "MU": 1080.,
+              "WMT": 108., "COST": 920., "XOM": 160., "CVX": 205., "JPM": 345., "BAC": 57.,
+              "UNH": 375., "GEV": 960., "GE": 325.}
 
 
 class Clock:

@@ -26,7 +26,11 @@ from .history_policy import validated_tradier_history
 # Never demand nonexistent pre-IPO bars or treat the two-day IPO week as a full
 # weekly training target. All subsequent exchange sessions are still required.
 # https://robinhood.com/us/en/newsroom/welcome-to-the-new-wall-street/
-FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2)}
+# GEV began regular-way trading at the 2024-04-02 open after the GE spin-off.
+# Tradier also carries when-issued bars from 2024-03-27; those predate the
+# listed stock, so its first full week is April 8.
+# https://www.gevernova.com/news/press-releases/ge-vernova-completes-spin-off-begins-trading-new-york-stock-exchange
+FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8)}
 
 
 def finite_price(value):

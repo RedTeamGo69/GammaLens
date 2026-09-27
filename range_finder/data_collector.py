@@ -11,7 +11,6 @@
 # =============================================================================
 
 import math
-import os
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -24,25 +23,16 @@ from phase1 import credentials
 # CONFIG
 # =============================================================================
 
-# Read FRED key from Streamlit secrets or environment
-FRED_API_KEY = ""
-try:
-    import streamlit as st
-    FRED_API_KEY = st.secrets.get("FRED_API_KEY", "")
-except Exception:
-    pass
-if not FRED_API_KEY:
-    FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
-
-
 def fred_key_status() -> str:
     """Human-readable description of where the FRED key was (or wasn't)
     resolved from, without leaking the key itself. Use in UI captions /
     log lines so "is my key actually loaded?" is diagnosable without
-    having to crack open the secrets panel."""
-    if not FRED_API_KEY:
+    having to crack open the secrets panel. Resolved per call (the key used
+    to be frozen at import)."""
+    key = credentials.fred_api_key()
+    if not key:
         return "not set (neither st.secrets['FRED_API_KEY'] nor $FRED_API_KEY)"
-    return f"configured ({len(FRED_API_KEY)} chars; FRED keys are normally 32)"
+    return f"configured ({len(key)} chars; FRED keys are normally 32)"
 
 # How many years of history to pull on initial load
 HISTORY_YEARS = 6
@@ -680,7 +670,7 @@ def fetch_fred_macro(years: int = HISTORY_YEARS) -> pd.DataFrame:
     """
     from fredapi import Fred
 
-    fred  = Fred(api_key=FRED_API_KEY)
+    fred  = Fred(api_key=credentials.fred_api_key())
     end   = datetime.today()
     start = end - timedelta(days=years * 365 + 30)
 

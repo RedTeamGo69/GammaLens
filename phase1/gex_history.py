@@ -14,7 +14,6 @@ finder's frozen expected-move band), so it remains.
 """
 from __future__ import annotations
 
-import os
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -23,51 +22,14 @@ NY_TZ = ZoneInfo("America/New_York")
 _logger = logging.getLogger(__name__)
 
 
-# ── Connection string resolution ──
-
-_pg_conn_str = None
-
-try:
-    import streamlit as st
-    _pg_conn_str = st.secrets.get("DATABASE_URL", "")
-except Exception:
-    pass
-
-if not _pg_conn_str:
-    _pg_conn_str = os.environ.get("DATABASE_URL", "")
-
-
-def _require_postgres():
-    """Raise a clear error if DATABASE_URL is missing or psycopg2 is unavailable."""
-    if not _pg_conn_str:
-        raise RuntimeError(
-            "DATABASE_URL is not set. This app requires Postgres — set DATABASE_URL "
-            "in Streamlit secrets or as an environment variable."
-        )
-    try:
-        import psycopg2  # noqa: F401
-    except ImportError as e:
-        raise RuntimeError(
-            "psycopg2 is not installed. This app requires Postgres — "
-            "`pip install psycopg2-binary`."
-        ) from e
-
-
 # ── Postgres helpers ──
 
 def _pg_get_connection():
-    _require_postgres()
-    import psycopg2
-    conn = psycopg2.connect(_pg_conn_str, sslmode="require")
-    conn.autocommit = True
-    return conn
+    from phase1.pg import connect
+    return connect()
 
 
 # ── Public API ──
-
-def get_backend():
-    """Legacy compatibility shim. Always returns 'postgres' now."""
-    return "postgres"
 
 
 # One-time schema init flag — `save_em_snapshot` previously issued a

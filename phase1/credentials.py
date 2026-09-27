@@ -32,3 +32,9 @@ def fred_api_key() -> str:
 
 def database_url() -> str:
     return secret("DATABASE_URL")
+
+
+def forward_test_database_url() -> str:
+    """The forward study's database: its own FORWARD_TEST_DATABASE_URL when
+    set, else the app's DATABASE_URL."""
+    return secret("FORWARD_TEST_DATABASE_URL") or database_url()

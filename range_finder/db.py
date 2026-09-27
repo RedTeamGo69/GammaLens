@@ -7,7 +7,6 @@
 # that's purely a convenience for the query authors, NOT a sqlite fallback.
 # =============================================================================
 
-import os
 import time
 import logging
 
@@ -20,43 +19,6 @@ log = logging.getLogger(__name__)
 # is alive. The per-cursor() exception fallback below catches the rare
 # case where Neon dropped the connection between probes.
 _ALIVE_PROBE_INTERVAL_SECONDS = 60.0
-
-
-# ---------------------------------------------------------------------------
-# Connection string resolution
-# ---------------------------------------------------------------------------
-
-_pg_conn_str = None
-
-try:
-    import streamlit as st
-    _pg_conn_str = st.secrets.get("DATABASE_URL", "")
-except Exception:
-    pass
-
-if not _pg_conn_str:
-    _pg_conn_str = os.environ.get("DATABASE_URL", "")
-
-
-def _require_postgres():
-    """Raise a clear error if DATABASE_URL is missing or psycopg2 is unavailable."""
-    if not _pg_conn_str:
-        raise RuntimeError(
-            "DATABASE_URL is not set. This app requires Postgres — set DATABASE_URL "
-            "in Streamlit secrets or as an environment variable."
-        )
-    try:
-        import psycopg2  # noqa: F401
-    except ImportError as e:
-        raise RuntimeError(
-            "psycopg2 is not installed. This app requires Postgres — "
-            "`pip install psycopg2-binary`."
-        ) from e
-
-
-def get_backend() -> str:
-    """Return the active backend name. Always 'postgres' now that sqlite is removed."""
-    return "postgres"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +47,7 @@ def _to_float(v):
 # ---------------------------------------------------------------------------
 # Postgres connection wrapper
 # ---------------------------------------------------------------------------
+
 
 class PGCursor:
     """Wraps a psycopg2 cursor, translating ? → %s in queries."""
@@ -147,8 +110,8 @@ class PGConnectionWrapper:
         self._connect()
 
     def _connect(self):
-        import psycopg2
-        self._conn = psycopg2.connect(self._conn_str, sslmode="require")
+        from phase1.pg import connect
+        self._conn = connect(self._conn_str)
         self._last_alive_check_ts = time.monotonic()
         # autocommit=True so read-only paths (e.g. saved_models / model_features
         # SELECTs from the Spread Finder) don't leave the connection sitting in
@@ -158,8 +121,7 @@ class PGConnectionWrapper:
         # statement UPSERTs with ON CONFLICT DO UPDATE (see data_collector.py,
         # feature_builder.py, model_persistence.py, spread_persistence.py), so
         # statement-level autocommit is safe — the trailing `conn.commit()`
-        # calls become harmless no-ops.
-        self._conn.autocommit = True
+        # calls become harmless no-ops. (phase1.pg.connect's default.)
 
     def _ensure_alive(self):
         # Cheap local check first (no roundtrip): if the wrapper has no
@@ -239,8 +201,8 @@ class PGConnectionWrapper:
 
 def get_connection():
     """Return a Postgres connection wrapped for placeholder translation."""
-    _require_postgres()
-    wrapped = PGConnectionWrapper(_pg_conn_str)
+    from phase1.pg import require_database_url
+    wrapped = PGConnectionWrapper(require_database_url())
     log.info("Range finder connected to Postgres")
     return wrapped
 

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from models import GEXData
+from phase1 import credentials
 from phase1.trading_week import planning_week
 
 from range_finder.gex_bridge import (
@@ -24,7 +25,6 @@ from range_finder.data_collector import (
     get_weekly_spx as rf_get_weekly_spx,
     fred_key_status as rf_fred_key_status,
     live_vol_close as rf_live_vol_close,
-    FRED_API_KEY as RF_FRED_API_KEY,
 )
 from range_finder.feature_builder import (
     build_features as rf_build_features,
@@ -968,7 +968,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 # a missing key whenever FRED itself had a 500. Also
                 # surface the key status so you can eyeball whether
                 # Streamlit actually picked up the secret.
-                if not RF_FRED_API_KEY:
+                if not credentials.fred_api_key():
                     st.warning(
                         "FRED fetch skipped: FRED_API_KEY is not set. "
                         "Add it under Streamlit Cloud → Manage app → Secrets, "

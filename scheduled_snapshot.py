@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from phase1 import credentials
 from phase1.trading_week import is_first_session, setup_week
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -97,7 +98,6 @@ def capture_snapshot():
     """Run the full GEX pipeline and save a snapshot + EM to Postgres."""
 
     # ── Validate env ──
-    from phase1 import credentials
     tradier_token = credentials.tradier_token()
     if not tradier_token:
         _logger.error("TRADIER_TOKEN not set — aborting")
@@ -108,7 +108,7 @@ def capture_snapshot():
         _logger.error("DATABASE_URL not set — nowhere to save snapshot")
         sys.exit(1)
 
-    fred_key = os.environ.get("FRED_API_KEY", "")
+    fred_key = credentials.fred_api_key()
     ticker = os.environ.get("TICKER", "SPX")
 
     # ── Imports (after env check so errors are clear) ──
@@ -618,7 +618,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
         populate_earnings_flags,
         fetch_fred_macro, save_fred_macro,
         build_event_flags,
-        fred_key_status, FRED_API_KEY,
+        fred_key_status,
     )
     from range_finder.feature_builder import build_features
     from range_finder.gex_bridge import (
@@ -679,7 +679,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
             save_fred_macro(conn, df_macro)
             _logger.info(f"  FRED macro: {len(df_macro)} rows")
         except Exception as e:
-            if not FRED_API_KEY:
+            if not credentials.fred_api_key():
                 _logger.warning("  FRED fetch skipped: FRED_API_KEY not set")
             else:
                 _logger.warning(

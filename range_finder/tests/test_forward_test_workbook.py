@@ -21,7 +21,7 @@ from io import BytesIO
 import openpyxl
 import pytest
 
-import ui_spread_finder as usf
+import range_finder.forward_workbook as fw
 
 WEEK = "2026-07-06"   # a Monday
 
@@ -38,7 +38,7 @@ def _full_bands():
 
 @pytest.fixture(scope="module")
 def workbook():
-    data = usf._build_forward_test_workbook(
+    data = fw.build_forward_test_workbook(
         week_start=WEEK, model_choice="M3_extended",
         rows=[_row("SPX", _full_bands()),
               _row("QQQ", _full_bands()),
@@ -50,33 +50,33 @@ def workbook():
 def test_sheets_are_scoreboard_week_tab_and_blank(workbook):
     # Bookends are gone — the Scoreboard finds week tabs by name now, and
     # unpasted weeks resolve to the empty FTBlank utility sheet.
-    assert workbook.sheetnames == ["Scoreboard", WEEK, usf._FT_BLANK_SHEET]
+    assert workbook.sheetnames == ["Scoreboard", WEEK, fw.FT_BLANK_SHEET]
 
 
 def test_blank_sheet_scan_region_is_empty(workbook):
-    bk = workbook[usf._FT_BLANK_SHEET]
-    for r in range(usf._FT_FIRST_DATA_ROW, usf._FT_LAST_DATA_ROW + 1):
+    bk = workbook[fw.FT_BLANK_SHEET]
+    for r in range(fw.FT_FIRST_DATA_ROW, fw.FT_LAST_DATA_ROW + 1):
         for col in "BOPQRS":
             assert bk[f"{col}{r}"].value is None
 
 
 def test_sanitizer_maps_missing_tabs_to_blank_sheet(workbook):
     sb = workbook["Scoreboard"]
-    first = usf._FT_SB_FIRST_ROW
-    n = len(usf._ft_monday_tab_names(WEEK))
+    first = fw.FT_SB_FIRST_ROW
+    n = len(fw.monday_tab_names(WEEK))
     for k in (0, n - 1):                       # first and last listed Monday
         r = first + k
         assert sb[f"L{r}"].value == (
             f'=IF(ISREF(INDIRECT("\'"&$M{r}&"\'!$A$1")),'
-            f'$M{r},"{usf._FT_BLANK_SHEET}")'
+            f'$M{r},"{fw.FT_BLANK_SHEET}")'
         )
     assert sb.column_dimensions["L"].hidden
 
 
 def test_monday_tab_names_cover_back_and_forward_horizon():
-    names = usf._ft_monday_tab_names(WEEK)
-    assert len(names) == usf._FT_SB_WEEKS_BACK + usf._FT_SB_WEEKS_FWD + 1
-    assert names[usf._FT_SB_WEEKS_BACK] == WEEK
+    names = fw.monday_tab_names(WEEK)
+    assert len(names) == fw.FT_SB_WEEKS_BACK + fw.FT_SB_WEEKS_FWD + 1
+    assert names[fw.FT_SB_WEEKS_BACK] == WEEK
     mondays = [date.fromisoformat(n) for n in names]
     assert all(d.weekday() == 0 for d in mondays)
     assert all((b - a) == timedelta(weeks=1) for a, b in zip(mondays, mondays[1:]))
@@ -84,8 +84,8 @@ def test_monday_tab_names_cover_back_and_forward_horizon():
 
 def test_scoreboard_prelists_names_as_text(workbook):
     sb = workbook["Scoreboard"]
-    first = usf._FT_SB_FIRST_ROW
-    names = usf._ft_monday_tab_names(WEEK)
+    first = fw.FT_SB_FIRST_ROW
+    names = fw.monday_tab_names(WEEK)
     got = [sb[f"M{first + k}"].value for k in range(len(names))]
     assert got == names
     assert sb[f"M{first}"].number_format == "@"       # never a date serial
@@ -94,7 +94,7 @@ def test_scoreboard_prelists_names_as_text(workbook):
 
 def test_scoreboard_scores_by_ticker_not_row(workbook):
     sb = workbook["Scoreboard"]
-    r = usf._FT_SB_FIRST_ROW
+    r = fw.FT_SB_FIRST_ROW
     assert sb[f"A{r}"].value == "SPX"
     weeks = sb[f"B{r}"].value
     # Weeks Scored: SUMIF on the Instrument column (B) of every listed tab,
@@ -124,7 +124,7 @@ def test_scoreboard_tier_column_pairings(workbook):
     # Pin the (win, denominator, flag, band-Low) mapping for ALL four tiers —
     # a transposition in any tier must fail loudly, not just tier 1.
     sb = workbook["Scoreboard"]
-    r = usf._FT_SB_FIRST_ROW
+    r = fw.FT_SB_FIRST_ROW
     pairings = [("C", "N", "O", "G"), ("E", "O", "P", "I"),
                 ("G", "P", "Q", "K"), ("I", "Q", "R", "M")]
     for hit_col, (win_col, den_col, flag_col, lo_col) in zip("DFHJ", pairings):
@@ -141,10 +141,10 @@ def test_scoreboard_diagnostics_and_dup_detector(workbook):
     k1 = sb["K1"].value
     # Live tab counter + the two loud warnings for silent failure modes.
     assert k1.startswith('="Week tabs found: "')
-    assert usf._FT_BLANK_SHEET in k1
+    assert fw.FT_BLANK_SHEET in k1
     assert "(2)" in k1 and "TODAY()" in k1
     # Hidden R column flags a duplicate tab Excel renamed to "<Monday> (2)".
-    r = usf._FT_SB_FIRST_ROW
+    r = fw.FT_SB_FIRST_ROW
     assert sb[f"R{r}"].value == (
         f'=IF(ISREF(INDIRECT("\'"&$M{r}&" (2)\'!$A$1")),1,0)'
     )
@@ -156,15 +156,15 @@ def test_scoreboard_protected_with_editable_slots(workbook):
     assert sb.protection.sheet
     # Instrument slots (filled AND blank) must accept typing under protection;
     # everything else — formulas, hidden plumbing — stays locked.
-    for r in (usf._FT_SB_FIRST_ROW, usf._FT_SB_LAST_ROW):
+    for r in (fw.FT_SB_FIRST_ROW, fw.FT_SB_LAST_ROW):
         assert sb[f"A{r}"].protection.locked is False
         assert sb[f"B{r}"].protection.locked is not False
-    assert sb[f"L{usf._FT_SB_FIRST_ROW}"].protection.locked is not False
+    assert sb[f"L{fw.FT_SB_FIRST_ROW}"].protection.locked is not False
 
 
 def test_blank_scoreboard_slots_ship_armed(workbook):
     sb = workbook["Scoreboard"]
-    r = usf._FT_SB_LAST_ROW          # far below the 3 exported tickers
+    r = fw.FT_SB_LAST_ROW          # far below the 3 exported tickers
     assert sb[f"A{r}"].value is None
     for col in "BCDEFGHIJ":
         assert str(sb[f"{col}{r}"].value).startswith(f'=IF($A{r}="",""')
@@ -172,7 +172,7 @@ def test_blank_scoreboard_slots_ship_armed(workbook):
 
 def test_scoreboard_all_row_pools_all_slots(workbook):
     sb = workbook["Scoreboard"]
-    ar, lo, hi = usf._FT_SB_ALL_ROW, usf._FT_SB_FIRST_ROW, usf._FT_SB_LAST_ROW
+    ar, lo, hi = fw.FT_SB_ALL_ROW, fw.FT_SB_FIRST_ROW, fw.FT_SB_LAST_ROW
     assert sb[f"A{ar}"].value == "ALL"
     assert sb[f"B{ar}"].value == f"=SUM(B{lo}:B{hi})"
     assert sb[f"D{ar}"].value == f'=IF(N{ar}=0,"—",C{ar}/N{ar})'
@@ -180,7 +180,7 @@ def test_scoreboard_all_row_pools_all_slots(workbook):
 
 def test_week_tab_flags_guard_missing_bands_and_text(workbook):
     ws = workbook[WEEK]
-    r = usf._FT_FIRST_DATA_ROW
+    r = fw.FT_FIRST_DATA_ROW
     # COUNT counts numbers only, so the guard covers BOTH failure modes: a
     # band-less tier stays blank (unguarded compare against empty cells gives
     # a false 0) and a TEXT close/band stays blank (any text compares above
@@ -200,19 +200,19 @@ def test_week_tab_rows_ship_armed_to_scan_edge(workbook):
     # column B) so a hand-typed instrument row scores like an exported one,
     # and the conditional formatting colours the whole armed window.
     ws = workbook[WEEK]
-    r = usf._FT_LAST_DATA_ROW                  # far below the 3 exported rows
+    r = fw.FT_LAST_DATA_ROW                  # far below the 3 exported rows
     assert ws[f"B{r}"].value is None
     for flag_col in "OPQR":
         assert str(ws[f"{flag_col}{r}"].value).startswith(f'=IF(OR($B{r}=""')
     assert str(ws[f"S{r}"].value).startswith(f'=IF(OR($B{r}=""')
     cf_ranges = {str(rng) for cf in ws.conditional_formatting for rng in cf.sqref.ranges}
-    assert f"O{usf._FT_FIRST_DATA_ROW}:R{usf._FT_LAST_DATA_ROW}" in cf_ranges
+    assert f"O{fw.FT_FIRST_DATA_ROW}:R{fw.FT_LAST_DATA_ROW}" in cf_ranges
 
 
 def test_week_tab_protected_with_editable_data_cells(workbook):
     ws = workbook[WEEK]
     assert ws.protection.sheet
-    r = usf._FT_FIRST_DATA_ROW
+    r = fw.FT_FIRST_DATA_ROW
     # Data entry (ticker, ref, close, bands, notes) stays editable — enough
     # to hand-add a full instrument row; flags/Scored? and structure locked.
     for col in "BCDEFGHIJKLMNT":
@@ -226,14 +226,14 @@ def test_week_close_column_validates_numeric(workbook):
     dvs = list(ws.data_validations.dataValidation)
     assert any(
         dv.type == "decimal"
-        and f"E{usf._FT_FIRST_DATA_ROW}:E{usf._FT_LAST_DATA_ROW}" in str(dv.sqref)
+        and f"E{fw.FT_FIRST_DATA_ROW}:E{fw.FT_LAST_DATA_ROW}" in str(dv.sqref)
         for dv in dvs
     )
 
 
 def test_blank_sheet_is_protected(workbook):
     # A stray row typed into FTBlank would be counted once per missing week.
-    assert workbook[usf._FT_BLANK_SHEET].protection.sheet
+    assert workbook[fw.FT_BLANK_SHEET].protection.sheet
 
 
 def test_week_tab_is_self_contained(workbook):
@@ -249,17 +249,17 @@ def test_week_tab_is_self_contained(workbook):
 
 def test_error_row_carries_note_and_no_bands(workbook):
     ws = workbook[WEEK]
-    r = usf._FT_FIRST_DATA_ROW + 2   # AMD
+    r = fw.FT_FIRST_DATA_ROW + 2   # AMD
     assert ws[f"B{r}"].value == "AMD"
     assert "data collection failed" in ws[f"T{r}"].value
     assert all(ws[f"{c}{r}"].value is None for c in "GHIJKLMN")
 
 
 def test_week_rows_capped_at_scan_window():
-    many = [_row(f"T{i:02d}", _full_bands()) for i in range(usf._FT_MAX_TICKERS + 5)]
-    data = usf._build_forward_test_workbook(
+    many = [_row(f"T{i:02d}", _full_bands()) for i in range(fw.FT_MAX_TICKERS + 5)]
+    data = fw.build_forward_test_workbook(
         week_start=WEEK, model_choice="M2_vix", rows=many)
     wb = openpyxl.load_workbook(BytesIO(data))
     ws = wb[WEEK]
-    assert ws[f"B{usf._FT_LAST_DATA_ROW}"].value == f"T{usf._FT_MAX_TICKERS - 1:02d}"
-    assert ws[f"B{usf._FT_LAST_DATA_ROW + 1}"].value is None
+    assert ws[f"B{fw.FT_LAST_DATA_ROW}"].value == f"T{fw.FT_MAX_TICKERS - 1:02d}"
+    assert ws[f"B{fw.FT_LAST_DATA_ROW + 1}"].value is None

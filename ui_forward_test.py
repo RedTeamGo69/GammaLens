@@ -39,7 +39,7 @@ def deployed_revision():
 
 def render_forward_test(rows=None, runs=None, studies=None):
     st.title("Forward Test")
-    st.caption("Frozen weekly predictions for SPX, SPY, AAPL, AMD, META, TSLA and HOOD. "
+    st.caption(f"Frozen weekly predictions for {', '.join(UNIVERSE[:-1])} and {UNIVERSE[-1]}. "
                "Observational results; no trades are submitted.")
     if rows is None:
         try:

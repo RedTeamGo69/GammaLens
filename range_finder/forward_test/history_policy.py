@@ -23,7 +23,9 @@ OHLC = ('open', 'high', 'low', 'close')
 CATALOG = Path(__file__).with_name('history_resolutions.json')
 SYMBOLS = {'SPX': ('^GSPC', 'INDEX'), 'SPY': ('SPY', 'ETF'),
            'AAPL': ('AAPL', 'EQUITY'), 'AMD': ('AMD', 'EQUITY'),
-           'META': ('META', 'EQUITY'), 'TSLA': ('TSLA', 'EQUITY'), 'HOOD': ('HOOD', 'EQUITY')}
+           'META': ('META', 'EQUITY'), 'TSLA': ('TSLA', 'EQUITY'), 'HOOD': ('HOOD', 'EQUITY'),
+           **{t: (t, 'EQUITY') for t in ('NVDA', 'GOOGL', 'MSFT', 'AMZN', 'AVGO', 'MU', 'WMT', 'COST',
+                                         'XOM', 'CVX', 'JPM', 'BAC', 'UNH', 'GEV', 'GE')}}
 
 
 class HistoryUnavailable(ValueError):

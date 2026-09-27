@@ -7,10 +7,23 @@ from pathlib import Path
 from .history_policy import TRADIER_POLICY_VERSION
 
 LEGACY_UNIVERSE = ("SPX", "SPY", "AAPL", "AMD")
-UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
+OPEN_UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
+# v4 sector balance, chosen 2026-09-27: the largest names per GICS sector plus
+# the top ten by market cap, *among names whose Friday-close weekly chain had
+# liquid options* (ATM spread <= ~20% of mid, >= ~3k contracts). That rule is
+# why BRK.B, V, LIN, the REITs and the utilities are absent: no weeklies or
+# 20-70% spreads. SPCX (listed 2026-06) lacks history. LLY and FCX passed the
+# liquidity screen but Tradier serves an impossible daily bar inside the training
+# window (LLY 2022-02-11 close < low; FCX 2023-03-06 open > high), so the
+# fail-closed history policy would miss every capture until ~2028-29. Rerun the
+# screen before changing this; don't hand-add a name.
+BALANCED_ADDITIONS = ("NVDA", "GOOGL", "MSFT", "AMZN", "AVGO", "MU",  # top-10 market cap
+                      "WMT", "COST", "XOM", "CVX", "JPM", "BAC",      # staples, energy, financials
+                      "UNH", "GEV", "GE")                             # health, industrials
+UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS)
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v3-open"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v4-balanced"
 SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14

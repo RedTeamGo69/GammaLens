@@ -47,8 +47,6 @@ def _cached_tv_har_pi(week_start: str, model_choice: str,
     tickers without a saved fit / weekly setup).
     """
     try:
-        import pandas as pd
-
         from phase1.ticker_config import (feature_source_ticker,
                                           is_spread_finder_eligible)
         from range_finder.conformal import maybe_apply_conformal
@@ -69,13 +67,11 @@ def _cached_tv_har_pi(week_start: str, model_choice: str,
         if df_feat.empty:
             return None
 
-        # A scaled mini (XSP→SPX) may have its fit saved under either key.
+        from range_finder.recommendations import load_saved_fit
         try:
-            payload = _cached_rf_load_model(model_choice, ticker)
+            payload, _ = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
         except Exception:
-            if src == ticker:
-                return None
-            payload = _cached_rf_load_model(model_choice, src)
+            return None
 
         # A pre-mitigation M4 fit may still be present in Postgres. Omitting
         # the HAR band is safer than exporting a recommendation influenced by
@@ -83,9 +79,12 @@ def _cached_tv_har_pi(week_start: str, model_choice: str,
         if uses_disabled_gex_feature(payload["feature_cols"]):
             return None
 
-        wk_ts = pd.Timestamp(week_start)
-        feature_row = (df_feat.loc[wk_ts] if wk_ts in df_feat.index
-                       else df_feat.iloc[-1])
+        # Same serving rule as the tab: no band off a missing or stale row
+        # (the old fallback exported last week's row as this week's band).
+        from range_finder.feature_builder import select_forecast_row
+        feature_row, blocked = select_forecast_row(df_feat, week_start)
+        if blocked is not None:
+            return None
 
         ref = None
         setup = _cached_weekly_setup(conn, week_start, ticker)

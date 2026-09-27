@@ -5,13 +5,11 @@ Extracted from streamlit_app.py.
 """
 from __future__ import annotations
 
-from datetime import date as date_cls, datetime, timedelta, timezone
+from datetime import date as date_cls, datetime, timedelta
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-from theme import COLORS
 from models import GEXData
 from phase1.trading_week import is_first_session, planning_week
 
@@ -37,25 +35,17 @@ from range_finder.feature_builder import (
 from range_finder.gex_policy import (
     GEX_LIVE_SPREAD_INFLUENCE_ENABLED,
     GEX_NORMALIZED_FEATURE,
-    live_spread_feature_columns,
     uses_disabled_gex_feature,
 )
 from range_finder.har_model import (
-    MODEL_SPECS as RF_MODEL_SPECS, PI_ALPHA as RF_PI_ALPHA,
+    MODEL_SPECS as RF_MODEL_SPECS,
     GEX_MIN_WEEKS_FOR_FIT as RF_GEX_MIN_WEEKS,
     feature_has_enough_data as rf_feature_has_enough_data,
-    production_feature_columns,
-    fit_validation_and_production as rf_fit_validation_and_production,
-    forecast_next_week as rf_forecast_next_week,
     estimate_side_share_quantile as rf_estimate_side_share_quantile,
-    save_model as rf_save_model, load_model as rf_load_model,
 )
+from range_finder.model_persistence import load_model as rf_load_model
 from range_finder.spread_levels import (
-    build_spread_plan as rf_build_spread_plan,
-    build_spread_tiers as rf_build_spread_tiers,
-    update_outcome as rf_update_outcome,
     MIN_CREDIT_RATIO,
-    TICKER_CONFIG as RF_TICKER_CONFIG,
     SpreadPlan,
     SpreadTier,
 )
@@ -67,9 +57,10 @@ from range_finder.spread_levels import (
 
 from range_finder.recommendations import (
     build_recommendations, displayed_tier, tier_bands, chain_entry_to_quotes,
+    FitReport, fit_and_save_specs, load_saved_fit,
 )
 
-from theme import SF_BG, SF_BULL, SF_BEAR, SF_NEUT, SF_WARN, SF_CARD
+from theme import SF_BULL, SF_BEAR, SF_NEUT
 
 
 @st.cache_resource(ttl=3600)
@@ -514,7 +505,7 @@ def _prior_week_close(conn, ticker: str, week_start: str):
     doesn't exist in that table — so Prev Close was silently blank on
     every export.
     """
-    from phase1.ticker_config import uses_own_har, get_config, price_scale_divisor
+    from phase1.ticker_config import uses_own_har, price_scale_divisor
     try:
         if uses_own_har(ticker):
             from range_finder.data_collector import get_weekly_underlying
@@ -565,22 +556,18 @@ def _collect_week_bands_for_ticker(ticker: str, model_choice: str, week_start: s
             out["error"] = "no feature data — run Weekly Setup on this ticker"
             return out
 
-        # Saved fit for the active spec. A scaled mini shares its parent's fit;
-        # the Monday cron may save under either key, so try the ticker first,
-        # then fall back to the feature-source parent (identical by construction).
+        # Saved fit for the active spec (a scaled mini rides its parent's fit
+        # only when it has none of its own).
         try:
-            payload = _cached_rf_load_model(model_choice, ticker)
-        except Exception:
-            if _src != ticker:
-                try:
-                    payload = _cached_rf_load_model(model_choice, _src)
-                    out["notes"].append(f"{ticker} via {_src} fit")
-                except Exception:
-                    out["error"] = f"no saved {model_choice} fit"
-                    return out
-            else:
-                out["error"] = f"no saved {model_choice} fit — run Weekly Setup on {ticker}"
-                return out
+            payload, _fit_src = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
+        except FileNotFoundError:
+            out["error"] = f"no saved {model_choice} fit — run Weekly Setup on {ticker}"
+            return out
+        except Exception as e:
+            out["error"] = f"saved {model_choice} fit unusable ({e}) — run Weekly Setup on {ticker}"
+            return out
+        if _fit_src != ticker:
+            out["notes"].append(f"{ticker} via {_fit_src} fit")
 
         if uses_disabled_gex_feature(payload["feature_cols"]):
             out["error"] = (
@@ -1213,27 +1200,9 @@ def _auto_warm_up_spread_model(conn, ticker: str, ticker_cfg: dict) -> bool:
     if df_feat is None or df_feat.empty:
         return False
 
-    fitted_any = False
-    for _spec in RF_MODEL_SPECS.keys():
-        feat_cols = live_spread_feature_columns(RF_MODEL_SPECS[_spec])
-        if _spec == "M4_full" and GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-            gex_col = GEX_NORMALIZED_FEATURE
-            if rf_feature_has_enough_data(df_feat, gex_col) and gex_col not in feat_cols:
-                feat_cols.append(gex_col)
-        avail_cols = production_feature_columns(df_feat, _spec)
-        if len(avail_cols) < 2:
-            continue
-        try:
-            _validation, _result, _metrics = rf_fit_validation_and_production(
-                df_feat, feature_cols=avail_cols, model_name=_spec
-            )
-            rf_save_model(_result, avail_cols, _spec, _metrics,
-                          conn=conn, ticker=ticker)
-            fitted_any = True
-        except Exception:
-            continue
+    report = fit_and_save_specs(conn, ticker, features=df_feat)
     _cached_rf_load_model.clear()
-    return fitted_any
+    return bool(report.fits)
 
 
 @st.fragment
@@ -1850,91 +1819,61 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             if len(_specs_to_fit) > 1 else f"4/4 — Fitting {model_choice}..."
         )
 
-        _selected_result = None
-        _selected_avail  = None
-        _selected_metrics = None
+        # GEX calibration status for the spec the user is looking at. Live
+        # fits never consume GEX while the policy switch is off (BUG-06);
+        # production_feature_columns applies the same switch inside the fit.
+        if model_choice == "M4_full":
+            gex_col = GEX_NORMALIZED_FEATURE
+            _weeks = (int(df_feat[gex_col].notna().sum())
+                      if gex_col in df_feat.columns else 0)
+            if not GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
+                st.caption(
+                    f"GEX calibration: Pending — {_weeks} stored weeks "
+                    "remain available for research, but GEX is not "
+                    "applied to live fits, buffers, or strikes."
+                )
+            elif rf_feature_has_enough_data(df_feat, gex_col):
+                st.caption(
+                    f"ℹ️ M4_full: using {_weeks} weeks of stored GEX "
+                    "history as a training feature."
+                )
+            else:
+                st.caption(
+                    f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
+                    f"fold `gex_normalized` into the fit. Keep clicking **Save GEX** "
+                    f"each week; in the meantime M4 runs without the GEX feature."
+                )
 
         with st.spinner(_spinner_label):
-            for _spec in _specs_to_fit:
-                try:
-                    # BUG-06 filters GEX from every live fit while preserving
-                    # the stored column for the pending historical study.
-                    feat_cols = live_spread_feature_columns(RF_MODEL_SPECS[_spec])
-
-                    # Keep the former M4 injection path behind the same policy
-                    # switch as run_full_pipeline. The false branch documents
-                    # the research retention without consuming the feature.
-                    if _spec == "M4_full":
-                        gex_col = GEX_NORMALIZED_FEATURE
-                        if (
-                            GEX_LIVE_SPREAD_INFLUENCE_ENABLED
-                            and rf_feature_has_enough_data(df_feat, gex_col)
-                        ):
-                            if gex_col not in feat_cols:
-                                feat_cols.append(gex_col)
-                                # Only surface the "using N weeks of GEX" note
-                                # when fitting the spec the user is looking at
-                                # — otherwise the Weekly Setup run spams the
-                                # UI with notes about every background spec.
-                                if _spec == model_choice:
-                                    st.caption(
-                                        f"ℹ️ M4_full: using {int(df_feat[gex_col].notna().sum())} "
-                                        f"weeks of stored GEX history as a training feature."
-                                    )
-                        elif GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-                            _weeks = int(df_feat[gex_col].notna().sum()) if gex_col in df_feat.columns else 0
-                            if _spec == model_choice:
-                                st.caption(
-                                    f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
-                                    f"fold `gex_normalized` into the fit. Keep clicking **Save GEX** "
-                                    f"each week; in the meantime M4 runs without the GEX feature."
-                                )
-                        elif _spec == model_choice:
-                            _weeks = (
-                                int(df_feat[gex_col].notna().sum())
-                                if gex_col in df_feat.columns else 0
-                            )
-                            st.caption(
-                                f"GEX calibration: Pending — {_weeks} stored weeks "
-                                "remain available for research, but GEX is not "
-                                "applied to live fits, buffers, or strikes."
-                            )
-
-                    avail_cols = production_feature_columns(df_feat, _spec)
-                    if len(avail_cols) < 2:
-                        if _spec == model_choice:
-                            st.warning(f"{_spec}: only {len(avail_cols)} usable features — skipped")
-                        continue
-
-                    _validation, _result, _metrics = (
-                        rf_fit_validation_and_production(
-                            df_feat, feature_cols=avail_cols, model_name=_spec
-                        )
-                    )
-                    for _save_ticker in _tickers_to_save:
-                        rf_save_model(_result, avail_cols, _spec, _metrics,
-                                      conn=conn, ticker=_save_ticker)
-                    # New fit landed in Postgres — drop any cached
-                    # unpickle for this (spec, ticker) pair so a later
-                    # tab switch sees the fresh weights instead of
-                    # serving the previous fit until the 1-hour TTL
-                    # expires.
-                    _cached_rf_load_model.clear()
-
-                    if _spec == model_choice:
-                        _selected_result  = _result
-                        _selected_avail   = avail_cols
-                        _selected_metrics = _metrics
-                except Exception as e:
-                    st.error(f"{_spec} fitting failed: {e}")
+            try:
+                _report = fit_and_save_specs(
+                    conn, ticker, specs=_specs_to_fit,
+                    save_tickers=_tickers_to_save, features=df_feat,
+                )
+            except Exception as e:     # a save failed mid-way (DB)
+                st.error(f"Saving fits failed: {e}")
+                _report = FitReport()
+        # New fits landed in Postgres — drop cached unpickles so a later tab
+        # switch sees the fresh weights instead of the previous fit until the
+        # 1-hour TTL expires.
+        _cached_rf_load_model.clear()
+        for _spec, _reason in _report.skipped.items():
+            if _reason.startswith("fit failed"):
+                st.error(f"{_spec} fitting failed: {_reason}")
+            elif _spec == model_choice:
+                st.warning(f"{_spec}: {_reason} — skipped")
+        _selected = _report.fits.get(model_choice)
+        _selected_result = _selected.result if _selected else None
+        _selected_avail = _selected.feature_cols if _selected else None
+        _selected_metrics = _selected.metrics if _selected else None
 
         # Summary line for the Weekly Setup path so the user can see which
         # specs landed in Postgres at a glance.
         if do_weekly:
             _ticker_note = " × ".join(_tickers_to_save)
             st.success(
-                f"Fitted {len(_specs_to_fit)} specs for {_ticker_note} "
-                f"({len(_specs_to_fit) * len(_tickers_to_save)} rows saved)"
+                f"Fitted {len(_report.fits)}/{len(_specs_to_fit)} specs for "
+                f"{_ticker_note} ({len(_report.fits) * len(_tickers_to_save)} rows saved)"
             )
 
         # Prime session state with the currently-selected spec's fit so
@@ -1963,17 +1902,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     # Try to load model from session or disk
     if _mdl_result_key not in st.session_state:
-        from phase1.ticker_config import feature_source_ticker as _fsrc
         try:
-            try:
-                payload = _cached_rf_load_model(model_choice, ticker)
-            except FileNotFoundError:
-                # A scaled mini (XSP→SPX) rides its parent's fit
-                # (identical by construction) when it has no row of its own.
-                _parent = _fsrc(ticker)
-                if _parent == ticker:
-                    raise
-                payload = _cached_rf_load_model(model_choice, _parent)
+            payload, _fit_src = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
             st.session_state[_mdl_result_key]  = payload["result"]
             st.session_state[_mdl_feat_key]    = payload["feature_cols"]
             st.session_state[_mdl_metrics_key] = payload["metrics"]

@@ -73,13 +73,9 @@ def main():
         fetch_fred_macro, save_fred_macro,
         build_event_flags, print_summary,
     )
-    from range_finder.feature_builder import build_features, get_features
-    from range_finder.har_model import (
-        MODEL_SPECS, fit_validation_and_production,
-        feature_has_enough_data,
-    )
-    from range_finder.gex_policy import live_spread_feature_columns
+    from range_finder.feature_builder import build_features
     from range_finder.model_persistence import save_model
+    from range_finder.recommendations import fit_specs, load_production_features
 
     # ── Connect + init tables ──
     _log.info("Step 1/7  Connecting to Postgres and initializing tables...")
@@ -133,41 +129,16 @@ def main():
     # ── Fit all specs and print a comparison table ──
     _log.info("Step 6/7  Fitting all weekly model specs and comparing OOS metrics...")
 
-    # Pin the fit window to TRAIN_WINDOW_YEARS (matches the cron/UI read
-    # paths) — a deeper weekly_spx backfill must not change what fits here.
-    from range_finder.har_model import train_window_min_date
-    import pandas as _pd
-    _min_date = _pd.Timestamp(train_window_min_date())
-    df_feat = df_feat[df_feat.index >= _min_date]
-
-    results = {}
-    for spec_name in ["M1_baseline", "M2_vix", "M3_extended", "M4_full"]:
-        feat_cols = live_spread_feature_columns(MODEL_SPECS.get(spec_name, []))
-        # Drop features that have too few non-null rows (eg. gex_normalized on
-        # a fresh DB — there won't be any historical GEX values)
-        avail_cols = [c for c in feat_cols if feature_has_enough_data(df_feat, c)]
-        dropped = set(feat_cols) - set(avail_cols)
-        if dropped:
-            _log.info(f"  {spec_name}: dropping insufficient-data features: {sorted(dropped)}")
-
-        if not avail_cols:
-            _log.warning(f"  {spec_name}: no usable features, skipping")
-            continue
-
-        try:
-            validation_result, production_result, metrics = (
-                fit_validation_and_production(
-                    df_feat, feature_cols=avail_cols, model_name=spec_name
-                )
-            )
-            results[spec_name] = {
-                "validation_result": validation_result,
-                "production_result": production_result,
-                "metrics": metrics,
-                "features": avail_cols,
-            }
-        except Exception as e:
-            _log.warning(f"  {spec_name} fit failed: {e}")
+    # The production read window (TRAIN_WINDOW_YEARS, COVID excluded) — the
+    # same rows the cron and UI fit on, read back from model_features.
+    report = fit_specs(load_production_features(conn, "SPX"))
+    for spec_name, reason in report.skipped.items():
+        _log.warning(f"  {spec_name}: skipped — {reason}")
+    results = {
+        spec: {"production_result": fit.result, "metrics": fit.metrics,
+               "features": fit.feature_cols}
+        for spec, fit in report.fits.items()
+    }
 
     if not results:
         _log.error("No specs fit successfully — aborting.")

@@ -565,8 +565,8 @@ def _log_calibration_plan(conn, df_feat, cal_fit, week_start,
     UI would have refused to show, poisoning the coverage audit.
     """
     from range_finder.feature_builder import select_forecast_row
-    from range_finder.har_model import forecast_next_week
-    from range_finder.spread_levels import build_spread_plan, log_spread_plan
+    from range_finder.recommendations import build_recommendations
+    from range_finder.spread_levels import log_spread_plan
 
     # Only the week's first session logs the plan. spread_log upserts on
     # (week_start, ticker), so a forced mid-week or weekend refresh would
@@ -583,19 +583,14 @@ def _log_calibration_plan(conn, df_feat, cal_fit, week_start,
         return False
 
     result, cal_cols = cal_fit
-    spx_ref = monday_open or spot
-    # Per-side share keeps the logged strikes on the SAME placement the UI
-    # shows, so the audit scores the placement actually used.
-    side_q = _side_share_q(conn)
-    forecast = forecast_next_week(result, feature_row, cal_cols, spx_ref,
-                                  side_share_q=side_q)
-    plan = build_spread_plan(
-        forecast, feature_row,
-        week_start=week_start,
-        vix_level=monday_vix,
-        spx_open=monday_open,
-        ticker="SPX",
-        side_share_q=side_q,
+    # Same recommendation path as the UI (no chain snap: the logged strikes
+    # are the model's raw placement). Per-side share keeps the logged strikes
+    # on the placement the UI shows, so the audit scores what was shown.
+    forecast, plan, _tiers = build_recommendations(
+        result=result, feature_row=feature_row, feature_cols=cal_cols,
+        reference=monday_open or spot, vix=monday_vix, week_start=week_start,
+        ticker="SPX", side_share_q=_side_share_q(conn), conn=conn,
+        model_name=_CALIBRATION_SPEC,
     )
     log_spread_plan(
         conn, plan,
@@ -630,12 +625,7 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     from range_finder.gex_bridge import (
         GEXContext, extract_gex_context, save_gex_to_range_finder,
     )
-    from range_finder.har_model import (
-        fit_validation_and_production,
-        save_model, MODEL_SPECS,
-        feature_has_enough_data,
-    )
-    from range_finder.gex_policy import live_spread_feature_columns
+    from range_finder.har_model import MODEL_SPECS
     from phase1.ticker_config import (
         get_config, uses_own_har, has_single_name_earnings,
         feature_source_ticker,
@@ -777,54 +767,34 @@ def _run_weekly_spread_setup(ticker, spot, run_now, fred_key, client, avail,
     # unnecessarily. OLS with HC3 on ~few hundred weekly rows is
     # milliseconds per spec, so fitting all 5 adds ~1–2s total.
     _logger.info(f"  4/4 Fitting all {len(MODEL_SPECS)} model specs...")
-    _cal_fit = None   # (result, avail_cols) of _CALIBRATION_SPEC — set in the loop
+    _cal_fit = None   # (result, feature_cols) of _CALIBRATION_SPEC
     try:
-        from range_finder.feature_builder import get_features
-        # A scaled mini (XSP→SPX) loads its parent's shared HAR
-        # features; own-HAR tickers (QQQ/SPY/NDX/AMZN/AMD) load their own rows.
-        _features_ticker = feature_source_ticker(ticker)
-        # Window pinned to TRAIN_WINDOW_YEARS so deeper weekly_spx backfills
-        # (the 10y history experiment) can't silently retrain production.
-        from range_finder.har_model import train_window_min_date
-        df_feat = get_features(conn, min_date=train_window_min_date(),
-                               exclude_covid=True, ticker=_features_ticker)
+        from range_finder.recommendations import (
+            fit_and_save_specs, load_production_features,
+        )
+        # The ticker's feature-source rows (XSP rides SPX), pinned to
+        # TRAIN_WINDOW_YEARS so deeper backfills can't silently retrain
+        # production, COVID excluded — the same window the UI forecasts on.
+        df_feat = load_production_features(conn, ticker)
         if df_feat.empty:
             raise RuntimeError("No features available for required weekly fit")
 
-        fitted = 0
-        failed = []
-        for spec_name in MODEL_SPECS:
-            try:
-                feat_cols = live_spread_feature_columns(MODEL_SPECS[spec_name])
-                avail_cols = [c for c in feat_cols if feature_has_enough_data(df_feat, c)]
+        report = fit_and_save_specs(conn, ticker, features=df_feat)
+        for spec_name, fit in report.fits.items():
+            _logger.info(
+                f"    {spec_name}: OOS R² = {fit.metrics['oos_r2']:.4f}, "
+                f"MAE = {fit.metrics['mae_pct']*100:.2f}%  (features: {len(fit.feature_cols)})"
+            )
+        for spec_name, reason in report.skipped.items():
+            _logger.warning(f"    {spec_name}: skipped — {reason}")
+        _logger.info(f"  Fitted {len(report.fits)}/{len(MODEL_SPECS)} specs")
 
-                if len(avail_cols) < 2:
-                    _logger.info(f"    {spec_name}: skipping — only {len(avail_cols)} usable features")
-                    continue
-
-                _validation, production_result, metrics = fit_validation_and_production(
-                    df_feat, feature_cols=avail_cols, model_name=spec_name
-                )
-                save_model(production_result, avail_cols, spec_name, metrics,
-                           conn=conn, ticker=ticker)
-
-                if spec_name == _CALIBRATION_SPEC:
-                    _cal_fit = (production_result, avail_cols)
-
-                _logger.info(
-                    f"    {spec_name}: OOS R² = {metrics['oos_r2']:.4f}, "
-                    f"MAE = {metrics['mae_pct']*100:.2f}%  (features: {len(avail_cols)})"
-                )
-                fitted += 1
-            except Exception as e:
-                failed.append(spec_name)
-                _logger.warning(f"    {spec_name}: fit failed — {e}")
-
-        _logger.info(f"  Fitted {fitted}/{len(MODEL_SPECS)} specs" + (f" (failed: {failed})" if failed else ""))
-        if _cal_fit is None:
+        cal = report.fits.get(_CALIBRATION_SPEC)
+        if cal is None:
             raise RuntimeError(
                 f"Required {_CALIBRATION_SPEC} production fit was not saved"
             )
+        _cal_fit = (cal.result, cal.feature_cols)
     except Exception as e:
         _logger.error(f"  Model fitting stage failed: {e}")
         raise RuntimeError("Model fitting stage failed") from e

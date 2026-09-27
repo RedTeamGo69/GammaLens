@@ -1,11 +1,29 @@
-"""One forecast/plan/tier/display path for the UI and unattended capture.
+"""The weekly recommendation module: one fit path and one forecast/plan/tier
+path for the Spread Finder tab, xlsx export, Monday cron, bootstrap and
+unattended forward capture.
 
-The displayed (pre-EM-floor) strike is the production recommendation. The
-EM-floored ladder remains context; it must not silently widen this study.
+Fitting: ``fit_specs`` / ``fit_and_save_specs`` own the production column
+rule (``production_feature_columns``), the minimum-column skip, the
+feature-source routing (XSP rides SPX's rows) and the TRAIN_WINDOW_YEARS /
+COVID-excluded read window. ``load_saved_fit`` owns the saved-fit lookup
+with its parent-ticker fallback.
+
+Recommending: the displayed (pre-EM-floor) strike is the production
+recommendation. The EM-floored ladder remains context; it must not silently
+widen this study.
 """
-from range_finder.har_model import forecast_next_week, PI_ALPHA
+from dataclasses import dataclass, field as _field
+
+from range_finder.har_model import (
+    MODEL_SPECS, PI_ALPHA, fit_validation_and_production, forecast_next_week,
+    production_feature_columns, train_window_min_date,
+)
+from range_finder.model_persistence import save_model
 from range_finder.spread_levels import build_spread_plan, build_spread_tiers
 from range_finder.gex_policy import uses_disabled_gex_feature
+
+# A spec with fewer usable columns than this is skipped, not fit.
+MIN_FIT_FEATURES = 2
 
 TIER_KEYS = ("lower_pi", "point", "pi_upper", "effective")
 TIER_LABELS = ("Lower PI", "Point Estimate", "80% PI Upper", "Effective (+buffer)")
@@ -56,3 +74,85 @@ def build_recommendations(*, result, feature_row, feature_cols, reference,
                               vix_level=vix, chain_quotes=chain_quotes,
                               ticker=ticker, weekly_em=weekly_em)
     return forecast, plan, tiers
+
+
+# ── Fitting ───────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class SpecFit:
+    spec: str
+    result: object              # statsmodels production fit
+    feature_cols: list
+    metrics: dict
+
+
+@dataclass(frozen=True)
+class FitReport:
+    fits: dict = _field(default_factory=dict)     # spec -> SpecFit
+    skipped: dict = _field(default_factory=dict)  # spec -> reason
+
+
+def load_production_features(conn, ticker):
+    """The feature rows production fits and forecasts ``ticker`` from: its
+    feature-source ticker's rows, pinned to TRAIN_WINDOW_YEARS (deeper
+    backfills must not silently retrain production), COVID excluded."""
+    from phase1.ticker_config import feature_source_ticker
+    from range_finder.feature_builder import get_features
+    return get_features(conn, min_date=train_window_min_date(),
+                        exclude_covid=True, ticker=feature_source_ticker(ticker))
+
+
+def fit_specs(features, specs=None) -> FitReport:
+    """Validation + production fit of every spec on ``features``.
+
+    Never raises for one spec: a spec with too few usable columns or a failed
+    fit lands in ``skipped`` with its reason, so callers decide whether a
+    missing spec is fatal (the cron requires its calibration spec).
+    """
+    fits, skipped = {}, {}
+    for spec in (specs or MODEL_SPECS):
+        cols = production_feature_columns(features, spec)
+        if len(cols) < MIN_FIT_FEATURES:
+            skipped[spec] = f"only {len(cols)} usable features"
+            continue
+        try:
+            _validation, result, metrics = fit_validation_and_production(
+                features, feature_cols=cols, model_name=spec)
+        except Exception as e:
+            skipped[spec] = f"fit failed: {e}"
+            continue
+        fits[spec] = SpecFit(spec, result, cols, metrics)
+    return FitReport(fits, skipped)
+
+
+def fit_and_save_specs(conn, ticker, *, specs=None, save_tickers=None,
+                       features=None) -> FitReport:
+    """Fit every spec on ``ticker``'s production features and save each fit
+    to saved_models under every ticker in ``save_tickers`` (default: just
+    ``ticker``). Pass ``features`` to reuse an already-loaded frame."""
+    if features is None:
+        features = load_production_features(conn, ticker)
+    report = fit_specs(features, specs)
+    for fit in report.fits.values():
+        for save_ticker in (save_tickers or [ticker]):
+            save_model(fit.result, fit.feature_cols, fit.spec, fit.metrics,
+                       conn=conn, ticker=save_ticker)
+    return report
+
+
+def load_saved_fit(load, model, ticker):
+    """``(payload, source_ticker)`` for ``ticker``'s saved ``model`` fit.
+
+    ``load(model, ticker)`` is the loader (the UI passes its cached one).
+    A scaled mini (XSP) rides its feature-source parent's fit — identical by
+    construction — only when it has none of its own. An incompatible own fit
+    is NOT masked by the parent's: it raises so the caller asks for a refit.
+    """
+    from phase1.ticker_config import feature_source_ticker
+    try:
+        return load(model, ticker), ticker
+    except FileNotFoundError:
+        parent = feature_source_ticker(ticker)
+        if parent == ticker:
+            raise
+        return load(model, parent), parent

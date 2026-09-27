@@ -23,15 +23,15 @@ def _features(rows: dict) -> pd.DataFrame:
 def plan_calls(monkeypatch):
     calls = {"forecast": [], "logged": []}
 
-    def fake_forecast(result, row, cols, ref, side_share_q=None):
-        calls["forecast"].append(row)
-        return {"point_pct": 0.02, "lower_pct": 0.01, "upper_pct": 0.03}
+    def fake_recommendations(*, feature_row, **kwargs):
+        calls["forecast"].append(feature_row)
+        forecast = {"point_pct": 0.02, "lower_pct": 0.01, "upper_pct": 0.03}
+        return forecast, {"plan": True}, []
 
-    import range_finder.har_model as har_model
+    import range_finder.recommendations as rec
     import range_finder.spread_levels as spread_levels
     # The cron imports these lazily at call time, so patch the source modules.
-    monkeypatch.setattr(har_model, "forecast_next_week", fake_forecast)
-    monkeypatch.setattr(spread_levels, "build_spread_plan", lambda *a, **k: {"plan": True})
+    monkeypatch.setattr(rec, "build_recommendations", fake_recommendations)
     monkeypatch.setattr(spread_levels, "log_spread_plan",
                         lambda conn, plan, **k: calls["logged"].append(plan))
     monkeypatch.setattr(snapshot, "_side_share_q", lambda conn: None)

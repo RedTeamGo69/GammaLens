@@ -383,7 +383,7 @@ def main():
         _is_weekly_freeze_day, _is_monthly_freeze_day,
         _apply_typed_em_snapshot, _apply_em_snapshot,
     )
-    from ui_spread_finder import _render_spread_finder_tab
+    from ui_spread_finder import _render_spread_finder_tab, spread_finder_weekly_em
     from ui_tv_export import render_tv_export_section
 
     inject_global_css()
@@ -791,7 +791,12 @@ def main():
                 run_now=run_now,
             )
         elif tab == "spread":
-            _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=(weekly_em_snap or {}))
+            sf_weekly_em = spread_finder_weekly_em(
+                data.avail, run_now.date(),
+                weekly_exp=weekly_exp, weekly_em_snap=weekly_em_snap,
+                compute_em=lambda exp: compute_em_for_expiration(temp_client, ticker, exp, spot),
+            )
+            _render_spread_finder_tab(spot, levels, regime, data, ticker=ticker, weekly_em=sf_weekly_em)
 
     # ── Auto-refresh (aligned to the wall clock, not to page-load time) ──
     if refresh_seconds > 0:

@@ -250,6 +250,28 @@ def find_spread_finder_friday_exp(
     return listed_week_expiration(avail, trading_week(_spread_finder_target_friday(ref_date)))
 
 
+def spread_finder_weekly_em(avail, ref_date, *, weekly_exp, weekly_em_snap,
+                            compute_em) -> dict:
+    """Weekly EM for the week the Spread Finder is PLANNING.
+
+    Mon–Thu (and weekends, where the app's weekly EM already rolls forward)
+    the planned expiration is the app's weekly expiration, so the frozen
+    weekly snapshot applies. On Friday the app's weekly EM still describes
+    the expiring contract while the tab plans next week, so price the planned
+    expiration's straddle live instead (its chain is pre-fetched). Empty
+    rather than the wrong week's EM when that fails.
+    """
+    sf_exp = find_spread_finder_friday_exp(avail, ref_date)
+    if sf_exp is None:
+        return {}
+    if sf_exp == weekly_exp:
+        return weekly_em_snap or {}
+    try:
+        return compute_em(sf_exp) or {}
+    except Exception:
+        return {}
+
+
 def _chain_entry_to_quotes(entry: dict) -> dict:
     return chain_entry_to_quotes(entry)
 

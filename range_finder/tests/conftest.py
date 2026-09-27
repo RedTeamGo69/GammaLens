@@ -17,3 +17,5 @@ import range_finder.data_collector as dc
 @pytest.fixture(autouse=True)
 def _hermetic_anchor_sources(monkeypatch):
     monkeypatch.setattr(dc, "_ANCHOR_OPEN_SOURCES", [dc._open_from_yf])
+    # Same guard for the live vol-proxy chain (Tradier-first).
+    monkeypatch.setattr(dc, "_LIVE_VOL_SOURCES", [dc._live_from_yf])

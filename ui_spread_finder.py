@@ -26,6 +26,7 @@ from range_finder.data_collector import (
     get_weekly_spx as rf_get_weekly_spx,
     fred_key_status as rf_fred_key_status,
     capture_and_save_monday_anchor as rf_capture_monday_anchor,
+    live_vol_close as rf_live_vol_close,
     FRED_API_KEY as RF_FRED_API_KEY,
 )
 from range_finder.feature_builder import (
@@ -124,15 +125,10 @@ def _live_vol_close(proxy: str) -> float | None:
     VIX regime-shift circuit breaker: a stale or invented VIX silently
     disables the breaker exactly when a live spike should trip it. A 5-min
     TTL (vs the old cache-once-per-session behavior) means a mid-session
-    spike is actually seen while still sparing yfinance on every rerun.
+    spike is actually seen while still sparing the quote sources on every
+    rerun. Source order (Tradier, then yfinance) lives in data_collector.
     """
-    try:
-        vp_hist = yf.Ticker(proxy).history(period="5d")
-        if not vp_hist.empty:
-            return round(float(vp_hist["Close"].dropna().iloc[-1]), 2)
-    except Exception:
-        pass
-    return None
+    return rf_live_vol_close(proxy)
 
 
 @st.cache_data(ttl=600, show_spinner=False)

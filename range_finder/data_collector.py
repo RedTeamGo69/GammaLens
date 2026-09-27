@@ -490,6 +490,58 @@ def _daily_open_on(symbol: str, target_date) -> "float | None":
     return None
 
 
+# ── Live vol-proxy close (VIX regime-shift breaker input) ─────────────────────
+# Same source discipline as the anchor opens: Tradier quote first, yfinance
+# only for proxies Tradier can't quote (^VXN). Cboe is deliberately absent —
+# its CDN history is end-of-day, and a stale value here would silently disable
+# the breaker exactly when an intraday spike should trip it.
+
+def _live_from_tradier(symbol: str) -> "float | None":
+    """Latest last→close→prevclose from a Tradier quote, or None."""
+    tradier_symbol = _yf_to_tradier_symbol(symbol)
+    if not tradier_symbol:
+        return None
+    token = _tradier_token()
+    if not token:
+        return None
+    from phase1.data_client import TradierDataClient, resolve_quote_spot
+    value = resolve_quote_spot(TradierDataClient(token).get_full_quote(tradier_symbol))
+    return value if value > 0 else None
+
+
+def _live_from_yf(symbol: str) -> "float | None":
+    """Latest daily close from a 5-day yfinance window (fallback only)."""
+    hist = yf.Ticker(symbol).history(period="5d")
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None
+    closes = hist["Close"].dropna()
+    if closes.empty:
+        return None
+    value = float(closes.iloc[-1])
+    return value if value > 0 else None
+
+
+# Tests replace this list wholesale (see range_finder/tests/conftest.py).
+_LIVE_VOL_SOURCES = [_live_from_tradier, _live_from_yf]
+
+
+def live_vol_close(symbol: str) -> "float | None":
+    """Live vol-proxy level, or None when every source is empty or fails.
+
+    Callers must treat None as "no live VIX" and NOT substitute a number: the
+    Spread Finder's regime-shift breaker keys off this value.
+    """
+    for fn in _LIVE_VOL_SOURCES:
+        try:
+            value = fn(symbol)
+        except Exception as e:
+            log.warning(f"live vol close {symbol} via {fn.__name__} failed: {e}")
+            continue
+        if value is not None:
+            return round(value, 2)
+    return None
+
+
 def save_weekly_setup(conn, ticker: str, week_start: str,
                       monday_open: float, monday_vix: float) -> None:
     """Upsert the frozen Monday open + VIX for (week_start, ticker)."""

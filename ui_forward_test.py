@@ -184,5 +184,5 @@ def _render_health(rows, runs):
             st.warning(error)
         with st.expander("Recent runs"):
             st.dataframe(pd.DataFrame(runs).drop(columns=["payload_json"], errors="ignore"), hide_index=True)
-    st.caption("SPX uses SPXW PM-settled contracts. Stock/ETF close results are theoretical expiration proxies. "
+    st.caption("SPX and NDX use SPXW/NDXP PM-settled contracts. Stock/ETF close results are theoretical expiration proxies. "
                "Official settlement, when verified, is stored separately. A temporary breach is not a weekly-close failure.")

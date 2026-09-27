@@ -4,7 +4,7 @@ The implementation is observational and contains no order submission or executio
 
 ## Methodology
 
-The active study universe is **22 tickers**: the original seven (**SPX, SPY, AAPL, AMD, META, TSLA, HOOD**) plus a sector-balancing set (**NVDA, GOOGL, MSFT, AMZN, AVGO, MU, WMT, COST, XOM, CVX, JPM, BAC, UNH, GEV, GE**). Each week has 88 model slots and, when all models are available, 352 immutable tier forecasts. Each registration retains its own universe; the archived first study remains a four-ticker study.
+The active study universe is **25 tickers**: the original seven (**SPX, SPY, AAPL, AMD, META, TSLA, HOOD**), a sector-balancing set (**NVDA, GOOGL, MSFT, AMZN, AVGO, MU, WMT, COST, XOM, CVX, JPM, BAC, UNH, GEV, GE**) and a Nasdaq set (**QQQ, NDX, CRWV**). Each week has 100 model slots and, when all models are available, 400 immutable tier forecasts. Each registration retains its own universe; the archived first study remains a four-ticker study.
 
 The balancing set was screened on 2026-09-27. It includes the top ten US stocks by market cap and the largest two per GICS sector, counting only names with liquid options: a weekly expiring on the week's final session, an at-the-money spread of at most ~20% of mid, and at least ~3k contracts traded that Friday. The screen excludes these names:
 
@@ -18,15 +18,17 @@ The balancing set was screened on 2026-09-27. It includes the top ten US stocks 
 
 Real Estate, Utilities and Materials therefore have no representative. Rerun the screen before changing the roster; don't hand-add a name.
 
-The active study is **`spread-finder-weekly-v4-balanced`**, starting **September 28, 2026**.
+The Nasdaq set was added on 2026-09-27 at the user's request and passed the same screen on the Friday 9/25 chain for the 10/2 expiry: ATM spread QQQ ~1%, NDXP ~3.6%, CRWV 3–6% of mid. NDX traded ~1.6k NDXP contracts, below the ~3k volume line, but each contract carries ~40× a QQQ contract's notional. PLTR was requested first but is excluded for the same reason as LLY and FCX: Tradier's 2023-06-05 bar opens at 14.365, below its 14.39 low. CRWV replaced it.
+
+The active study is **`spread-finder-weekly-v5-nasdaq`**, starting **September 28, 2026**.
 The CLI's default `run` targets only this study. The original
 `spread-finder-weekly-v1` is retired from scheduled collection; its evidence is
 retained unchanged and is available through the dashboard's archived-study
 selection. The dashboard, health area and exports show one selected study at a
-time, including an empty new study before its first capture. The unused v2 and
-v3 registrations are retained as superseded registrations. v3 had the same
-opening-session policy but only the original seven tickers, and it was replaced
-before its first capture. A restart does not backfill forecasts or turn
+time, including an empty new study before its first capture. The unused v2, v3
+and v4 registrations are retained as superseded registrations. v3 had the same
+opening-session policy but only the original seven tickers; v4 had the 22 tickers
+without QQQ, NDX and CRWV. Each was replaced before its first capture. A restart does not backfill forecasts or turn
 historical missed slots into successful captures.
 
 Capture attempts for the new study begin Monday September 28 at 09:30, 09:40
@@ -39,6 +41,8 @@ minimum-sample rules still apply, with fewer available years for HOOD.
 GEV starts at **2024-04-08**, the first full week after its regular-way debut on
 Tuesday 2024-04-02 ([GE Vernova](https://www.gevernova.com/news/press-releases/ge-vernova-completes-spin-off-begins-trading-new-york-stock-exchange)).
 The earlier Tradier bars from 2024-03-27 are when-issued trading and are excluded.
+CRWV starts at **2025-03-31**, the first full week after its IPO on Friday
+2025-03-28, so it trains on roughly 18 months rather than six years.
 
 | Model | Production feature specification before the existing availability filter |
 |---|---|
@@ -72,7 +76,7 @@ For example, the week labeled 2026-09-07 opens on Tuesday 2026-09-08. The captur
 
 ## Expiration, observations and scoring
 
-The expiration must be both listed by Tradier and equal to the week's last actual session. There is no nearest-date or next-week fallback. SPX requires a standard 100-unit **SPXW PM-settled European cash contract**, including matching OCC symbol, root, date and strike. AM-settled SPX monthlies and adjusted/unknown contracts are rejected. Cboe identifies SPXW as PM settled and describes the holiday adjustment for equity/ETF weeklies. [Cboe weekly options](https://www.cboe.com/available_weeklys/)
+The expiration must be both listed by Tradier and equal to the week's last actual session. There is no nearest-date or next-week fallback. SPX requires a standard 100-unit **SPXW PM-settled European cash contract**, and NDX the equivalent **NDXP** contract, including matching OCC symbol, root, date and strike. AM-settled SPX and NDX monthlies and adjusted/unknown contracts are rejected. Cboe identifies SPXW as PM settled and describes the holiday adjustment for equity/ETF weeklies. [Cboe weekly options](https://www.cboe.com/available_weeklys/)
 
 The evaluation is the **final regular-session close** of that week. New forecasts track **every regular trading session from the first session open through that close**, normally Monday 09:30 ET. Each completed session contributes daily OHLC, including opening-session movement before the forecast was saved. Actual availability is preserved separately; this is a full-week opening-anchored range evaluation, not a claim that a forecast was published at 09:30. Daily bars identify a breach session, not an exact minute. Archived forecasts without the new tracking policy retain their post-availability window and partial-opening-session minute requirements. Overnight and extended-hours movement are excluded.
 
@@ -106,9 +110,9 @@ The Forward Test tab reads durable records without requesting a live quote or in
 
 Expected usage, excluding retries and vendor corrections:
 
-- Opening capture: about **90 Tradier GETs** (two histories, one batch quote, expirations and one chain per ticker), **3 Cboe history requests** and **3 FRED series requests**. Common supplemental inputs are reused across the 22 tickers in one invocation. Failed attempts are capped at three per model; the study's Tradier history/quote/timesales requests have 20-second timeouts and at most two HTTP retries. The capture path makes no Yahoo requests. Existing chain/source clients are reused; the overall GitHub job has a 25-minute limit. A 4-ticker opening run took ~2.5 minutes including setup (~25 s per ticker), so 22 tickers are estimated at ~10–12 minutes. That estimate comes from one small run and should be checked after the first 22-ticker Monday.
-- A five-session week initially needs **110 daily-bar requests** for observations. Daily reconciliation adds bounded rechecks; plan for roughly **820–1,380 observation GETs per study week** with ordinary weekday scheduling, before HTTP retries. Outages, source corrections and manual invocations affect that estimate. No continuous polling or full-chain archives are stored.
-- A runner uses **one database connection**, shared observations and four-tier transactions. Typical primary growth is 352 forecast rows, 88 model snapshots, 22 shared ticker-input snapshots and 110 first observation revisions per full week, plus score revisions and small run/check metadata. JSON input sizes depend on history depth. The 160-week deterministic fixture used **1,435,503 input JSON bytes** and **141,652 observation JSON bytes**; these are measured fixture sizes, not production storage estimates. Production six-year/deeper snapshots will be larger, ordinarily a few MB per week before indexes/backups.
+- Opening capture: about **102 Tradier GETs** (two histories, one batch quote, expirations and one chain per ticker), **3 Cboe history requests** and **3 FRED series requests**. Common supplemental inputs are reused across the 25 tickers in one invocation. Failed attempts are capped at three per model; the study's Tradier history/quote/timesales requests have 20-second timeouts and at most two HTTP retries. The capture path makes no Yahoo requests. Existing chain/source clients are reused; the overall GitHub job has a 25-minute limit. A 4-ticker opening run took ~2.5 minutes including setup (~25 s per ticker), so 25 tickers are estimated at ~11–14 minutes. That estimate comes from one small run and should be checked after the first 25-ticker Monday.
+- A five-session week initially needs **125 daily-bar requests** for observations. Daily reconciliation adds bounded rechecks; plan for roughly **930–1,570 observation GETs per study week** with ordinary weekday scheduling, before HTTP retries. Outages, source corrections and manual invocations affect that estimate. No continuous polling or full-chain archives are stored.
+- A runner uses **one database connection**, shared observations and four-tier transactions. Typical primary growth is 400 forecast rows, 100 model snapshots, 25 shared ticker-input snapshots and 125 first observation revisions per full week, plus score revisions and small run/check metadata. JSON input sizes depend on history depth. The 160-week deterministic fixture used **1,435,503 input JSON bytes** and **141,652 observation JSON bytes**; these are measured fixture sizes, not production storage estimates. Production six-year/deeper snapshots will be larger, ordinarily a few MB per week before indexes/backups.
 - The dashboard caches reads for ten minutes and opens/closes one connection per cache miss. Historic finalized forecasts age out of runner work; old incomplete outcomes are terminalized after reconciliation expires. No dollar billing estimate is claimed.
 
 ## Verification and reproduction
@@ -134,11 +138,11 @@ The original pre-activation review is in [weekly_forward_test_release_review.md]
 
 1. Merge the scoped implementation through the repository's normal process only after its checks and live prerequisites pass. Keep the repository variable `FORWARD_TEST_ENABLED=false` throughout preparation. The new workflow is independent of the existing GEX snapshot and cron-job.org schedules.
 2. Choose the production database and explicitly set `FORWARD_TEST_DATABASE_URL` or `DATABASE_URL` in the operator's shell. Do not use the isolated test URL. Run `.venv\Scripts\python.exe forward_test.py migrate` once. This applies only the two additive `ft_*` migrations. Neither the runner nor Streamlit applies them automatically.
-3. Register the first still-prospective week: `.venv\Scripts\python.exe forward_test.py register --start-week YYYY-MM-DD`. Use its Monday label. For 2026-09-07 this is only valid before Tuesday 2026-09-08 at 10:15 ET; if that window has ended, choose a later week. The study ID defaults to `spread-finder-weekly-v4-balanced`; its start/configuration cannot be rewritten.
+3. Register the first still-prospective week: `.venv\Scripts\python.exe forward_test.py register --start-week YYYY-MM-DD`. Use its Monday label. For 2026-09-07 this is only valid before Tuesday 2026-09-08 at 10:15 ET; if that window has ended, choose a later week. The study ID defaults to `spread-finder-weekly-v5-nasdaq`; its start/configuration cannot be rewritten.
 4. Confirm the existing GitHub secrets `DATABASE_URL`, `TRADIER_TOKEN` and `FRED_API_KEY` refer to the intended account/database. The workflow uses `DATABASE_URL`; the optional CLI override is for explicit operator/test environments. Leave `FORWARD_TEST_DATA_DELAY_SECONDS` at `0` unless the actual feed is known to be delayed, in which case set it to `900`. This does not buy or change any entitlement.
 5. Deploy the reviewed code to Streamlit Cloud and verify the **Forward Test** tab. If the container still serves old code, use **Reboot app**. The results tab should work before any live market quote is requested. Point its existing `DATABASE_URL` secret at the same database.
 6. Run the prepared **Forward Test Verification** workflow with `live_prerequisites=true`. It uses its own disposable PostgreSQL test service and separately checks the intended production database fingerprint and configured live sources read-only. Then set the repository variable **`FORWARD_TEST_ENABLED=true`** to activate the capture/reconciliation workflow. The workflow must be on the default branch for scheduled events. A manual dispatch is also gated by this variable; it cannot bypass the engine's prospective window.
-7. After the first eligible opening run, check the dashboard and workflow health: 88 captured models / 352 tiers, or explicit unavailable/missed reasons. After the final-session collection, check independent close and path sample counts. New opening-session forecasts use complete daily OHLC for path coverage; archived partial-session forecasts still require minute history. Verify the real account's SPX, quote and history availability during this first run; no live production certification was attempted here.
+7. After the first eligible opening run, check the dashboard and workflow health: 100 captured models / 400 tiers, or explicit unavailable/missed reasons. After the final-session collection, check independent close and path sample counts. New opening-session forecasts use complete daily OHLC for path coverage; archived partial-session forecasts still require minute history. Verify the real account's SPX, quote and history availability during this first run; no live production certification was attempted here.
 
 The cron contains paired UTC times for DST and a New York time gate. Its separate `weekly-forward-test` concurrency group has `cancel-in-progress: false`: overlapping attempts wait without cancelling a healthy capture. GitHub retains at most one pending run, so a newer retry can replace an older pending attempt, but cannot replace captured database slots. GitHub may delay or drop scheduled jobs, so this architecture cannot guarantee every week's capture. Late computation is rejected and reported as missed, never backdated. An additional cron-job.org trigger is authorized by the release request, but the management console requires sign-in and no API credential was available during review. No existing GEX job was changed and no extra dispatcher job was created. Retain the prepared GitHub schedule with this punctuality limitation. [GitHub schedule behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 

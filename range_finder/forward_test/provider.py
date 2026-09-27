@@ -30,7 +30,9 @@ from .history_policy import validated_tradier_history
 # Tradier also carries when-issued bars from 2024-03-27; those predate the
 # listed stock, so its first full week is April 8.
 # https://www.gevernova.com/news/press-releases/ge-vernova-completes-spin-off-begins-trading-new-york-stock-exchange
-FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8)}
+# CRWV's IPO priced for Friday 2025-03-28; that one-session week is excluded.
+FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8),
+                           'CRWV': date(2025, 3, 31)}
 
 
 def finite_price(value):

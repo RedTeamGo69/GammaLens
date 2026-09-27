@@ -14,7 +14,7 @@ from range_finder.har_model import (MODEL_SPECS, TRAIN_WINDOW_YEARS, production_
 from range_finder.model_persistence import SCHEMA_VERSION, IncompatibleModelError
 from range_finder.recommendations import (TIER_KEYS, TIER_LABELS, build_recommendations,
                                           displayed_tier, chain_entry_to_quotes)
-from .config import MODELS, UNIVERSE, digest, model_methodology_id
+from .config import CASH_INDEX_ROOTS, MODELS, UNIVERSE, digest, model_methodology_id
 from .provider import finite_price, frame_records
 
 
@@ -50,7 +50,7 @@ def completed_features(features, week, as_of=None):
 
 
 def contract_chain(entry, ticker, expiration):
-    root = "SPXW" if ticker == "SPX" else ticker
+    root = CASH_INDEX_ROOTS.get(ticker, ticker)
     result = {"calls": [], "puts": []}
     for side, letter in (("calls", "C"), ("puts", "P")):
         for opt in entry.get(side, []):
@@ -137,8 +137,9 @@ def capture_model(prepared, model, week, model_version, now):
         forecasts.append({"tier": key, "tier_label": label, "ticker": ticker, "model": model,
                           "model_version": design_version, "methodology_id": model_version, "fit_id": digest(fitted),
                           "expiration": prepared["expiration"], "contract_root": root,
-                          "settlement_convention": "PM cash European" if ticker == "SPX" else "physical American",
-                          "interpretation": "weekly-close range study" if ticker == "SPX" else "theoretical expiration proxy",
+                          "settlement_convention": "PM cash European" if ticker in CASH_INDEX_ROOTS else "physical American",
+                          "interpretation": ("weekly-close range study" if ticker in CASH_INDEX_ROOTS
+                                             else "theoretical expiration proxy"),
                           "scheduled_at": week.capture_start.isoformat(), "captured_at": now.isoformat(),
                           "available_at": now.isoformat(), "prepared_at": prepared["prepared_at"],
                           "tracking_start_at": week.sessions[0].open.isoformat(),

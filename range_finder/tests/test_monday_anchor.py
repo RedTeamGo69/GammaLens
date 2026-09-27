@@ -172,7 +172,7 @@ class _FakeTradierHistory:
 
 
 def _patch_tradier_history(monkeypatch, days, token="tok"):
-    monkeypatch.setattr(dc, "_tradier_token", lambda: token)
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: token)
     import phase1.data_client as pdc
     monkeypatch.setattr(pdc, "TradierDataClient",
                         lambda tok: _FakeTradierHistory(days))

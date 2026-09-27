@@ -63,14 +63,14 @@ def test_live_from_tradier_maps_symbol_and_resolves_quote(monkeypatch):
             return {"last": None, "close": 22.4, "prevclose": 20.0}
 
     import phase1.data_client as data_client
-    monkeypatch.setattr(dc, "_tradier_token", lambda: "tok")
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: "tok")
     monkeypatch.setattr(data_client, "TradierDataClient", _Client)
     assert dc._live_from_tradier("^VIX") == pytest.approx(22.4)
     assert seen == {"token": "tok", "ticker": "VIX"}
 
 
 def test_live_from_tradier_declines_unquotable_proxy(monkeypatch):
-    monkeypatch.setattr(dc, "_tradier_token", lambda: "tok")
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: "tok")
     assert dc._live_from_tradier("^VXN") is None
 
 

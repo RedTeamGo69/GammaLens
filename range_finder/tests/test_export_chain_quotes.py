@@ -42,5 +42,5 @@ def test_chain_entry_to_quotes_empty_entry():
 def test_export_chain_quotes_no_token_degrades(monkeypatch):
     # No Tradier token -> ({}, None) so the export falls back to nominal
     # strikes instead of raising / blocking the whole workbook build.
-    monkeypatch.setattr(usf, "_tradier_token", lambda: "")
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: "")
     assert usf._export_chain_quotes("AMD", None) == ({}, None)

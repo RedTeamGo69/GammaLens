@@ -9,7 +9,6 @@ driven by st.query_params (see ui_theme); all data/model logic is unchanged.
 """
 from __future__ import annotations
 
-import os
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -29,6 +28,7 @@ from ui_theme import (
     inject_global_css, map_exp_mode, map_refresh,
     render_header, fmt_commas, esc, QUICK_TICKERS, LOGO_PATH,
 )
+from ui_market_data import get_expirations_cached, validate_ticker_cached
 from ui_controls import (
     render_settings_controls, render_tab_control, render_refresh_button,
 )
@@ -74,45 +74,14 @@ st.set_page_config(
 # Credentials
 # ─────────────────────────────────────────────────────────────────────────────
 def get_credentials():
-    """Pull API keys from Streamlit secrets, env vars, or sidebar input."""
-    tradier_token = ""
-    fred_key = ""
-
-    # Try st.secrets first (for Streamlit Cloud deployment)
-    try:
-        tradier_token = st.secrets.get("TRADIER_TOKEN", "")
-        fred_key = st.secrets.get("FRED_API_KEY", "")
-    except Exception:
-        pass
-
-    # Fall back to env vars
-    if not tradier_token:
-        tradier_token = os.environ.get("TRADIER_TOKEN", "")
-    if not fred_key:
-        fred_key = os.environ.get("FRED_API_KEY", "")
-
-    return tradier_token, fred_key
+    """(Tradier token, FRED key) from Streamlit secrets, else env vars."""
+    from phase1 import credentials
+    return credentials.tradier_token(), credentials.fred_api_key()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data fetching (cached)
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=600, show_spinner=False)
-def get_expirations_cached(tradier_token: str, ticker: str) -> list[str]:
-    """Tradier expirations change at most once per day; cache for 10 minutes
-    so the sidebar render doesn't hit the API on every widget rerun."""
-    return TradierDataClient(token=tradier_token).get_expirations(ticker)
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def validate_ticker_cached(tradier_token: str, symbol: str):
-    """Validate a typed symbol against Tradier (must be optionable).
-
-    Returns the instrument dict ({symbol, type, name, has_options}) or None.
-    Cached 10 minutes so re-typing a symbol doesn't re-hit the API."""
-    return TradierDataClient(token=tradier_token).validate_ticker(symbol)
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_risk_free_rate_cached(fred_key: str) -> dict:
     """FRED publishes these series once per business day; cache for an hour
@@ -453,7 +422,7 @@ def main():
         with st.container(border=True, key="settings_card"):
             exp_token, refresh_token, cal_start, cal_end = render_settings_controls(
                 ticker, ticker_type, recents)
-            render_refresh_button()
+            render_refresh_button(clear_pipeline=getattr(fetch_all_data, "clear", None))
 
     # Every view owns the same layout and selector position. Replace the body
     # before any slow work so the prior view cannot linger below the new chart

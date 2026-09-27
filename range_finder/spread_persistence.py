@@ -194,8 +194,8 @@ def _fetch_week_ohlc(conn, week_start: str,
         log.warning(f"weekly_spx lookup failed for {week_start}: {e}")
 
     try:
-        from range_finder.data_collector import _tradier_token
-        token = _tradier_token()
+        from phase1 import credentials
+        token = credentials.tradier_token()
         if token:
             from phase1.data_client import TradierDataClient
             days = TradierDataClient(token).get_history(

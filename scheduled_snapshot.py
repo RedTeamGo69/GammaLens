@@ -97,7 +97,8 @@ def capture_snapshot():
     """Run the full GEX pipeline and save a snapshot + EM to Postgres."""
 
     # ── Validate env ──
-    tradier_token = os.environ.get("TRADIER_TOKEN", "")
+    from phase1 import credentials
+    tradier_token = credentials.tradier_token()
     if not tradier_token:
         _logger.error("TRADIER_TOKEN not set — aborting")
         sys.exit(1)

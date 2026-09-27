@@ -296,16 +296,6 @@ def _build_chain_quotes_for_spreads(
     return _chain_entry_to_quotes(entry), target_exp
 
 
-def _tradier_token() -> str:
-    """Tradier API token from secrets/env (mirrors streamlit_app.get_credentials)."""
-    import os
-    try:
-        tok = st.secrets.get("TRADIER_TOKEN", "")
-    except Exception:
-        tok = ""
-    return tok or os.environ.get("TRADIER_TOKEN", "")
-
-
 def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tuple[dict, str | None]:
     """Fetch the Spread-Finder-planned-Friday chain for ONE ticker and build the
     strike -> {bid/ask} lookup, so the multi-ticker Excel export snaps to the
@@ -320,11 +310,12 @@ def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tup
     error) so the caller degrades cleanly to nominal/BSM strikes — exactly
     today's behavior — instead of blocking the export.
     """
-    token = _tradier_token()
+    from phase1 import credentials
+    token = credentials.tradier_token()
     if not token:
         return {}, None
     try:
-        from streamlit_app import get_expirations_cached
+        from ui_market_data import get_expirations_cached
         avail = get_expirations_cached(token, ticker) or []
     except Exception:
         avail = []

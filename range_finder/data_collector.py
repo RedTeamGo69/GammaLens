@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import yfinance as yf
 
+from phase1 import credentials
+
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -88,6 +90,24 @@ def init_db():
 # SPX + VIX DATA
 # =============================================================================
 
+def _weekly_vol_proxy(yf_symbol: str, years: float, columns: list) -> pd.DataFrame:
+    """Weekly OHLC for a vol index through bar_sources (Tradier primary,
+    yfinance fallback), renamed to ``columns``. Empty (all-NaN on join) when
+    every source fails — the caller's Cboe overlay is the primary for these
+    series, so a missing seed must not kill the fetch."""
+    from range_finder.bar_sources import fetch_weekly_bars, tradier_symbol_for
+    try:
+        bars = fetch_weekly_bars(yf_symbol, tradier_symbol_for(yf_symbol),
+                                 years, yf_symbol)
+    except Exception as e:
+        log.warning(f"{yf_symbol} weekly bars unavailable ({e}) — "
+                    "relying on the Cboe overlay")
+        return pd.DataFrame(columns=columns, dtype=float)
+    out = bars[["open", "high", "low", "close"]].copy()
+    out.columns = columns
+    return out
+
+
 def fetch_spx_vix(years: int = HISTORY_YEARS) -> pd.DataFrame:
     """
     Pull weekly SPX and VIX OHLC from yfinance.
@@ -116,18 +136,7 @@ def fetch_spx_vix(years: int = HISTORY_YEARS) -> pd.DataFrame:
     # the primary source. An empty yfinance response degrades to all-NaN
     # columns for Cboe to fill rather than killing the whole fetch.
     log.info(f"Fetching VIX weekly OHLC from {start.date()} to {end.date()}")
-    vix_raw = yf.download("^VIX", start=start, end=end, interval="1wk", progress=False, timeout=60)
-    if isinstance(vix_raw.columns, pd.MultiIndex):
-        vix_raw.columns = vix_raw.columns.get_level_values(0)
-
-    vix_cols = ["vix_open", "vix_high", "vix_low", "vix_close"]
-    if not vix_raw.empty and "Close" in vix_raw.columns:
-        vix = vix_raw[["Open", "High", "Low", "Close"]].copy()
-        vix.columns = vix_cols
-        vix.index = pd.to_datetime(vix.index).normalize()
-    else:
-        log.warning("yfinance VIX weekly returned empty — relying on Cboe overlay")
-        vix = pd.DataFrame(columns=vix_cols)
+    vix = _weekly_vol_proxy("^VIX", years, ["vix_open", "vix_high", "vix_low", "vix_close"])
 
     # Merge on date index (left join: SPX bars define the weeks; VIX columns
     # may be NaN until the Cboe overlay fills them)
@@ -254,22 +263,9 @@ def fetch_underlying_weekly(
     base = base[["open", "high", "low", "close", "volume"]].copy()
 
     log.info(f"[{ticker}] Fetching weekly vol proxy ({vol_proxy_yf})")
-    vp_raw = yf.download(vol_proxy_yf, start=start, end=end, interval="1wk",
-                         progress=False, timeout=60)
-    if isinstance(vp_raw.columns, pd.MultiIndex):
-        vp_raw.columns = vp_raw.columns.get_level_values(0)
-
-    if not vp_raw.empty:
-        vp = vp_raw[["Open", "High", "Low", "Close"]].copy()
-        vp.columns = ["vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"]
-        # base comes from bar_sources pre-normalized — align vp before joining
-        vp.index = pd.to_datetime(vp.index).normalize()
-        df = base.join(vp, how="left")
-    else:
-        log.warning(f"[{ticker}] vol proxy {vol_proxy_yf} returned empty — vol_proxy_* will be NaN")
-        for col in ("vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"):
-            base[col] = pd.NA
-        df = base
+    vp = _weekly_vol_proxy(vol_proxy_yf, years, [
+        "vol_proxy_open", "vol_proxy_high", "vol_proxy_low", "vol_proxy_close"])
+    df = base.join(vp, how="left")
 
     df.index.name = "week_start"
     df.index = pd.to_datetime(df.index).normalize()
@@ -371,32 +367,13 @@ def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
 # week's Monday* when the cron didn't run, so mid-week views stay locked instead
 # of drifting on live spot.
 
-# yfinance symbol -> Tradier symbol for the anchor-open lookup. Plain
-# symbols (no ^) ARE their own Tradier symbols; ^VXN is deliberately absent
-# (Tradier can't quote it — Cboe serves it below).
-_YF_TO_TRADIER_INDEX = {
-    "^GSPC":  "SPX",
-    "^NDX":   "NDX",
-    "^VIX":   "VIX",
-    "^VIX1D": "VIX1D",
-    "^VIX9D": "VIX9D",
-    "^VIX3M": "VIX3M",
-}
-
-
-def _yf_to_tradier_symbol(symbol: str) -> "str | None":
-    """Tradier symbol for a yfinance symbol, or None if Tradier can't serve it."""
-    if not symbol.startswith("^"):
-        return symbol
-    return _YF_TO_TRADIER_INDEX.get(symbol)
-
-
 def _open_from_tradier(symbol: str, target_date) -> "float | None":
     """Daily-candle Open on `target_date` from Tradier /markets/history."""
-    tradier_symbol = _yf_to_tradier_symbol(symbol)
+    from range_finder.bar_sources import tradier_symbol_for
+    tradier_symbol = tradier_symbol_for(symbol)
     if not tradier_symbol:
         return None
-    token = _tradier_token()
+    token = credentials.tradier_token()
     if not token:
         return None
     iso = target_date.strftime("%Y-%m-%d")
@@ -498,10 +475,11 @@ def _daily_open_on(symbol: str, target_date) -> "float | None":
 
 def _live_from_tradier(symbol: str) -> "float | None":
     """Latest last→close→prevclose from a Tradier quote, or None."""
-    tradier_symbol = _yf_to_tradier_symbol(symbol)
+    from range_finder.bar_sources import tradier_symbol_for
+    tradier_symbol = tradier_symbol_for(symbol)
     if not tradier_symbol:
         return None
-    token = _tradier_token()
+    token = credentials.tradier_token()
     if not token:
         return None
     from phase1.data_client import TradierDataClient, resolve_quote_spot
@@ -838,19 +816,6 @@ def get_event_flags(conn) -> pd.DataFrame:
     )
     df.set_index("week_start", inplace=True)
     return df
-
-
-def _tradier_token() -> str:
-    """Resolve the Tradier token from Streamlit secrets or environment
-    (same pattern as FRED_API_KEY above). Empty string when unset."""
-    token = ""
-    try:
-        import streamlit as st
-        token = st.secrets.get("TRADIER_TOKEN", "")
-    except Exception:
-        pass
-    return token or os.environ.get("TRADIER_TOKEN", "")
-
 
 # =============================================================================
 # SUMMARY

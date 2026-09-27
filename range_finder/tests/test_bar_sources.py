@@ -56,10 +56,8 @@ class _FakeClient:
 
 
 def _patch_tradier(monkeypatch, days) -> None:
-    monkeypatch.setattr(bs, "_tradier_token_or_empty", lambda: "tok",
-                        raising=False)
     import range_finder.data_collector as dc
-    monkeypatch.setattr(dc, "_tradier_token", lambda: "tok")
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: "tok")
     import phase1.data_client as pdc
     monkeypatch.setattr(pdc, "TradierDataClient", lambda tok: _FakeClient(days))
 
@@ -115,7 +113,7 @@ def test_empty_tradier_falls_back(monkeypatch):
 
 def test_no_token_goes_straight_to_yfinance(monkeypatch):
     import range_finder.data_collector as dc
-    monkeypatch.setattr(dc, "_tradier_token", lambda: "")
+    monkeypatch.setattr("phase1.credentials.tradier_token", lambda: "")
     _patch_yfinance(monkeypatch, _DAILY_DATES)
 
     df = bs.fetch_daily_bars("^GSPC", "SPX", 1.0, "SPX")

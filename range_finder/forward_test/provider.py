@@ -31,8 +31,10 @@ from .history_policy import validated_tradier_history
 # listed stock, so its first full week is April 8.
 # https://www.gevernova.com/news/press-releases/ge-vernova-completes-spin-off-begins-trading-new-york-stock-exchange
 # CRWV's IPO priced for Friday 2025-03-28; that one-session week is excluded.
+# IBIT began trading Thursday 2024-01-11 (Tradier's first weekly bar is the
+# 2024-01-08 week); that two-session week is excluded.
 FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8),
-                           'CRWV': date(2025, 3, 31)}
+                           'CRWV': date(2025, 3, 31), 'IBIT': date(2024, 1, 15)}
 
 
 def finite_price(value):

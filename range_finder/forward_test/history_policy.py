@@ -26,7 +26,7 @@ SYMBOLS = {'SPX': ('^GSPC', 'INDEX'), 'SPY': ('SPY', 'ETF'),
            'META': ('META', 'EQUITY'), 'TSLA': ('TSLA', 'EQUITY'), 'HOOD': ('HOOD', 'EQUITY'),
            **{t: (t, 'EQUITY') for t in ('NVDA', 'GOOGL', 'MSFT', 'AMZN', 'AVGO', 'MU', 'WMT', 'COST',
                                          'XOM', 'CVX', 'JPM', 'BAC', 'UNH', 'GEV', 'GE', 'CRWV')},
-           'QQQ': ('QQQ', 'ETF'), 'NDX': ('^NDX', 'INDEX')}
+           'QQQ': ('QQQ', 'ETF'), 'NDX': ('^NDX', 'INDEX'), 'IBIT': ('IBIT', 'ETF')}
 
 
 class HistoryUnavailable(ValueError):

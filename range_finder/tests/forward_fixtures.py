@@ -15,7 +15,7 @@ REFERENCES = {"SPX": 6000., "SPY": 600., "AAPL": 200., "AMD": 150.,
               "NVDA": 225., "GOOGL": 345., "MSFT": 515., "AMZN": 250., "AVGO": 350., "MU": 1080.,
               "WMT": 108., "COST": 920., "XOM": 160., "CVX": 205., "JPM": 345., "BAC": 57.,
               "UNH": 375., "GEV": 960., "GE": 325.,
-              "QQQ": 745., "NDX": 30660., "CRWV": 88.}
+              "QQQ": 745., "NDX": 30660., "CRWV": 88., "IBIT": 47.}
 
 
 class Clock:

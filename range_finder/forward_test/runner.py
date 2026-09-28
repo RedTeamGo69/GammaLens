@@ -7,7 +7,7 @@ from uuid import uuid4
 from phase1.trading_week import NY, trading_week
 from .capture import capture_model
 from .config import (CASH_INDEX_ROOTS, DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
-                     SCORER_VERSION, methodology, study_universe)
+                     SCORER_VERSION, SCORING_ONLY_STUDIES, methodology, study_universe)
 from .scoring import score_forecast
 from .provider import valid_ohlc
 
@@ -32,11 +32,15 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
         week_date = date.fromisoformat(studies[0]["start_week"])
         if week_date.weekday() != 0:
             raise ValueError("Study start_week must be a Monday label")
+        # A superseded study still settles weeks it opened, never new ones.
+        last_week = current.monday
+        if study_id in SCORING_ONLY_STUDIES:
+            last_week = min(last_week, date.fromisoformat(SCORING_ONLY_STUDIES[study_id]))
         # Reconcile scheduler outages with explicit missed slots, never with
         # reconstructed historical forecasts. No historical market API calls.
         known_weeks = {r['week_start'] for r in store.query("SELECT DISTINCT week_start FROM ft_slots WHERE study_id=?", (study_id,))}
         unfinished = {r['week_start'] for r in store.query("SELECT DISTINCT week_start FROM ft_slots WHERE study_id=? AND status NOT IN ('captured','missed')", (study_id,))}
-        while week_date <= current.monday:
+        while week_date <= last_week:
             week = trading_week(week_date)
             ws = str(week_date)
             if ws in known_weeks and ws not in unfinished:

@@ -1,10 +1,11 @@
-"""The scheduler's unchanged CLI command must target the new registration."""
+"""The scheduler's unchanged CLI command targets the new registration plus
+scoring-only studies, never a retired one."""
 from datetime import date
 import sqlite3
 import sys
 
 import forward_test
-from range_finder.forward_test.config import DEFAULT_STUDY_ID, UNIVERSE
+from range_finder.forward_test.config import DEFAULT_STUDY_ID, SCORING_ONLY_STUDIES, UNIVERSE
 from range_finder.forward_test.store import Store
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider
 from phase1.trading_week import trading_week
@@ -18,7 +19,9 @@ def test_default_cli_targets_restart_only(tmp_path, monkeypatch):
     clock = Clock(trading_week(date(2026,9,21)).evaluation_close)
     store = connect()
     store.migrate()
-    store.register(DEFAULT_STUDY_ID, '2026-09-28', clock(), {'universe':UNIVERSE})
+    store.register(DEFAULT_STUDY_ID, '2026-10-05', clock(), {'universe':UNIVERSE})
+    (scoring_only, _), = SCORING_ONLY_STUDIES.items()
+    store.register(scoring_only, '2026-09-28', clock(), {'universe':('SPY', 'NDX')})
     store.register('spread-finder-weekly-v1', '2026-09-14', clock(), {'fixture':True})
     store.close()
     fixture = FixtureProvider(clock)
@@ -31,7 +34,8 @@ def test_default_cli_targets_restart_only(tmp_path, monkeypatch):
     store = connect()
     try:
         runs = store.query('SELECT study_id,status FROM ft_runs')
-        assert runs == [{'study_id':DEFAULT_STUDY_ID, 'status':'ok'}]
+        assert runs == [{'study_id':DEFAULT_STUDY_ID, 'status':'ok'},
+                        {'study_id':scoring_only, 'status':'ok'}]
         assert not store.query('SELECT * FROM ft_slots')
     finally:
         store.close()

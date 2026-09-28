@@ -315,6 +315,31 @@ def test_future_restart_does_not_seed_or_reconcile_old_study(store, week):
     assert not store.slots(DEFAULT_STUDY_ID, str(week.monday))
 
 
+def test_v6_roster_drops_ndx_but_its_old_registration_still_validates():
+    from range_finder.forward_test.config import study_universe
+    assert 'NDX' not in UNIVERSE and 'IBIT' in UNIVERSE and 'QQQ' in UNIVERSE
+    assert study_universe({'universe': ('SPX', 'NDX')}) == ('SPX', 'NDX')
+    with pytest.raises(ValueError):
+        study_universe({'universe': ('SPX', 'PLTR')})
+
+
+def test_scoring_only_study_settles_its_week_but_opens_no_new_one(store, week, monkeypatch):
+    from range_finder.forward_test.config import SCORING_ONLY_STUDIES
+    monkeypatch.setitem(SCORING_ONLY_STUDIES, 'retired', str(week.monday))
+    clock = Clock(week.capture_start)
+    provider = FixtureProvider(clock)
+    store.register('retired', str(week.monday), clock(), {'universe': ('SPY', 'AAPL')})
+    run_study(store, provider, 'retired', clock=clock, model_version='v5')
+    assert len(store.forecasts('retired')) == 32
+    next_week = trading_week(week.monday + timedelta(days=7))
+    clock.value = next_week.capture_start
+    prepares = len(provider.prepares)
+    result = run_study(store, provider, 'retired', clock=clock, model_version='v6')
+    assert not result['errors'] and len(provider.prepares) == prepares
+    assert not store.slots('retired', str(next_week.monday))
+    assert metrics(load_results(store, 'retired'))['close_n'] == 32
+
+
 def test_partial_failure_safe_retry_and_missed_window(store,week):
     clock=Clock(week.capture_start)
     provider=FixtureProvider(clock)

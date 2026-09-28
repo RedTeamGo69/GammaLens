@@ -27,13 +27,27 @@ BALANCED_ADDITIONS = ("NVDA", "GOOGL", "MSFT", "AMZN", "AVGO", "MU",  # top-10 m
 # PLTR was the user's first pick but Tradier serves an impossible 2023-06-05 bar
 # (open 14.365 < low 14.39), which fails closed like LLY/FCX; CRWV replaced it.
 NASDAQ_ADDITIONS = ("QQQ", "NDX", "CRWV")
-UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, *NASDAQ_ADDITIONS)
+# v6, 2026-09-28: NDX dropped after its first live Monday. During market hours
+# Tradier's NDX quote carries trade/bid/ask dates of 0 and volume 0, and
+# timesales returns no NDX data, so no NDX open can pass the freshness check.
+# QQQ keeps the Nasdaq-100 exposure. IBIT (spot-bitcoin ETF) was added at the
+# user's request: on the 10/2 weekly its ATM spreads were 1-4% of mid with ~10k
+# contracts traded by 10:00 ET.
+V6_ADDITIONS = ("IBIT",)
+UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, "QQQ", "CRWV", *V6_ADDITIONS)
+# Tickers only an older registration still carries. They stay valid so the
+# scoring-only study below keeps running, but no new study may register them.
+RETIRED_TICKERS = ("NDX",)
 # Cash-settled indices: weekly contracts trade under a PM-settled root, and the
 # final session settles to the official close rather than a physical delivery.
 CASH_INDEX_ROOTS = {"SPX": "SPXW", "NDX": "NDXP"}
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v5-nasdaq"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v6-ibit"
+# Superseded studies that already froze forecasts keep reconciling and scoring
+# them, but seed no week after this Monday label. v5 captured 24 of 25 tickers
+# on 2026-09-28; dropping it from the schedule would leave that week unscored.
+SCORING_ONLY_STUDIES = {"spread-finder-weekly-v5-nasdaq": "2026-09-28"}
 SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14
@@ -43,7 +57,8 @@ MAX_CAPTURE_ATTEMPTS = 3
 def study_universe(config):
     """A new registration must not silently expand an older study's roster."""
     universe = tuple(config.get('universe', LEGACY_UNIVERSE))
-    if not universe or len(set(universe)) != len(universe) or not set(universe) <= set(UNIVERSE):
+    if (not universe or len(set(universe)) != len(universe)
+            or not set(universe) <= set(UNIVERSE) | set(RETIRED_TICKERS)):
         raise ValueError('Invalid registered study universe')
     return universe
 

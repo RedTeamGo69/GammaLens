@@ -1,0 +1,15 @@
+{
+  "name": "gamma-lens-keep-awake",
+  "private": true,
+  "scripts": {
+    "visit": "node visit.cjs",
+    "sign-in": "node sign_in.cjs",
+    "test": "node --test *.test.cjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  },
+  "devDependencies": {
+    "ws": "8.22.0"
+  }
+}

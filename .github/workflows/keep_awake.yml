@@ -1,0 +1,43 @@
+name: Keep Gamma Lens Awake
+
+on:
+  schedule:
+    # Include weekends. Four hours leaves room for a delayed or missed run
+    # before Cloud's 12-hour sleep window; avoid the busy top of the hour.
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gamma-lens-keep-awake
+  cancel-in-progress: false
+
+jobs:
+  visit:
+    # Activate after verifying the deployment and saved viewer session.
+    if: vars.STREAMLIT_APP_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: .github/keep-awake
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: .github/keep-awake/package-lock.json
+      - name: Install browser tooling
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Verify browser visit and viewer credential scope
+        run: npm test
+      - name: Open and verify Gamma Lens
+        env:
+          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+          STREAMLIT_VIEWER_STATE: ${{ secrets.STREAMLIT_VIEWER_STATE }}
+        run: npm run visit

@@ -18,7 +18,7 @@ jobs:
   visit:
     # Activate after verifying the deployment and saved viewer session.
     if: vars.STREAMLIT_APP_URL != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:

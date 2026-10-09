@@ -38,7 +38,7 @@ permissions:
 
 jobs:
   capture:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # One ticker's failure must not cancel the others: with the default
       # fail-fast, a JPM schema-lock error cancelled SPX's Monday weekly setup

@@ -29,7 +29,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       postgres:
@@ -54,7 +54,7 @@ jobs:
           FORWARD_TEST_TEST_DATABASE_URL: postgresql://fixture:fixture_only@127.0.0.1:5432/gammalens_forward_test
   live-prerequisites:
     if: github.event_name == 'workflow_dispatch' && inputs.live_prerequisites
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

@@ -14,10 +14,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
@@ -31,7 +31,7 @@ jobs:
         run: echo "date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Restore same-day risk-free rate
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: phase1/.rate_cache.json
           key: spy-gamma-rate-${{ steps.ny-date.outputs.date }}

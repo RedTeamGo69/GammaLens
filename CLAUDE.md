@@ -12,7 +12,7 @@ captures daily snapshots.
 
 ```bash
 .venv/Scripts/python.exe -m streamlit run streamlit_app.py    # run the app
-.venv/Scripts/python.exe -m pytest -q                          # ~720 tests, ~2 min
+.venv/Scripts/python.exe -m pytest -q                          # ~800 tests, ~2.5 min
 .venv/Scripts/python.exe -m pytest range_finder/tests -q        # model tests only
 ```
 

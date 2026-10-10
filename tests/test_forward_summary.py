@@ -52,7 +52,7 @@ def test_pending_and_missed_rows_are_not_reported_as_losses():
     assert result["metrics"]["pending"] == result["metrics"]["missed"] == 32
 
 
-@pytest.mark.parametrize("field,value", [("study_id", "second"), ("cohort", "late"), ("week_start", "2026-09-21")])
+@pytest.mark.parametrize("field,value", [("study_id", "second"), ("cohort", "late")])
 def test_recap_rejects_mixed_scopes(field, value):
     rows = fixture_rows()
     rows[0][field] = value
@@ -60,27 +60,84 @@ def test_recap_rejects_mixed_scopes(field, value):
         weekly_summary(rows)
 
 
-def test_summary_detail_toggle_preserves_filters_and_week(monkeypatch):
-    import ui_forward_test
+def test_recap_pools_several_weeks_of_one_study():
     rows = fixture_rows()
     older = deepcopy(rows)
     for row in older:
         row["week_start"] = "2026-09-07"
-    monkeypatch.setattr(ui_forward_test, "load_snapshot", lambda: (rows + older, [], []))
-    at = AppTest.from_string("from ui_forward_test import render_forward_test\nrender_forward_test()").run(timeout=30)
+    result = weekly_summary(rows + older)
+    assert result["week_count"] == 2 and result["captured"] == 128
+    m = result["metrics"]
+    assert (m["close_hits"], m["close_n"]) == (106, 128)
+    # One ticker's per-week prices differ across weeks, so no single
+    # reference/close pair is quoted; the nearest-boundary line names its week.
+    assert "opening reference" not in result["spotlight"]
+    assert "week of" in result["spotlight"]
+
+
+def _summary_app(monkeypatch, rows):
+    import ui_forward_test
+    monkeypatch.setattr(ui_forward_test, "load_snapshot", lambda: (rows, [], []))
+    return AppTest.from_string("from ui_forward_test import render_forward_test\nrender_forward_test()").run(timeout=30)
+
+
+def _two_weeks():
+    rows = fixture_rows()
+    older = deepcopy(rows)
+    for row in older:
+        row["week_start"] = "2026-09-07"
+    return rows + older
+
+
+def test_summary_week_ticker_and_model_filters(monkeypatch):
+    at = _summary_app(monkeypatch, _two_weeks())
+    assert not at.exception
+    assert at.multiselect(key="ft_summary_week_start").value == ["2026-09-14"]
+    assert at.multiselect(key="ft_summary_ticker").value == []
+    assert at.multiselect(key="ft_summary_model").value == []
+    at.multiselect(key="ft_summary_week_start").select("2026-09-07").run()
+    assert any("106 of 128" in m.value for m in at.markdown)
+    assert any("2 weeks at a glance" in s.value for s in at.subheader)
+    at.multiselect(key="ft_summary_ticker").select("AMD").run()
+    assert any("of 32 scored" in m.value for m in at.markdown)
+    at.multiselect(key="ft_summary_model").select("M1_baseline").run()
+    assert not at.exception
+    assert any("of 8 scored" in m.value for m in at.markdown)
+    # Clearing the week picker means every week, matching Detailed data.
+    at.multiselect(key="ft_summary_week_start").set_value([]).run()
+    assert any("of 8 scored" in m.value for m in at.markdown)
+
+
+def test_summary_filters_with_no_matching_rows(monkeypatch):
+    rows = fixture_rows()
+    older = [r for r in deepcopy(rows) if r["ticker"] == "SPX"]
+    for row in older:
+        row["week_start"] = "2026-09-07"
+    at = _summary_app(monkeypatch, rows + older)
+    at.multiselect(key="ft_summary_ticker").select("AMD").run()
+    at.multiselect(key="ft_summary_week_start").set_value(["2026-09-07"]).run()
+    assert not at.exception
+    assert any("No predictions match" in i.value for i in at.info)
+
+
+def test_summary_detail_toggle_preserves_filters_and_week(monkeypatch):
+    at = _summary_app(monkeypatch, _two_weeks())
     assert not at.exception
     assert at.button_group(key="ft_view").value == "Summary"
-    assert at.selectbox(key="ft_summary_week").value == "2026-09-14"
     assert any("53 of 64" in m.value for m in at.markdown)
-    assert not at.multiselect
-    at.selectbox(key="ft_summary_week").set_value("2026-09-07").run()
+    at.multiselect(key="ft_summary_week_start").set_value(["2026-09-07"]).run()
+    at.multiselect(key="ft_summary_model").select("M2_vix").run()
     at.button_group(key="ft_view").set_value("Detailed data").run()
+    # Summary picks do not leak into the Detailed filters, and vice versa.
+    assert at.multiselect(key="ft_filter_model").value == []
     at.multiselect(key="ft_filter_ticker").select("AMD").run()
     assert len(at.dataframe[1].value) == 32
     at.button_group(key="ft_view").set_value("Summary").run()
     assert not at.exception
-    assert at.selectbox(key="ft_summary_week").value == "2026-09-07"
-    assert any("53 of 64" in m.value for m in at.markdown)
+    assert at.multiselect(key="ft_summary_week_start").value == ["2026-09-07"]
+    assert at.multiselect(key="ft_summary_model").value == ["M2_vix"]
+    assert at.multiselect(key="ft_summary_ticker").value == []
+    assert any("of 16 scored" in m.value for m in at.markdown)
     at.button_group(key="ft_view").set_value(None).run()
     assert at.button_group(key="ft_view").value == "Summary"
     at.button_group(key="ft_view").set_value("Detailed data").run()

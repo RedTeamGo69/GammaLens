@@ -43,10 +43,15 @@ def ticker_recap(rows):
 
 
 def weekly_summary(rows):
-    """One study/cohort/week only; never silently blend independent studies."""
-    scopes = {(r["study_id"], r["cohort"], r["week_start"]) for r in rows}
+    """One study/cohort only; never silently blend independent studies.
+
+    Several weeks of the same study may be pooled — the caller labels the
+    result as a multi-week recap so it is not read as one market week.
+    """
+    scopes = {(r["study_id"], r["cohort"]) for r in rows}
     if len(scopes) > 1:
-        raise ValueError("Select one study, capture cohort and week for a summary")
+        raise ValueError("Select one study and capture cohort for a summary")
+    week_count = len({r["week_start"] for r in rows})
     m = metrics(rows)
     captured = sum(bool(r.get("forecast_id")) for r in rows)
     complete = bool(rows) and captured == len(rows) and m["close_n"] == len(rows) and m["path_n"] == len(rows)
@@ -90,7 +95,8 @@ def weekly_summary(rows):
         if len(leaders) == 1:
             group = tickers[leaders[0]]
             prices = {(r.get("reference"), r.get("final_close")) for r in group if r.get("close_eligible")}
-            if len(prices) == 1:
+            # Each week has its own opening reference; quote one only for a single week.
+            if week_count == 1 and len(prices) == 1:
                 reference, close = prices.pop()
                 if reference and close is not None:
                     spotlight += (f" Its opening reference was ${reference:,.2f}; it closed at "
@@ -102,14 +108,20 @@ def weekly_summary(rows):
             if side and held:
                 nearest = min(held, key=lambda r: abs(r[side] - r["final_close"]))
                 margin = abs(nearest[side] - nearest["final_close"])
+                # Pooled weeks have different closes, so name the week the margin came from.
+                week = (", week of " + _week_label(nearest["week_start"])) if week_count > 1 else ""
                 spotlight += (f" The closest {'upper' if side == 'call_short' else 'lower'} boundary that held "
                               f"at the close was ${nearest[side]:,.2f} "
                               f"({MODEL_LABELS.get(nearest['model'], nearest['model'])}, "
-                              f"{nearest['tier_label']}), a ${margin:,.2f} margin.")
+                              f"{nearest['tier_label']}{week}), a ${margin:,.2f} margin.")
     return {"metrics": m, "captured": captured, "complete": complete,
             "tickers": ticker_rows, "models": model_rows, "tiers": tier_rows,
-            "spotlight": spotlight, "ticker_count": len(tickers),
+            "spotlight": spotlight, "ticker_count": len(tickers), "week_count": week_count,
             "model_count": len(models), "tier_count": len(tiers)}
+
+
+def _week_label(value):
+    return date.fromisoformat(value).strftime("%b %d, %Y")
 
 
 def _choose(label, options, key, *, format_func=str):
@@ -121,6 +133,19 @@ def _choose(label, options, key, *, format_func=str):
         st.session_state[key] = options[0]
     value = st.selectbox(label, options, key=key, format_func=format_func)
     st.session_state[saved] = value
+    return value
+
+
+def _choose_many(label, options, key, *, default=(), format_func=str):
+    """Multiselect twin of _choose; an empty pick means no filter, like Detailed data."""
+    saved = f"_{key}"
+    previous = st.session_state.get(key, st.session_state.get(saved, list(default)))
+    kept = [value for value in previous if value in options]
+    # Picks that all fell out of scope (e.g. a study switch) restore the default
+    # rather than silently widening to every week.
+    st.session_state[key] = kept if kept or not previous else list(default)
+    value = st.multiselect(label, options, key=key, format_func=format_func, placeholder="All")
+    st.session_state[saved] = list(value)
     return value
 
 
@@ -137,13 +162,25 @@ def render_summary(rows, studies):
             chosen = _choose(label, options, f"ft_summary_{field}")
             scoped = [r for r in scoped if r[field] == chosen]
     weeks = sorted({r["week_start"] for r in scoped}, reverse=True)
-    week = _choose("Week", weeks, "ft_summary_week",
-                   format_func=lambda value: "Week of " + date.fromisoformat(value).strftime("%b %d, %Y"))
-    scoped = [r for r in scoped if r["week_start"] == week]
+    # Options come from the whole study so a ticker or model stays pickable
+    # while the week selection changes; the latest week is the opening view.
+    pickers = (("week_start", "Week", weeks, [weeks[0]], lambda value: "Week of " + _week_label(value)),
+               ("ticker", "Ticker", sorted({r["ticker"] for r in scoped}), [], str),
+               ("model", "Model", sorted({r["model"] for r in scoped}), [],
+                lambda value: MODEL_LABELS.get(value, value)))
+    for column, (field, label, options, default, fmt) in zip(st.columns(len(pickers)), pickers):
+        with column:
+            chosen = _choose_many(label, options, f"ft_summary_{field}", default=default, format_func=fmt)
+        if chosen:
+            scoped = [r for r in scoped if r[field] in chosen]
+    if not scoped:
+        st.info("No predictions match these filters.")
+        return []
     result = weekly_summary(scoped)
     m = result["metrics"]
+    weeks_n = result["week_count"]
     with st.container(border=True):
-        st.subheader("The week at a glance")
+        st.subheader("The week at a glance" if weeks_n == 1 else f"{weeks_n} weeks at a glance")
         if m["close_n"]:
             st.markdown(f"**{m['close_hits']} of {m['close_n']} scored predictions finished inside their ranges "
                         f"({m['close_hit_rate']:.1%}).**")
@@ -166,8 +203,11 @@ def render_summary(rows, studies):
             st.caption(f"Closed above the upper boundary: {m['call_failures']} · "
                        f"Closed below the lower boundary: {m['put_failures']}")
     st.caption(f"{result['ticker_count']} tickers · {result['model_count']} models · "
-               f"{result['tier_count']} range widths · {len(scoped)} comparison rows. "
-               "These are overlapping predictions for one market week, not independent trading weeks.")
+               f"{result['tier_count']} range widths · {len(scoped)} comparison rows. " +
+               ("These are overlapping predictions for one market week, not independent trading weeks."
+                if weeks_n == 1 else
+                f"Pooled across {weeks_n} market weeks; predictions within each week overlap, "
+                "so rows are not independent trials."))
     st.subheader("By ticker")
     st.table(pd.DataFrame(result["tickers"]), hide_index=True)
     if result["spotlight"]:
@@ -179,6 +219,7 @@ def render_summary(rows, studies):
             st.table(pd.DataFrame(result[key]), hide_index=True)
     st.caption("Lower PI is the tighter range; Effective (+buffer) includes the model's buffer. "
                "Wider boundaries give prices more room, so a higher hit rate alone does not mean better trading performance.")
-    st.caption("This is a one-week comparison, not enough to establish a winning model. "
+    st.caption(("This is a one-week comparison" if weeks_n == 1 else f"This is a {weeks_n}-week comparison") +
+               ", not enough to establish a winning model. "
                "Results measure price-range accuracy, not trading profits or verified option settlement.")
     return scoped

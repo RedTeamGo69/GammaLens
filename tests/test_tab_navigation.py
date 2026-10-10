@@ -6,6 +6,14 @@ from streamlit.testing.v1 import AppTest
 FIXTURE = Path(__file__).parent / "fixtures" / "navigation_app.py"
 
 
+def _query_param(at: AppTest, key: str) -> str:
+    # AppTest.query_params returns a one-item list per key on Streamlit 1.62
+    # but a bare string on 1.65 (first seen in CI 2026-10-09). requirements.txt
+    # leaves Streamlit unpinned, so CI and a local venv can sit on either side.
+    value = at.query_params[key]
+    return value[0] if isinstance(value, list) else value
+
+
 def test_tab_callback_commits_route_before_render_and_prevents_deselect():
     at = AppTest.from_string('''
 import streamlit as st
@@ -36,7 +44,7 @@ def test_gex_forward_gex_preserves_controls_and_export():
         assert at.button_group(key="exp_pills").value == "week"
         assert at.session_state["fixture_market_calls"] == calls
         assert not at.code
-        assert at.query_params["tab"] == ["forward"]
+        assert _query_param(at, "tab") == "forward"
         at.button_group(key="ft_view").set_value("Detailed data").run()
         at.multiselect(key="ft_filter_ticker").select("AMD").run()
         assert at.session_state["fixture_market_calls"] == calls
@@ -47,7 +55,7 @@ def test_gex_forward_gex_preserves_controls_and_export():
         assert any(code.value.startswith("GL1") for code in at.code)
         assert at.text_input(key="ticker_search")
         assert at.button_group(key="exp_pills").value == "week"
-        assert at.query_params["tab"] == ["gex"]
+        assert _query_param(at, "tab") == "gex"
         calls += 1
         assert at.session_state["fixture_market_calls"] == calls
     at.button_group(key="tab_seg").set_value("spread").run()

@@ -242,3 +242,14 @@ def test_stacked_dots_each_carry_every_model_in_the_stack():
         p = points[model, "Effective (+buffer)"]
         assert p["Models"] == "M3 Extended / M4 Full" and p["Ranges"] == "Effective (+buffer)"
     assert points["M1 Baseline", "Effective (+buffer)"]["Models"] == "M1 Baseline"
+
+
+def test_condor_column_appears_only_once_wing_quotes_exist():
+    rows = fixture_rows()
+    assert "Condor return" not in weekly_summary(rows)["tiers"][0]
+    for r in rows:
+        r.update(recommended_width=5.0, short_contracts={"put": {"bid": 1.0}, "call": {"bid": 1.0}},
+                 wings={side: [{"width": 5.0, "ask": 0.5}] for side in ("put", "call")})
+    result = weekly_summary(rows)
+    assert result["condor"] and all("trades" in t["Condor return"] for t in result["tiers"])
+    assert all("Condor return" in m for m in result["models"])

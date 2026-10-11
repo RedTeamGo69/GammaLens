@@ -6,7 +6,7 @@ from itertools import combinations
 import pandas as pd
 import streamlit as st
 
-from range_finder.forward_test.results import metrics
+from range_finder.forward_test.results import condor_return, metrics
 from range_finder.forward_workbook import ft_class
 from range_finder.recommendations import TIER_KEYS, TIER_LABELS
 from ui_theme import TOKENS
@@ -50,6 +50,11 @@ def ticker_recap(rows):
     return " ".join(parts)
 
 
+def condor_cell(rows):
+    returns = [x for x in map(condor_return, rows) if x is not None]
+    return f"{sum(returns) / len(returns):+.1%} · {len(returns)} trades" if returns else "No quotes"
+
+
 def weekly_summary(rows):
     """One study/cohort only; never silently blend independent studies.
 
@@ -66,6 +71,8 @@ def weekly_summary(rows):
     tickers = defaultdict(list)
     models = defaultdict(list)
     tiers = defaultdict(list)
+    # Only records captured since wing quotes were frozen can price a spread.
+    has_condor = any(condor_return(r) is not None for r in rows)
     for r in rows:
         tickers[r["ticker"]].append(r)
         models[r["model"]].append(r)
@@ -77,12 +84,16 @@ def weekly_summary(rows):
                             "Closed inside": ratio(tm["close_hits"], tm["close_n"]),
                             "Breached": f"{tm['breaches']}/{tm['path_n']}" if tm["path_n"] else "Awaiting data",
                             "What happened": ticker_recap(group)})
+        if has_condor:
+            ticker_rows[-1]["Condor return"] = condor_cell(group)
     model_rows = []
     for model, group in sorted(models.items()):
         mm = metrics(group)
         model_rows.append({"Model": MODEL_LABELS.get(model, model),
                            "Closed inside": ratio(mm["close_hits"], mm["close_n"]),
                            "Breached": f"{mm['breaches']}/{mm['path_n']}" if mm["path_n"] else "Awaiting data"})
+        if has_condor:
+            model_rows[-1]["Condor return"] = condor_cell(group)
     tier_rows = []
     for tier, label in zip(TIER_KEYS, TIER_LABELS):
         if tier not in tiers:
@@ -91,6 +102,8 @@ def weekly_summary(rows):
         tier_rows.append({"Range width": label,
                           "Closed inside": ratio(tm["close_hits"], tm["close_n"]),
                           "Breached": f"{tm['breaches']}/{tm['path_n']}" if tm["path_n"] else "Awaiting data"})
+        if has_condor:
+            tier_rows[-1]["Condor return"] = condor_cell(tiers[tier])
     spotlight = ""
     failed = [r for r in rows if r.get("close_eligible") and r.get("close_inside") is False]
     if failed:
@@ -125,7 +138,7 @@ def weekly_summary(rows):
     return {"metrics": m, "captured": captured, "complete": complete,
             "tickers": ticker_rows, "models": model_rows, "tiers": tier_rows,
             "spotlight": spotlight, "ticker_count": len(tickers), "week_count": week_count,
-            "model_count": len(models), "tier_count": len(tiers)}
+            "model_count": len(models), "tier_count": len(tiers), "condor": has_condor}
 
 
 def _shown_model(ticker, models):
@@ -384,7 +397,13 @@ def render_summary(rows, studies):
             st.table(pd.DataFrame(result[key]), hide_index=True)
     st.caption("Lower PI is the tighter range; Effective (+buffer) includes the model's buffer. "
                "Wider boundaries give prices more room, so a higher hit rate alone does not mean better trading performance.")
+    if result["condor"]:
+        st.caption("Condor return: an iron condor at the recommended wing width, short legs sold at the bid and "
+                   "wings bought at the ask when the forecast was captured, held to the weekly close; average "
+                   "P&L per dollar of max risk. No early exits, fees or verified settlement.")
     st.caption(("This is a one-week comparison" if weeks_n == 1 else f"This is a {weeks_n}-week comparison") +
-               ", not enough to establish a winning model. "
-               "Results measure price-range accuracy, not trading profits or verified option settlement.")
+               ", not enough to establish a winning model. " +
+               ("Hit rates measure price-range accuracy; condor returns are a hold-to-close estimate, "
+                "not verified trading profits." if result["condor"] else
+                "Results measure price-range accuracy, not trading profits or verified option settlement."))
     return scoped

@@ -54,6 +54,31 @@ def metrics(rows):
             "average_width_ratio": sum(widths) / len(widths) if widths else None, "width_n": len(widths)}
 
 
+def condor_return(row):
+    """Iron condor P&L at the recommended wing width, held to the weekly close, per unit of max risk.
+
+    Natural fills from the capture snapshot: short legs sold at the bid, wings
+    bought at the ask. None for records captured before wing quotes were frozen,
+    rows without a valid close, or a width not offered on both sides.
+    """
+    width, close = row.get("recommended_width"), row.get("final_close")
+    if not (row.get("close_eligible") is True and width and close is not None):
+        return None
+    credit = 0.0
+    for side in ("put", "call"):
+        short = (row.get("short_contracts") or {}).get(side) or {}
+        wing = next((w for w in (row.get("wings") or {}).get(side, [])
+                     if abs(w.get("width", 0) - width) < 1e-9), {})
+        if short.get("bid") is None or wing.get("ask") is None:
+            return None
+        credit += short["bid"] - wing["ask"]
+    risk = width - credit
+    if risk <= 0:  # a quote error, not a riskless trade
+        return None
+    loss = min(max(0.0, row["put_short"] - close), width) + min(max(0.0, close - row["call_short"]), width)
+    return (credit - loss) / risk
+
+
 GROUP_KEYS = ("study_id", "cohort", "model_version", "ticker", "model", "tier")
 
 

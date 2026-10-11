@@ -14,7 +14,7 @@ from range_finder.forward_test.config import MODELS, UNIVERSE
 from range_finder.forward_test.store import Store
 from range_finder.forward_test.runner import run_study
 from range_finder.forward_test.scoring import score_forecast
-from range_finder.forward_test.results import load_results, metrics, scoreboard, build_workbook
+from range_finder.forward_test.results import condor_return, load_results, metrics, scoreboard, build_workbook
 from range_finder.recommendations import TIER_KEYS, build_recommendations, tier_bands, chain_entry_to_quotes
 from phase1.trading_week import trading_week, listed_week_expiration
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider, prepared_fixture, scoring_fixture
@@ -52,6 +52,9 @@ def test_all_models_tiers_ui_parity_no_gex(ticker, model, week):
     assert _tier_bands_from_tiers(tiers) == {r['tier']: (r['put_short'],r['call_short']) for r in frozen}
     assert [f['tier'] for f in frozen] == list(TIER_KEYS)
     assert all(f['wings']['put'] and f['wings']['call'] for f in frozen)
+    # Every wing carries its own quote from the capture snapshot, not just a symbol.
+    assert all(w['bid'] is not None and w['ask'] is not None and w['symbol']
+               for f in frozen for side in ('put', 'call') for w in f['wings'][side])
     p['features']['gex_normalized'] = -1e10
     p['features']['gex_flag'] = -1
     _, other = capture_model(p, model, week, 'v1', clock())
@@ -511,3 +514,18 @@ def test_two_week_scoreboard_accumulates_refits_but_separates_methodology_change
     assert snapshots[0]['features']!=snapshots[1]['features']
     assert snapshots[0]['training_cutoff']!=snapshots[1]['training_cutoff']
     assert snapshots[0]['source_inputs_id']!=snapshots[1]['source_inputs_id']
+
+
+def test_condor_return_prices_natural_fills_and_caps_loss_at_width():
+    row = {"close_eligible": True, "recommended_width": 5.0, "put_short": 95.0, "call_short": 105.0,
+           "short_contracts": {"put": {"bid": 1.0}, "call": {"bid": 0.8}},
+           "wings": {"put": [{"width": 5.0, "ask": 0.4}, {"width": 10.0, "ask": 0.1}],
+                     "call": [{"width": 5.0, "ask": 0.3}]}}
+    credit = 1.0 - 0.4 + 0.8 - 0.3
+    assert condor_return({**row, "final_close": 100.0}) == pytest.approx(credit / (5 - credit))
+    assert condor_return({**row, "final_close": 106.0}) == pytest.approx((credit - 1) / (5 - credit))
+    assert condor_return({**row, "final_close": 80.0}) == pytest.approx((credit - 5) / (5 - credit))
+    # Records frozen before wing quotes existed, and unscored rows, are excluded rather than zero.
+    legacy = {**row, "final_close": 100.0, "wings": {"put": [{"width": 5.0, "symbol": "X"}], "call": []}}
+    assert condor_return(legacy) is None
+    assert condor_return({**row, "final_close": 100.0, "close_eligible": False}) is None

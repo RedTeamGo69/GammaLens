@@ -131,8 +131,9 @@ def capture_model(prepared, model, week, model_version, now):
         shorts, wings = {}, {}
         for side in ("put", "call"):
             shorts[side] = contracts[side][shown[f"{side}_short"]]
-            wings[side] = [{"long_strike": s.long_strike, "width": s.wing_width,
-                            "symbol": contracts[side][s.long_strike]["symbol"]}
+            # Full long-leg quote from the same chain snapshot as the short leg, so a
+            # spread's net credit is measurable for every offered wing width.
+            wings[side] = [{**contracts[side][s.long_strike], "long_strike": s.long_strike, "width": s.wing_width}
                            for s in shown[f"{side}_spreads"] if s.long_strike in contracts[side]]
         forecasts.append({"tier": key, "tier_label": label, "ticker": ticker, "model": model,
                           "model_version": design_version, "methodology_id": model_version, "fit_id": digest(fitted),

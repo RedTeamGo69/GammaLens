@@ -81,8 +81,12 @@ highest = newest) is the cheap way to tell a recreated table from an original.
 ~4 hours late, so the script treats any run after the 9:20–10:15 ET window as **recovery**:
 it re-runs a missing first-session weekly setup (anchor from the daily bar; no GEX save, no
 spot fallback) and exits 1 if the opening EM snapshots are missing (the dead-man's-switch
-e-mail). Matrix (`fail-fast: false`): `SPX, XSP, SPY, QQQ, NDX, NVDA, JPM, CAT`. Index/ETF
-capture daily; single names run weekly-only on the week's first trading day.
+e-mail). Matrix (`fail-fast: false`, `max-parallel: 8`) = the 25-ticker forward-test roster
+(`forward_test/config.py::UNIVERSE`; `tests/test_ticker_roster.py` enforces it, and the GEX
+quick-pick chips read the same list). Index/ETF (SPX, SPY, QQQ) capture daily; single names,
+IBIT included, run weekly-only on the week's first trading day. XSP, NDX and CAT were
+dropped from capture on 2026-10-11. `scripts/purge_non_roster_tickers.py` removes off-roster
+rows from app tables (CSV backup first; `ft_*` forward-test history is never touched).
 
 Architecture decisions live in `docs/adr/` (0001: the forward study keeps its own
 fail-closed market-data path — don't merge it into `bar_sources`).

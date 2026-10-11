@@ -44,14 +44,22 @@ jobs:
       # fail-fast, a JPM schema-lock error cancelled SPX's Monday weekly setup
       # (2026-09-21), so no SPX anchor, fit or calibration plan landed.
       fail-fast: false
+      # The forward test captures the same 25 tickers from 9:30 on the same
+      # Tradier token. Eight at a time keeps the opening burst at the old
+      # 8-ticker matrix's size; later jobs finish well inside the 9:20-10:15
+      # window, so a single name's Monday GEX may land a few minutes after 9:30.
+      max-parallel: 8
       matrix:
-        # Index / ETF defaults + single-name defaults. Single names resolve
-        # through ticker_config's dynamic-config path (own-HAR, VIX vol proxy).
-        # Cadence differs by type: index/ETF run daily (GEX/EM); single names
-        # (stock category) run weekly-only on the week's first trading day —
-        # see the cadence gate in scheduled_snapshot.py. The weekly HAR fit
-        # fires Mondays for all.
-        ticker: [SPX, XSP, SPY, QQQ, NDX, NVDA, JPM, CAT]
+        # The forward-test roster (range_finder/forward_test/config.py
+        # UNIVERSE; tests/test_ticker_roster.py keeps the two in sync). Daily
+        # index/ETF captures go first so they land at the open. Single names
+        # (stock category; IBIT resolves as one through the dynamic-config
+        # path) run weekly-only on the week's first trading day - see the
+        # cadence gate in scheduled_snapshot.py. The weekly HAR fit fires
+        # Mondays for all, refreshing 6y of bars, so a new ticker builds its
+        # own history on its first Monday.
+        ticker: [SPX, SPY, QQQ, IBIT, AAPL, AMD, AMZN, AVGO, BAC, COST, CRWV, CVX, GE,
+                 GEV, GOOGL, HOOD, JPM, META, MSFT, MU, NVDA, TSLA, UNH, WMT, XOM]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

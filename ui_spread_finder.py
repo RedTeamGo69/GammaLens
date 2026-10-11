@@ -344,12 +344,13 @@ def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tup
     return (quotes, target_exp) if quotes else ({}, None)
 
 
-# Always-present defaults, in display order: the index/ETF defaults followed by
-# the single-name defaults the Monday cron fits (NVDA/JPM/CAT). Mirrors
-# QUICK_TICKERS in ui_theme — keep the two in sync. The active/searched ticker
+# Always-present export defaults, in display order. Deliberately a small subset
+# of the forward-test roster (QUICK_TICKERS), not all of it: every default is
+# rebuilt from the DB when the tab's 10-min cache expires (~2s per ticker), so
+# all 25 would stall the tab for most of a minute. The active/searched ticker
 # and any the user has added (session-state list under _FT_XLSX_EXTRA_KEY) are
 # appended.
-_FT_DEFAULT_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "NVDA", "JPM", "CAT"]
+_FT_DEFAULT_TICKERS = ["SPX", "SPY", "QQQ", "NVDA", "JPM"]
 _FT_XLSX_EXTRA_KEY = "_sf_xlsx_extra"   # session-state list of user-added tickers
 
 

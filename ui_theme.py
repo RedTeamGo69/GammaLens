@@ -18,6 +18,8 @@ from typing import Any
 
 import streamlit as st
 
+from range_finder.forward_test.config import UNIVERSE
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Brand assets
@@ -66,11 +68,10 @@ TOKENS = {
     "text_dim": "#5b6878",
 }
 
-# Curated quick-pick (featured) tickers — the index/ETF defaults plus the
-# single-name defaults the Monday cron fits (NVDA/JPM/CAT). Also the
-# always-present Excel-export defaults, so the featured row and the workbook
-# track each other (keep in sync with _FT_DEFAULT_TICKERS in ui_spread_finder).
-QUICK_TICKERS = ["SPX", "XSP", "SPY", "QQQ", "NDX", "NVDA", "JPM", "CAT"]
+# Quick-pick (featured) tickers: the forward-test roster, which is also the set
+# the daily/Monday cron captures (GEX, EM, weekly setup). Read from the study
+# config so a roster change moves the chips with it.
+QUICK_TICKERS = list(UNIVERSE)
 
 EXP_MODES = [
     ("0dte", "0DTE"),

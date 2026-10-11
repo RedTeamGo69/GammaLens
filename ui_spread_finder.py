@@ -66,7 +66,7 @@ from range_finder.forward_workbook import (
 )
 from range_finder.recommendations import (
     build_recommendations, displayed_tier, tier_bands, chain_entry_to_quotes,
-    FitReport, fit_and_save_specs, load_saved_fit,
+    FitReport, fit_and_save_specs, load_saved_fit, TIER_KEYS, TIER_LABELS,
 )
 
 from theme import SF_BULL, SF_BEAR, SF_NEUT
@@ -305,6 +305,8 @@ def _build_chain_quotes_for_spreads(
     return _chain_entry_to_quotes(entry), target_exp
 
 
+# Cached so one fetch serves every model's export row and the pinned SPX table.
+@st.cache_data(ttl=600, show_spinner=False)
 def _export_chain_quotes(ticker: str, ref_date: "date_cls | None" = None) -> tuple[dict, str | None]:
     """Fetch the Spread-Finder-planned-Friday chain for ONE ticker and build the
     strike -> {bid/ask} lookup, so the multi-ticker Excel export snaps to the
@@ -816,7 +818,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         )
 
     st.html(
-        f'<div class="sf-section-title">{ticker} Weekly Credit Spread Finder</div>'
+        f'<div class="sf-section-title">{ticker} Quasimodo · Weekly Credit Spreads</div>'
         '<div class="sf-section-sub">HAR regression range forecast · GEX calibration '
         'pending — not applied to live buffer or strikes · 💾 Neon Postgres</div>'
     )
@@ -836,6 +838,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                        + "\n\n".join(f"• {m}" for m in _cal_warnings))
     except Exception:
         pass
+
+    _render_spx_model_strikes(planning_week(run_now).key)
 
     # ── Extract GEX context from current dashboard data ──
     gex_ctx = extract_gex_context(levels, spot, regime)
@@ -1063,7 +1067,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         if df_feat.empty:
             if _features_ticker != "SPX":
                 st.warning(
-                    f"📉 Spread Finder isn't available for **{ticker}** — no usable "
+                    f"📉 Quasimodo isn't available for **{ticker}** — no usable "
                     "multi-year price history was found for it (the GEX view above "
                     "still works). This typically means Yahoo Finance has no history "
                     "under the same symbol. Try **Refresh Market Data → Rebuild "
@@ -1692,6 +1696,44 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 st.html('<div class="sf-note" style="margin-top:6px;">No major events this week</div>')
 
     _risk_tier_fragment()
+
+
+def _render_spx_model_strikes(week_start: str) -> None:
+    """SPX short strikes from every model, pinned above whichever ticker is open.
+
+    Built through the export's cached path (saved fits + the Monday-open
+    anchor), so it matches the workbook and stays fixed for the week instead
+    of following edits to the reference input below.
+    """
+    rows, problems, ref, ref_note = {}, {}, None, ""
+    for model in RF_MODEL_SPECS:
+        for band in _cached_nonactive_week_bands(week_start, model, ("SPX",)):
+            if band["error"]:
+                problems.setdefault(band["error"], []).append(model)
+                continue
+            ref = band["ref"]
+            if any("prior close" in n for n in band["notes"]):
+                ref_note = " (prior weekly close — Monday open not captured yet)"
+            rows[model] = {label: f"{_fmt_strike(band['bands'][key][0])} / {_fmt_strike(band['bands'][key][1])}"
+                           for key, label in zip(TIER_KEYS, TIER_LABELS) if key in band["bands"]}
+    if not rows and not problems:
+        return
+    st.html('<div class="sf-eyebrow">SPX this week · every model · put short / call short</div>')
+    if rows:
+        # Shade the risk tier and model last picked on SPX; the cell where they cross is the live trade.
+        tier = TIER_LABELS[st.session_state.get("sf_risk_tier_idx_SPX", len(TIER_LABELS) - 1)]
+        model = st.session_state.get("sf_model_choice_SPX", _default_model_for_ticker("SPX"))
+        def _shade(col):
+            if col.name != tier:
+                return [""] * len(col)
+            return [f"background-color: rgba(43,232,138,{.32 if m == model else .12}); font-weight: 700"
+                    for m in col.index]
+        st.table(pd.DataFrame.from_dict(rows, orient="index").style.apply(_shade))
+        st.caption(f"Anchored to SPX {ref:,.2f}{ref_note} · week of {week_start}. "
+                   f"Shaded column = your SPX risk tier · brightest cell = your SPX model ({model}).")
+    # A stale feature row blocks every model the same way; say it once.
+    for error, models in problems.items():
+        st.caption(f"⚠ {', '.join(models)}: {error}")
 
 
 def _render_gex_context_panel(gex_ctx: GEXContext, spot: float):

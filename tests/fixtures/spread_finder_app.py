@@ -32,6 +32,17 @@ LEVELS = {"zero_gamma": 5990.0, "call_wall": 6100.0, "put_wall": 5900.0}
 DATA = SimpleNamespace(chain_cache={}, avail=["2026-06-18"], market_open=True)
 
 
+def _week_bands(week_start, model, tickers):
+    # Persisted-state rows as the export/pinned-SPX path returns them; M4 has no fit.
+    if model == "M4_full":
+        return [{"ticker": t, "error": "no saved M4_full fit", "bands": {}, "notes": [], "ref": None}
+                for t in tickers]
+    return [{"ticker": t, "ref": 6000.0, "prev_close": 5990.0, "notes": [model], "error": None,
+             "bands": {"lower_pi": (5950.0, 6050.0), "point": (5900.0, 6100.0),
+                       "pi_upper": (5850.0, 6150.0), "effective": (5800.0, 6200.0)}}
+            for t in tickers]
+
+
 class _Conn:
     def cursor(self):
         raise AssertionError("fixture: the tab reached the database directly")
@@ -47,7 +58,7 @@ with (
     patch.object(usf, "_cached_prior_week_close", lambda week, ticker: 5990.0),
     patch.object(usf, "_cached_side_share_q", lambda ticker: None),
     patch.object(usf, "_cached_pi_coverage", lambda ticker: {"n": 0}),
-    patch.object(usf, "_cached_nonactive_week_bands", lambda *a: []),
+    patch.object(usf, "_cached_nonactive_week_bands", _week_bands),
 ):
     usf._render_spread_finder_tab(
         6005.0, LEVELS, {"regime": "positive"}, DATA, ticker="SPX", weekly_em={},

@@ -5,7 +5,8 @@ import runpy
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from ui_forward_summary import weekly_summary, ticker_recap
+from range_finder.recommendations import TIER_LABELS
+from ui_forward_summary import close_landings, hidden_lines, ticker_recap, weekly_summary, width_tradeoff
 
 
 def fixture_rows():
@@ -144,3 +145,100 @@ def test_summary_detail_toggle_preserves_filters_and_week(monkeypatch):
     assert not at.exception
     assert at.multiselect(key="ft_filter_ticker").value == ["AMD"]
     assert len(at.dataframe[1].value) == 32
+
+
+def test_select_all_collapses_to_the_all_placeholder(monkeypatch):
+    at = _summary_app(monkeypatch, _two_weeks())
+    tickers = at.multiselect(key="ft_summary_ticker")
+    tickers.set_value(list(tickers.options)).run()
+    assert at.multiselect(key="ft_summary_ticker").value == []
+    at.multiselect(key="ft_summary_week_start").set_value(["2026-09-14", "2026-09-07"]).run()
+    assert at.multiselect(key="ft_summary_week_start").value == []
+    assert any("2 weeks at a glance" in s.value for s in at.subheader)
+    at.button_group(key="ft_view").set_value("Detailed data").run()
+    models = at.multiselect(key="ft_filter_model")
+    models.set_value(list(models.options)).run()
+    assert not at.exception and at.multiselect(key="ft_filter_model").value == []
+    assert len(at.dataframe[1].value) == 128
+
+
+def test_close_landings_show_quasimodos_model_and_where_each_close_fell():
+    week, shown, ranges, closes = close_landings(fixture_rows())
+    assert week == "2026-09-14" and shown == ["M2_vix", "M3_extended"]
+    assert {r["Model"] for r in ranges if r["Ticker"] == "AMD"} == {"M2 VIX"}
+    assert {r["Model"] for r in ranges if r["Ticker"] == "SPX"} == {"M3 Extended"}
+    # Widest first, so the tighter ranges draw on top.
+    assert [r["Range"] for r in ranges if r["Ticker"] == "SPX"] == [
+        "Effective (+buffer)", "80% PI Upper", "Point Estimate", "Lower PI"]
+    by = {c["Ticker"]: c for c in closes}
+    assert by["AAPL"]["Result"] == "Inside every range"
+    assert by["AMD"]["Result"] == "Above every call short"
+    assert by["AMD"]["Outcome"] == "Past even the widest strike"
+    assert by["AMD"]["Close"] == pytest.approx(559.82 / 486.28 - 1)
+    m3 = [r for r in fixture_rows() if r["model"] == "M3_extended"]
+    _, shown, _, closes = close_landings(m3)
+    assert shown == ["M3_extended"]
+    assert {c["Ticker"]: c["Result"] for c in closes}["AMD"] == "Above the tighter calls"
+
+
+def test_close_landings_wait_for_a_valid_close():
+    rows = fixture_rows()
+    for r in rows:
+        r.update(close_eligible=False, final_close=None, close_inside=None)
+    _, _, ranges, closes = close_landings(rows)
+    assert len(ranges) == 16 and closes == []
+
+
+def test_width_tradeoff_has_one_point_per_model_and_width():
+    points = width_tradeoff(fixture_rows())
+    assert len(points) == 16
+    point = next(p for p in points if p["Model"] == "M2 VIX" and p["Range"] == "Effective (+buffer)")
+    assert point["Closed inside"] == 0.75 and point["Scored"] == 4
+    assert point["Width"] == pytest.approx((0.6 + 145 / 486.28) / 4)
+
+
+def test_summary_draws_both_charts(monkeypatch):
+    at = _summary_app(monkeypatch, _two_weeks())
+    assert not at.exception
+    assert len(at.get("vega_lite_chart")) == 2
+    assert any("Where each close landed" in s.value for s in at.subheader)
+
+
+def test_hidden_lines_names_models_that_land_on_each_other():
+    points = width_tradeoff(fixture_rows())
+    # The fixture gives M3 and M4 the same strikes everywhere; M1/M2 differ on AMD.
+    assert hidden_lines(points) == [("M3 Extended", "M4 Full")]
+    for p in points:
+        if p["Model"] == "M4 Full" and p["Range"] == "Lower PI":
+            p["Width"] += .01
+    assert hidden_lines(points) == []
+
+
+def test_a_put_side_miss_is_named_as_below():
+    rows = [r for r in fixture_rows() if r["ticker"] == "AAPL" and r["model"] == "M2_vix"]
+    for r in rows:
+        r.update(final_close=95.0, put_short={"lower_pi": 96.0}.get(r["tier"], 90.0))
+        r["close_inside"] = r["put_short"] <= 95.0
+    _, _, _, closes = close_landings(rows)
+    assert closes[0]["Result"] == "Below the tighter puts"
+    for r in rows:
+        r.update(put_short=99.0, close_inside=False)
+    assert close_landings(rows)[3][0]["Result"] == "Below every put short"
+
+
+def test_ranges_with_identical_strikes_are_named_together():
+    _, _, ranges, _ = close_landings(fixture_rows())
+    # AAPL's four ranges share 90-110; AMD's M2 VIX ranges all differ.
+    assert {r["Ranges"] for r in ranges if r["Ticker"] == "AAPL"} == {
+        "Lower PI = Point Estimate = 80% PI Upper = Effective (+buffer)"}
+    assert {r["Ranges"] for r in ranges if r["Ticker"] == "AMD"} == set(TIER_LABELS)
+
+
+def test_stacked_dots_each_carry_every_model_in_the_stack():
+    points = {(p["Model"], p["Range"]): p for p in width_tradeoff(fixture_rows())}
+    # All four share Lower PI strikes; at Effective only M3 and M4 coincide.
+    assert points["M2 VIX", "Lower PI"]["Models"] == "M1 Baseline / M2 VIX / M3 Extended / M4 Full"
+    for model in ("M3 Extended", "M4 Full"):
+        p = points[model, "Effective (+buffer)"]
+        assert p["Models"] == "M3 Extended / M4 Full" and p["Ranges"] == "Effective (+buffer)"
+    assert points["M1 Baseline", "Effective (+buffer)"]["Models"] == "M1 Baseline"

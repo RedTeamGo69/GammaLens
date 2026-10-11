@@ -87,7 +87,7 @@ REFRESH_MODES = [("off", "Off"), ("5min", "5 min"), ("30min", "30 min")]
 # The Monday Cockpit and Pre-Flight tabs were removed (2026-08) as unused.
 TABS = [
     ("gex", "Strike GEX"),
-    ("spread", "Spread Finder"),
+    ("spread", "Quasimodo"),
     ("forward", "Forward Test"),
 ]
 

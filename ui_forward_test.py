@@ -105,8 +105,9 @@ def _keep_view():
 
 
 def _render_details(rows, studies):
+    from ui_forward_summary import _choose_many
     st.caption("New predictions use Tradier price history. Earlier predictions retain their original inputs. "
-               "Spread Finder uses its existing history, so recommendations can differ from this study.")
+               "Quasimodo uses its existing history, so recommendations can differ from this study.")
     for study in studies:
         st.caption(f"Registered study: {study['study_id']} · First eligible week: {study['start_week']}")
     filtered = list(rows)
@@ -123,12 +124,7 @@ def _render_details(rows, studies):
                             'ticker': UNIVERSE, 'model': MODELS, 'cohort': [COHORT],
                             'tier_label': ['Lower PI', 'Point Estimate', '80% PI Upper', 'Effective (+buffer)']}
                 options = sorted(options.union(defaults.get(key, [])))
-                widget_key = f"ft_filter_{key}"
-                saved_key = f"_ft_filter_{key}"
-                previous = st.session_state.get(widget_key, st.session_state.get(saved_key, []))
-                st.session_state[widget_key] = [value for value in previous if value in options]
-                selected = st.multiselect(label, options, key=widget_key)
-                st.session_state[saved_key] = list(selected)
+                selected = _choose_many(label, options, f"ft_filter_{key}")
                 if selected:
                     filtered = [r for r in filtered if str(r.get(key)) in selected]
     summary = metrics(filtered)

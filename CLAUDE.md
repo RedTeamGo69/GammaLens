@@ -3,7 +3,8 @@
 Streamlit dashboard for SPX-family options analysis. Two tabs:
 
 - **Strike GEX** — dealer gamma exposure by strike, zero-gamma level, walls, expected move
-- **Spread Finder** — weekly credit-spread strike selection from a HAR volatility forecast
+- **Quasimodo** (the Spread Finder; code keeps `spread_finder` names) — weekly credit-spread strike
+  selection from a HAR volatility forecast, with every model's SPX strikes pinned on top
 
 Python 3.11, Streamlit, Neon Postgres. Deployed on Streamlit Cloud; a GitHub Actions cron
 captures daily snapshots.

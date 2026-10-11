@@ -44,3 +44,12 @@ def test_vix_spike_shows_the_regime_shift_warning(monkeypatch):
     errors = [e.value for e in at.error]
     assert any("VIX regime shift detected (extreme)" in e for e in errors)
     assert "Point Estimate" in _html(at)          # still forecasts, with a warning
+
+
+def test_spx_strikes_from_every_model_stay_pinned(monkeypatch):
+    at = _run(monkeypatch, "ready")
+    table = at.table[0].value
+    assert list(table.index) == ["M1_baseline", "M2_vix", "M3_extended"]
+    assert table.loc["M2_vix", "Effective (+buffer)"] == "5,800 / 6,200"
+    assert any("no saved M4_full fit" in c.value for c in at.caption)
+    assert any("Anchored to SPX 6,000.00" in c.value for c in at.caption)

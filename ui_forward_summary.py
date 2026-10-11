@@ -237,7 +237,9 @@ def _landing_chart(ranges, closes):
             tooltip=["Ticker", alt.Tooltip("Price", title="Close"),
                      alt.Tooltip("Close:Q", format="+.2%", title="Move"), "Result"])
     tickers = len({r["Ticker"] for r in ranges})
-    return layers.resolve_scale(color="independent").properties(height=max(160, 30 * tickers))
+    # Streamlit's height covers both legends and the x-axis (~190px), not just the rows;
+    # a flat floor squeezed few-ticker weeks into one overlapping row.
+    return layers.resolve_scale(color="independent").properties(height=200 + 30 * tickers)
 
 
 def _tradeoff_chart(points):

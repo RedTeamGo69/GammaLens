@@ -31,7 +31,7 @@ def _weekday(d: str) -> int:
 def test_fomc_counts_per_year():
     counts = _by_year(FOMC_DATES)
     for year in ("2016", "2017", "2018", "2019", "2021", "2022",
-                 "2023", "2024", "2025", "2026"):
+                 "2023", "2024", "2025", "2026", "2027"):
         assert counts[year] == 8, f"{year}: {counts[year]} FOMC dates"
     assert counts["2020"] == 9   # 8 scheduled + March 2020 emergency actions
 
@@ -39,14 +39,14 @@ def test_fomc_counts_per_year():
 def test_cpi_counts_per_year():
     counts = _by_year(CPI_DATES)
     for year in ("2016", "2017", "2018", "2019", "2020", "2021",
-                 "2022", "2023", "2024", "2025", "2026"):
+                 "2022", "2023", "2024", "2025", "2026", "2027"):
         assert counts[year] == 12, f"{year}: {counts[year]} CPI dates"
 
 
 def test_nfp_counts_per_year():
     counts = _by_year(NFP_DATES)
     for year in ("2016", "2017", "2018", "2019", "2020", "2021",
-                 "2022", "2023", "2024", "2025", "2026"):
+                 "2022", "2023", "2024", "2025", "2026", "2027"):
         assert counts[year] == 12, f"{year}: {counts[year]} NFP dates"
 
 

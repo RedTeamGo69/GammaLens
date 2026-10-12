@@ -85,3 +85,16 @@ def test_forward_deep_link_keeps_controls_without_market_access(monkeypatch):
     assert any("API Token" in control.label for control in at.text_input)
     at.button_group(key="tab_seg").set_value("forward").run()
     assert any(title.value == "Forward Test" for title in at.title)
+
+
+def test_only_the_canonical_expiration_set_is_archived(monkeypatch):
+    # gamma_level_history rows are first-write-wins and record no expiration
+    # set, so a 0DTE-only view must not file its number into the bucket.
+    at = AppTest.from_file(str(FIXTURE)).run(timeout=30)
+    assert not at.exception
+    assert "fixture_archived" not in at.session_state
+
+    monkeypatch.setenv("GL_NAV_CANONICAL_EXPS", "1")
+    at = AppTest.from_file(str(FIXTURE)).run(timeout=30)
+    assert not at.exception
+    assert at.session_state["fixture_archived"] is True

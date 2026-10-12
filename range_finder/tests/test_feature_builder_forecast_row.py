@@ -270,3 +270,15 @@ def test_fit_excludes_null_target_rows(patched_builder, monkeypatch):
     # And the fit itself runs clean on what's left.
     result = fit_model(X_train, y_train, model_name="test")
     assert np.isfinite(result.params).all()
+
+
+def test_missing_daily_closes_fail_without_touching_stored_rows(patched_builder, monkeypatch):
+    # Empty daily bars used to upsert NULL HV over every stored week and let
+    # the fit drop hv_ratio from M3_extended without a word.
+    _weekly, saved = patched_builder
+    monkeypatch.setattr(fb, "_load_daily_for_ticker",
+                        lambda ticker, years=6: pd.DataFrame(columns=["spx_close"]))
+
+    with pytest.raises(RuntimeError, match="No daily closes"):
+        fb.build_features(conn=None, ticker="SPX")
+    assert saved == {}

@@ -15,7 +15,7 @@ from phase1 import credentials
 from phase1.trading_week import planning_week
 
 from range_finder.gex_bridge import (
-    GEXContext, extract_gex_context, save_gex_to_range_finder,
+    GEXContext, extract_gex_context,
     adjust_spread_with_gex, regime_to_gex_flag, reconcile_gex_warnings,
 )
 from range_finder.data_collector import (
@@ -207,7 +207,7 @@ def _cached_weekly_setup(_conn, week_start: str, ticker: str):
     AND misses are cached — the bespoke logic this replaced cached only
     misses, so hits still re-queried on every fresh session.
 
-    Save paths (``do_weekly`` / ``do_save_gex``) call ``.clear()`` to
+    Save paths (``do_weekly`` and the anchor capture) call ``.clear()`` to
     invalidate, mirroring the existing ``_cached_rf_get_features.clear()``
     pattern.
     """
@@ -711,11 +711,12 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     # the persisted weekly_setup row wins; a missing row is captured (and
     # persisted) from the true daily bar once the first session has opened.
     # Fri–Sun the tab plans next week, whose open doesn't exist yet, so the
-    # latest price stands in.
+    # latest price stands in. The capture gets the genuine live VIX only —
+    # the 18.0 display default must never be persisted as Monday's VIX.
     run_now = now_ny()
     anchor = resolve_weekly_anchor(
         _get_rf_conn(), ticker, run_now,
-        read_setup=_cached_weekly_setup, live_vix=live_vix, cfg=ticker_cfg,
+        read_setup=_cached_weekly_setup, live_vix=live_vix_raw, cfg=ticker_cfg,
     )
     if anchor.captured:
         _cached_weekly_setup.clear()
@@ -902,24 +903,24 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             key=f"sf_model_choice_{ticker}",
         )
 
-    # Action buttons
-    col_btn_main, col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1.3, 1, 1, 1, 1])
+    # Action buttons. There is deliberately no "Save GEX": gex_inputs holds
+    # one Monday-9:31 reading per week, written by the cron; a mid-week click
+    # overwrote it with whatever expirations the page happened to show.
+    col_btn_main, col_btn1, col_btn2, col_btn3 = st.columns([1.3, 1, 1, 1])
 
     with col_btn_main:
         do_weekly = st.button("Weekly Setup", key=f"sf_weekly_{ticker}", type="primary", use_container_width=True,
-                              help="Run all steps: Refresh → Rebuild → Save GEX for research → Forecast")
+                              help="Run all steps: Refresh → Rebuild → Forecast")
     with col_btn1:
         do_refresh = st.button("Refresh Data", key=f"sf_refresh_{ticker}", use_container_width=True)
     with col_btn2:
         do_rebuild = st.button("Rebuild Features", key=f"sf_rebuild_{ticker}", use_container_width=True)
     with col_btn3:
-        do_save_gex = st.button("Save GEX", key=f"sf_save_gex_{ticker}", use_container_width=True)
-    with col_btn4:
         do_forecast = st.button("Forecast", key=f"sf_forecast_{ticker}", use_container_width=True)
 
-    # Weekly Setup runs all four steps in sequence
+    # Weekly Setup runs all three steps in sequence
     if do_weekly:
-        do_refresh = do_rebuild = do_save_gex = do_forecast = True
+        do_refresh = do_rebuild = do_forecast = True
         # Weekly Setup may land a fresh weekly_setup row (via the cron
         # path that mirrors Monday's open). Drop the cached lookup so
         # the next render picks it up immediately instead of waiting
@@ -927,108 +928,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         _cached_weekly_setup.clear()
 
     conn = _get_rf_conn()
-    from phase1.ticker_config import uses_own_har as _uses_own_har
-    from phase1.ticker_config import feature_source_ticker as _feature_source
-
-    # ── Step 1: Refresh market data ──
-    if do_refresh:
-        with st.spinner("1/4 — Fetching SPX / VIX weekly data..."):
-            try:
-                df_spx = rf_fetch_spx_vix(years=6)
-                rows_written = rf_save_spx_vix(conn, df_spx)
-                if len(df_spx) == 0:
-                    st.success("SPX/VIX data already up to date")
-                else:
-                    st.success(f"SPX/VIX data refreshed — {len(df_spx)} weeks fetched, {rows_written} new")
-            except Exception as e:
-                if "empty" in str(e).lower() and datetime.today().weekday() >= 4:
-                    st.warning(f"SPX/VIX fetch returned empty data (expected on weekends/holidays). Existing data is still valid.")
-                else:
-                    st.error(f"SPX/VIX fetch failed: {e}")
-
-        # Own-HAR tickers (QQQ/AMZN/AMD) model their own weekly OHLC +
-        # vol proxy, not SPX's. The cron always refreshed both; this
-        # button used to refresh only SPX/VIX, so Weekly Setup on those
-        # tickers fit against stale weekly_underlying rows.
-        if _uses_own_har(ticker):
-            with st.spinner(f"1/4 — Fetching {ticker} weekly data..."):
-                try:
-                    from range_finder.data_collector import (
-                        fetch_underlying_weekly, save_underlying_weekly,
-                    )
-                    df_t = fetch_underlying_weekly(
-                        ticker=ticker,
-                        yf_symbol=ticker_cfg["yf_symbol"],
-                        vol_proxy_yf=ticker_cfg["vol_proxy_yf"],
-                        years=6,
-                    )
-                    _n_t = save_underlying_weekly(conn, ticker, df_t)
-                    st.success(f"{ticker} weekly data refreshed — {len(df_t)} weeks fetched, {_n_t} upserted")
-                except Exception as e:
-                    st.error(f"{ticker} weekly fetch failed: {e}")
-
-        with st.spinner("1/4 — Fetching FRED macro data..."):
-            try:
-                df_macro = rf_fetch_fred_macro(years=6)
-                rf_save_fred_macro(conn, df_macro)
-                st.success(f"FRED macro data refreshed — {len(df_macro)} rows")
-            except Exception as e:
-                # Distinguish "no key" from "FRED returned an error" — the
-                # old message lumped them together and blamed the user for
-                # a missing key whenever FRED itself had a 500. Also
-                # surface the key status so you can eyeball whether
-                # Streamlit actually picked up the secret.
-                if not credentials.fred_api_key():
-                    st.warning(
-                        "FRED fetch skipped: FRED_API_KEY is not set. "
-                        "Add it under Streamlit Cloud → Manage app → Secrets, "
-                        "or export FRED_API_KEY in your local env."
-                    )
-                else:
-                    st.warning(
-                        f"FRED fetch failed — {e}. "
-                        f"Key status: {rf_fred_key_status()}. "
-                        "Existing macro data in the DB is still valid; "
-                        "the rest of the pipeline will keep running. "
-                        "Try again in a minute — FRED's API occasionally "
-                        "returns 500s during their maintenance windows."
-                    )
-
-        rf_build_event_flags(conn)
-
-    # ── Step 2: Rebuild features ──
-    if do_rebuild:
-        with st.spinner("2/4 — Computing feature matrix..."):
-            try:
-                # Same per-ticker routing as the Monday cron: a scaled mini
-                # (XSP→SPX) shares its parent's feature rows; own-HAR
-                # tickers build their own. (This used to always build SPX, so
-                # Rebuild on QQQ/AMZN/AMD never touched the rows the fit reads.)
-                rf_build_features(conn, ticker=_feature_source(ticker))
-                # Drop the cached feature frame so the next read reflects
-                # the rebuild — otherwise the UI would keep serving the
-                # pre-rebuild rows until the 10-minute TTL expires.
-                _cached_rf_get_features.clear()
-                st.success("Features rebuilt")
-            except Exception as e:
-                st.error(f"Feature rebuild failed: {e}")
-
-    # ── Step 3: Save live GEX ──
-    if do_save_gex:
-        try:
-            gex_flag = save_gex_to_range_finder(gex_ctx, conn, ticker=ticker)
-            regime_label = {1: "positive", 0: "neutral", -1: "negative"}.get(gex_flag, "unknown")
-            # Invalidate the weekly_setup cache so a follow-up render sees
-            # any concurrently-saved row right away (defensive — Save GEX
-            # writes gex_inputs not weekly_setup, but the click is the
-            # canonical "I'm actively setting up this week" signal).
-            _cached_weekly_setup.clear()
-            st.success(
-                f"GEX research capture saved: regime={regime_label}, "
-                f"flag={gex_flag} (ticker={ticker})"
-            )
-        except Exception as e:
-            st.error(f"GEX save failed: {e}")
+    _run_data_actions(conn, ticker, ticker_cfg, refresh=do_refresh, rebuild=do_rebuild)
 
     st.markdown("---")
 
@@ -1084,7 +984,6 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
             return
 
     # ── Fit model or load from cache ──
-    # ── Step 4: Fit model and forecast ──
     # Session-state layout: we keep the fit result, features, metrics and
     # the *name* of the spec that produced them.  Tracking the name lets
     # the dropdown actually work — without it, switching M3→M4 would
@@ -1097,100 +996,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     _mdl_name_key    = f"sf_model_name_{ticker}"
 
     if do_forecast:
-        # Weekly Setup fits every spec (same as the Monday cron) so a
-        # user can switch the model dropdown afterwards without tripping
-        # the "click Forecast to fit this spec" prompt. A standalone
-        # Forecast click still fits only the currently-selected spec —
-        # that's the fast path for iterating on one model.
-        _specs_to_fit = list(RF_MODEL_SPECS.keys()) if do_weekly else [model_choice]
-
-        # A shared pair (SPX+XSP) reuses one scale-invariant fit, so a
-        # Weekly Setup click on either member populates the whole group — every
-        # curated ticker that resolves to the same feature source. Own-HAR
-        # tickers (QQQ / SPY / AMZN / AMD) stand alone. A plain Forecast click
-        # always saves only to the active ticker.
-        from phase1.ticker_config import feature_source_ticker as _fsrc, all_tickers as _all_t
-        if do_weekly:
-            _src = _fsrc(ticker)
-            _tickers_to_save = [t for t in _all_t() if _fsrc(t) == _src] or [ticker]
-        else:
-            _tickers_to_save = [ticker]
-
-        _spinner_label = (
-            f"4/4 — Fitting {len(_specs_to_fit)} specs..."
-            if len(_specs_to_fit) > 1 else f"4/4 — Fitting {model_choice}..."
-        )
-
-        # GEX calibration status for the spec the user is looking at. Live
-        # fits never consume GEX while the policy switch is off (BUG-06);
-        # production_feature_columns applies the same switch inside the fit.
-        if model_choice == "M4_full":
-            gex_col = GEX_NORMALIZED_FEATURE
-            _weeks = (int(df_feat[gex_col].notna().sum())
-                      if gex_col in df_feat.columns else 0)
-            if not GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
-                st.caption(
-                    f"GEX calibration: Pending — {_weeks} stored weeks "
-                    "remain available for research, but GEX is not "
-                    "applied to live fits, buffers, or strikes."
-                )
-            elif rf_feature_has_enough_data(df_feat, gex_col):
-                st.caption(
-                    f"ℹ️ M4_full: using {_weeks} weeks of stored GEX "
-                    "history as a training feature."
-                )
-            else:
-                st.caption(
-                    f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
-                    f"fold `gex_normalized` into the fit. Keep clicking **Save GEX** "
-                    f"each week; in the meantime M4 runs without the GEX feature."
-                )
-
-        with st.spinner(_spinner_label):
-            try:
-                _report = fit_and_save_specs(
-                    conn, ticker, specs=_specs_to_fit,
-                    save_tickers=_tickers_to_save, features=df_feat,
-                )
-            except Exception as e:     # a save failed mid-way (DB)
-                st.error(f"Saving fits failed: {e}")
-                _report = FitReport()
-        # New fits landed in Postgres — drop cached unpickles so a later tab
-        # switch sees the fresh weights instead of the previous fit until the
-        # 1-hour TTL expires.
-        _cached_rf_load_model.clear()
-        for _spec, _reason in _report.skipped.items():
-            if _reason.startswith("fit failed"):
-                st.error(f"{_spec} fitting failed: {_reason}")
-            elif _spec == model_choice:
-                st.warning(f"{_spec}: {_reason} — skipped")
-        _selected = _report.fits.get(model_choice)
-        _selected_result = _selected.result if _selected else None
-        _selected_avail = _selected.feature_cols if _selected else None
-        _selected_metrics = _selected.metrics if _selected else None
-
-        # Summary line for the Weekly Setup path so the user can see which
-        # specs landed in Postgres at a glance.
-        if do_weekly:
-            _ticker_note = " × ".join(_tickers_to_save)
-            st.success(
-                f"Fitted {len(_report.fits)}/{len(_specs_to_fit)} specs for "
-                f"{_ticker_note} ({len(_report.fits) * len(_tickers_to_save)} rows saved)"
-            )
-
-        # Prime session state with the currently-selected spec's fit so
-        # the rest of this render uses it without falling through to the
-        # load-from-Postgres path (same behavior as the previous single-
-        # spec code).
-        if _selected_result is not None:
-            st.session_state[_mdl_result_key]  = _selected_result
-            st.session_state[_mdl_feat_key]    = _selected_avail
-            st.session_state[_mdl_metrics_key] = _selected_metrics
-            st.session_state[_mdl_name_key]    = model_choice
-            st.success(
-                f"Model fitted | {model_choice} | "
-                f"OOS R² = {_selected_metrics['oos_r2']:.4f}"
-            )
+        _run_fit_action(conn, ticker, df_feat, model_choice, all_specs=do_weekly)
 
     # If the user toggled the model dropdown, the cached fit in session
     # state belongs to a different spec — evict it so the load block
@@ -1202,7 +1008,7 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
         for _k in (_mdl_result_key, _mdl_feat_key, _mdl_metrics_key, _mdl_name_key):
             st.session_state.pop(_k, None)
 
-    # Try to load model from session or disk
+    # Try to load model from session or Postgres
     if _mdl_result_key not in st.session_state:
         try:
             payload, _fit_src = load_saved_fit(_cached_rf_load_model, model_choice, ticker)
@@ -1697,6 +1503,192 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
                 st.html('<div class="sf-note" style="margin-top:6px;">No major events this week</div>')
 
     _risk_tier_fragment()
+
+
+def _run_data_actions(conn, ticker: str, ticker_cfg: dict, *,
+                      refresh: bool, rebuild: bool) -> None:
+    """The Refresh Data and Rebuild Features button actions (database writes)."""
+    from phase1.ticker_config import feature_source_ticker, uses_own_har
+
+    # ── Step 1: Refresh market data ──
+    if refresh:
+        with st.spinner("1/3 — Fetching SPX / VIX weekly data..."):
+            try:
+                df_spx = rf_fetch_spx_vix(years=6)
+                rows_written = rf_save_spx_vix(conn, df_spx)
+                if len(df_spx) == 0:
+                    st.success("SPX/VIX data already up to date")
+                else:
+                    st.success(f"SPX/VIX data refreshed — {len(df_spx)} weeks fetched, {rows_written} new")
+            except Exception as e:
+                if "empty" in str(e).lower() and datetime.today().weekday() >= 4:
+                    st.warning(f"SPX/VIX fetch returned empty data (expected on weekends/holidays). Existing data is still valid.")
+                else:
+                    st.error(f"SPX/VIX fetch failed: {e}")
+
+        # Own-HAR tickers (QQQ/AMZN/AMD) model their own weekly OHLC +
+        # vol proxy, not SPX's. The cron always refreshed both; this
+        # button used to refresh only SPX/VIX, so Weekly Setup on those
+        # tickers fit against stale weekly_underlying rows.
+        if uses_own_har(ticker):
+            with st.spinner(f"1/3 — Fetching {ticker} weekly data..."):
+                try:
+                    from range_finder.data_collector import (
+                        fetch_underlying_weekly, save_underlying_weekly,
+                    )
+                    df_t = fetch_underlying_weekly(
+                        ticker=ticker,
+                        yf_symbol=ticker_cfg["yf_symbol"],
+                        vol_proxy_yf=ticker_cfg["vol_proxy_yf"],
+                        years=6,
+                    )
+                    _n_t = save_underlying_weekly(conn, ticker, df_t)
+                    st.success(f"{ticker} weekly data refreshed — {len(df_t)} weeks fetched, {_n_t} upserted")
+                except Exception as e:
+                    st.error(f"{ticker} weekly fetch failed: {e}")
+
+        with st.spinner("1/3 — Fetching FRED macro data..."):
+            try:
+                df_macro = rf_fetch_fred_macro(years=6)
+                rf_save_fred_macro(conn, df_macro)
+                st.success(f"FRED macro data refreshed — {len(df_macro)} rows")
+            except Exception as e:
+                # Distinguish "no key" from "FRED returned an error" — the
+                # old message lumped them together and blamed the user for
+                # a missing key whenever FRED itself had a 500. Also
+                # surface the key status so you can eyeball whether
+                # Streamlit actually picked up the secret.
+                if not credentials.fred_api_key():
+                    st.warning(
+                        "FRED fetch skipped: FRED_API_KEY is not set. "
+                        "Add it under Streamlit Cloud → Manage app → Secrets, "
+                        "or export FRED_API_KEY in your local env."
+                    )
+                else:
+                    st.warning(
+                        f"FRED fetch failed — {e}. "
+                        f"Key status: {rf_fred_key_status()}. "
+                        "Existing macro data in the DB is still valid; "
+                        "the rest of the pipeline will keep running. "
+                        "Try again in a minute — FRED's API occasionally "
+                        "returns 500s during their maintenance windows."
+                    )
+
+        rf_build_event_flags(conn)
+
+    # ── Step 2: Rebuild features ──
+    if rebuild:
+        with st.spinner("2/3 — Computing feature matrix..."):
+            try:
+                # Same per-ticker routing as the Monday cron: a scaled mini
+                # (XSP→SPX) shares its parent's feature rows; own-HAR
+                # tickers build their own. (This used to always build SPX, so
+                # Rebuild on QQQ/AMZN/AMD never touched the rows the fit reads.)
+                rf_build_features(conn, ticker=feature_source_ticker(ticker))
+                # Drop the cached feature frame so the next read reflects
+                # the rebuild — otherwise the UI would keep serving the
+                # pre-rebuild rows until the 10-minute TTL expires.
+                _cached_rf_get_features.clear()
+                st.success("Features rebuilt")
+            except Exception as e:
+                st.error(f"Feature rebuild failed: {e}")
+
+
+def _run_fit_action(conn, ticker: str, df_feat, model_choice: str, *,
+                    all_specs: bool) -> None:
+    """The Forecast button action: fit, save to saved_models, and prime session
+    state with the selected spec's fit so this render uses it.
+
+    Weekly Setup (``all_specs``) fits every spec, same as the Monday cron, so
+    the model dropdown can be switched afterwards without the "click Forecast
+    to fit this spec" prompt. A standalone Forecast click fits only the
+    selected spec — the fast path for iterating on one model.
+    """
+    _specs_to_fit = list(RF_MODEL_SPECS.keys()) if all_specs else [model_choice]
+
+    # A shared pair (SPX+XSP) reuses one scale-invariant fit, so a
+    # Weekly Setup click on either member populates the whole group — every
+    # curated ticker that resolves to the same feature source. Own-HAR
+    # tickers (QQQ / SPY / AMZN / AMD) stand alone. A plain Forecast click
+    # always saves only to the active ticker.
+    from phase1.ticker_config import feature_source_ticker as _fsrc, all_tickers as _all_t
+    if all_specs:
+        _src = _fsrc(ticker)
+        _tickers_to_save = [t for t in _all_t() if _fsrc(t) == _src] or [ticker]
+    else:
+        _tickers_to_save = [ticker]
+
+    _spinner_label = (
+        f"3/3 — Fitting {len(_specs_to_fit)} specs..."
+        if len(_specs_to_fit) > 1 else f"3/3 — Fitting {model_choice}..."
+    )
+
+    # GEX calibration status for the spec the user is looking at. Live
+    # fits never consume GEX while the policy switch is off (BUG-06);
+    # production_feature_columns applies the same switch inside the fit.
+    if model_choice == "M4_full":
+        gex_col = GEX_NORMALIZED_FEATURE
+        _weeks = (int(df_feat[gex_col].notna().sum())
+                  if gex_col in df_feat.columns else 0)
+        if not GEX_LIVE_SPREAD_INFLUENCE_ENABLED:
+            st.caption(
+                f"GEX calibration: Pending — {_weeks} stored weeks "
+                "remain available for research, but GEX is not "
+                "applied to live fits, buffers, or strikes."
+            )
+        elif rf_feature_has_enough_data(df_feat, gex_col):
+            st.caption(
+                f"ℹ️ M4_full: using {_weeks} weeks of stored GEX "
+                "history as a training feature."
+            )
+        else:
+            st.caption(
+                f"ℹ️ M4_full: only {_weeks} weeks of GEX history — need >{RF_GEX_MIN_WEEKS} to "
+                f"fold `gex_normalized` into the fit. The Monday cron saves one reading "
+                f"a week; in the meantime M4 runs without the GEX feature."
+            )
+
+    with st.spinner(_spinner_label):
+        try:
+            _report = fit_and_save_specs(
+                conn, ticker, specs=_specs_to_fit,
+                save_tickers=_tickers_to_save, features=df_feat,
+            )
+        except Exception as e:     # a save failed mid-way (DB)
+            st.error(f"Saving fits failed: {e}")
+            _report = FitReport()
+    # New fits landed in Postgres — drop cached unpickles so a later tab
+    # switch sees the fresh weights instead of the previous fit until the
+    # 1-hour TTL expires.
+    _cached_rf_load_model.clear()
+    for _spec, _reason in _report.skipped.items():
+        if _reason.startswith("fit failed"):
+            st.error(f"{_spec} fitting failed: {_reason}")
+        elif _spec == model_choice:
+            st.warning(f"{_spec}: {_reason} — skipped")
+    _selected = _report.fits.get(model_choice)
+
+    # Summary line for the Weekly Setup path so the user can see which
+    # specs landed in Postgres at a glance.
+    if all_specs:
+        _ticker_note = " × ".join(_tickers_to_save)
+        st.success(
+            f"Fitted {len(_report.fits)}/{len(_specs_to_fit)} specs for "
+            f"{_ticker_note} ({len(_report.fits) * len(_tickers_to_save)} rows saved)"
+        )
+
+    # Prime session state with the currently-selected spec's fit so
+    # the rest of the render uses it without falling through to the
+    # load-from-Postgres path.
+    if _selected is not None:
+        st.session_state[f"sf_model_result_{ticker}"]  = _selected.result
+        st.session_state[f"sf_model_features_{ticker}"] = _selected.feature_cols
+        st.session_state[f"sf_model_metrics_{ticker}"] = _selected.metrics
+        st.session_state[f"sf_model_name_{ticker}"]    = model_choice
+        st.success(
+            f"Model fitted | {model_choice} | "
+            f"OOS R² = {_selected.metrics['oos_r2']:.4f}"
+        )
 
 
 def _render_spx_model_strikes(week_start: str) -> None:

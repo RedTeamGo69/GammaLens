@@ -70,7 +70,16 @@ def test_weekly_setup_completion_requires_current_anchor_and_model(monkeypatch):
         (snapshot._CALIBRATION_SPEC, "SPX", "2026-03-09T13:35:00+00:00"),
     )
     conn.commit()
-    monkeypatch.setattr("range_finder.db.get_connection", lambda: conn)
+
+    class _KeepOpen:
+        """The checker closes its connection; keep the shared fixture open."""
+        def cursor(self):
+            return conn.cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("range_finder.db.get_connection", _KeepOpen)
 
     assert snapshot._weekly_setup_artifacts_complete("SPX", WEEK_KEY) is False
 

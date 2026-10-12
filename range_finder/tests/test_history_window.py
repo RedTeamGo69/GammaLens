@@ -83,7 +83,8 @@ def test_build_features_forwards_history_years(monkeypatch):
 
     def fake_daily(ticker, years=6):
         captured["daily_years"] = years
-        return pd.DataFrame(columns=["spx_close"])
+        return pd.DataFrame({"spx_close": [5000.0, 5010.0]},
+                            index=pd.date_range("2025-01-02", periods=2))
 
     def fake_ts(years=6):
         captured["ts_years"] = years

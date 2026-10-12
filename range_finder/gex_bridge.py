@@ -19,11 +19,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
 
-from range_finder.data_collector import init_db
-from range_finder.feature_builder import (
-    init_features_table, create_gex_table, upsert_gex,
-    get_features, get_feature_for_week,
-)
+from range_finder.feature_builder import upsert_gex
 from range_finder.spread_levels import SpreadPlan, GEX_NEGATIVE_REGIME_WARNING
 
 log = logging.getLogger(__name__)
@@ -147,7 +143,7 @@ def regime_to_gex_dollars(gex_ctx: GEXContext) -> float:
 
 def save_gex_to_range_finder(
     gex_ctx: GEXContext,
-    conn = None,
+    conn,
     ticker: str = "SPX",
 ) -> int:
     """
@@ -159,13 +155,9 @@ def save_gex_to_range_finder(
     feature builder only consumes SPX rows (see load_gex_inputs),
     but we still persist XSP rows for audit/debug purposes.
 
-    This is called after each GEX dashboard run so the range finder
-    model has fresh GEX data for the current week.
+    Only the Monday cron calls this, so each week's row is that Monday's
+    9:31 reading — the same information timestamp as every training row.
     """
-    if conn is None:
-        conn = init_db()
-        create_gex_table(conn)
-
     # The week this positioning feeds, on the EXCHANGE clock (UTC bucketing
     # once filed weekend saves under the wrong week permanently): weekend
     # runs and Friday after the 16:00 close describe positioning INTO the

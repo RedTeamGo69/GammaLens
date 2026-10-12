@@ -142,60 +142,44 @@ def save_em_snapshot(em_data, date_str, ticker="SPX", em_type="daily"):
 
 
 def get_em_snapshot(date_str, ticker="SPX", em_type="daily"):
-    """Retrieve persisted EM snapshot for a given ticker/type/date, if any."""
+    """Retrieve persisted EM snapshot for a given ticker/type/date, if any.
+
+    Always filtered by ``em_type``: on a Monday the daily and weekly rows
+    share a date, so an unfiltered lookup can hand back the wrong horizon.
+    """
     try:
         conn = _pg_get_connection()
-        cur = conn.cursor()
         try:
+            cur = conn.cursor()
             cur.execute(
                 "SELECT em_pts, em_pct, upper_level, lower_level, anchor_spot, straddle_strike, captured_at "
                 "FROM em_snapshots WHERE date = %s AND ticker = %s AND em_type = %s",
                 (date_str, ticker, em_type),
             )
             row = cur.fetchone()
+        finally:
             conn.close()
-            if row:
-                return {
-                    "expected_move_pts": row[0],
-                    "expected_move_pct": row[1],
-                    "upper_level": row[2],
-                    "lower_level": row[3],
-                    "anchor_spot": row[4],
-                    "straddle": {"strike": row[5]},
-                    "captured_at": row[6],
-                }
-        except Exception:
-            # Fallback: older schema without em_type/anchor_spot
-            conn = _pg_get_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT em_pts, em_pct, upper_level, lower_level, straddle_strike, captured_at "
-                "FROM em_snapshots WHERE date = %s AND ticker = %s",
-                (date_str, ticker),
-            )
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                return {
-                    "expected_move_pts": row[0],
-                    "expected_move_pct": row[1],
-                    "upper_level": row[2],
-                    "lower_level": row[3],
-                    "anchor_spot": None,
-                    "straddle": {"strike": row[4]},
-                    "captured_at": row[5],
-                }
     except Exception as e:
         # A DB outage must be distinguishable from "no snapshot exists" in
         # the logs — callers legitimately treat None as absence (the dedup
         # guard PROCEEDS with capture on None, the safe direction), but a
         # silent swallow here made outages invisible while the UI showed
         # "no EM" as if that were a fact about the data.
-        import logging
-        logging.getLogger(__name__).warning(
+        _logger.warning(
             f"get_em_snapshot({date_str}, {ticker}, {em_type}) failed — "
             f"treating as absent: {e}")
-    return None
+        return None
+    if not row:
+        return None
+    return {
+        "expected_move_pts": row[0],
+        "expected_move_pct": row[1],
+        "upper_level": row[2],
+        "lower_level": row[3],
+        "anchor_spot": row[4],
+        "straddle": {"strike": row[5]},
+        "captured_at": row[6],
+    }
 
 
 def get_weekly_em_date_key(now):

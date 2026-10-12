@@ -2,60 +2,34 @@
 Expected-Move snapshot freeze/restore helpers.
 
 These helpers freeze the daily / weekly / OpEx-cycle expected move at the
-appropriate session start, persist the captured value to Postgres, and restore
-it on subsequent renders so the chart's EM markers stay stable through each
-session. Imported by `streamlit_app.py` (daily/weekly/monthly freeze) and
-`ui_spread_finder.py`. The weekly freeze day is phase1.trading_week.is_first_session.
+appropriate session start and restore the cron's persisted value on later
+renders so the chart's EM markers stay stable through each session. Only the
+scheduled 9:30 capture writes em_snapshots: a page view freezes into session
+state alone, so a mid-day visit can never stand in for the opening capture
+(the backup cron's missed-capture alarm keys off that row). Imported by
+`streamlit_app.py`. The weekly freeze day is phase1.trading_week.is_first_session.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date
 
 import streamlit as st
 
 from phase1.market_clock import now_ny
-from phase1.gex_history import save_em_snapshot, get_em_snapshot
-
-
-def _is_trading_day(dt_obj):
-    """Check if a given date is a trading day (not weekend, not holiday)."""
-    from phase1.market_clock import get_session_state
-    from phase1.config import CASH_CALENDAR
-    if dt_obj.weekday() >= 5:
-        return False
-    sess = get_session_state(CASH_CALENDAR, dt_obj if hasattr(dt_obj, 'hour') else None)
-    # If market_open is None, the schedule was empty → holiday
-    return sess.market_open is not None
+from phase1.gex_history import get_em_snapshot
 
 
 def _is_monthly_freeze_day(now_et):
     """
-    True if today is the first trading day of the current OpEx cycle — i.e.
-    the first trading day strictly after the most recent standard monthly
-    3rd-Friday OpEx. Normally that's the Monday after OpEx; if Monday is a
-    holiday it slips to Tuesday, etc.
+    True if today is the first trading day of the current OpEx cycle: the
+    first session of the week that opens on the Monday after the most recent
+    standard 3rd-Friday OpEx (Tuesday when that Monday is a holiday).
     """
     from phase1.gex_history import get_monthly_em_date_key
-    from datetime import date as _date
+    from phase1.trading_week import trading_week
 
-    today = now_et.date() if hasattr(now_et, 'date') else now_et
-
-    # get_monthly_em_date_key returns the *Monday* following the most recent
-    # 3rd Friday. Walk forward from that Monday to find the actual first
-    # trading day of the cycle (skipping holidays).
-    cycle_open_mon = _date.fromisoformat(get_monthly_em_date_key(now_et))
-    candidate = cycle_open_mon
-    for _ in range(7):  # at most a week of consecutive holidays
-        # _is_trading_day accepts a date or datetime; pass a datetime anchored
-        # at noon in the same tz as now_et so the market-calendar lookup works.
-        probe = now_et.replace(
-            year=candidate.year, month=candidate.month, day=candidate.day,
-            hour=12, minute=0, second=0, microsecond=0,
-        )
-        if _is_trading_day(probe):
-            return candidate == today
-        candidate = candidate + timedelta(days=1)
-    return False
+    cycle_monday = date.fromisoformat(get_monthly_em_date_key(now_et))
+    return trading_week(cycle_monday).first_session_day == now_et.date()
 
 
 def _apply_typed_em_snapshot(em_live_data, is_market_open, spot, ticker, em_type, date_key, should_freeze):
@@ -117,7 +91,8 @@ def _apply_typed_em_snapshot(em_live_data, is_market_open, spot, ticker, em_type
         # whatever we restored (or None if nothing was ever saved).
         return st.session_state.get(sk_snap)
 
-    # First capture of the period — only on the correct freeze day
+    # First capture of the period — only on the correct freeze day. Session
+    # state only: the cron owns the persisted opening snapshot.
     if sk_snap not in st.session_state and should_freeze and em_live_data and em_live_data.get("expected_move_pts"):
         snap = {
             "expected_move_pts": em_live_data.get("expected_move_pts"),
@@ -130,10 +105,6 @@ def _apply_typed_em_snapshot(em_live_data, is_market_open, spot, ticker, em_type
         st.session_state[sk_snap] = snap
         st.session_state[sk_date] = date_key
         st.session_state[sk_time] = now_ny().strftime("%I:%M:%S %p ET")
-        try:
-            save_em_snapshot(em_live_data, date_key, ticker=ticker, em_type=em_type)
-        except Exception:
-            pass
 
     return st.session_state.get(sk_snap)
 

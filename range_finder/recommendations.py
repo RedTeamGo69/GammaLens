@@ -64,9 +64,8 @@ def build_recommendations(*, result, feature_row, feature_cols, reference,
         raise ValueError("Saved fit uses disabled GEX feature; refit required")
     forecast = forecast_next_week(result, feature_row, feature_cols, reference,
                                   alpha=PI_ALPHA, side_share_q=side_share_q)
-    from range_finder.conformal import maybe_apply_conformal, CONFORMAL_ENABLED
-    if CONFORMAL_ENABLED:
-        forecast = maybe_apply_conformal(forecast, conn, ticker, model_name)
+    from range_finder.conformal import maybe_apply_conformal
+    forecast = maybe_apply_conformal(forecast, conn, ticker, model_name)
     plan = build_spread_plan(forecast=forecast, feature_row=feature_row,
                             week_start=week_start, vix_level=vix, ticker=ticker,
                             chain_quotes=chain_quotes, side_share_q=side_share_q)

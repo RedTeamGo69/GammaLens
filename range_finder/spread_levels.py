@@ -87,15 +87,6 @@ def get_ticker_config(ticker: str = "SPX") -> dict:
 # =============================================================================
 
 @dataclass
-class SpreadLeg:
-    """One leg of a credit spread."""
-    side:        str
-    direction:   str
-    strike:      float
-    description: str     = ""
-
-
-@dataclass
 class SpreadSide:
     """One side of the iron condor (either the call spread or put spread)."""
     side:          str
@@ -863,10 +854,6 @@ def build_spread_tiers(
 # =============================================================================
 
 from range_finder.spread_persistence import (  # noqa: F401
-    init_spread_log_table,
     log_spread_plan,
-    update_outcome,
     update_expiration_outcome,
-    get_spread_log,
-    print_spread_plan,
 )

@@ -327,14 +327,6 @@ def all_tickers() -> list[str]:
     return list(TICKER_CONFIG.keys())
 
 
-def tickers_by_category() -> dict[str, list[str]]:
-    """Tickers grouped by category for grouped UI rendering."""
-    out: dict[str, list[str]] = {}
-    for sym, cfg in TICKER_CONFIG.items():
-        out.setdefault(cfg["category"], []).append(sym)
-    return out
-
-
 def is_spread_finder_eligible(ticker: str) -> bool:
     """True if the Spread Finder UI should render for this ticker."""
     return get_config(ticker)["spread_finder_mode"] in ("spx_shared", "own_har")

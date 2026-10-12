@@ -25,8 +25,7 @@ your-repo/
 │   ├── staleness.py
 │   ├── wall_credibility.py
 │   ├── scenarios.py
-│   ├── expected_move.py
-│   └── run_metadata.py
+│   └── expected_move.py
 ```
 
 **Important:** Do NOT commit your API keys. Use Streamlit secrets instead.

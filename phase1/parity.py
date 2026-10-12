@@ -237,16 +237,6 @@ def _compute_implied_spot_core(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RA
     }  
 
 
-def compute_implied_spot(calls, puts, tradier_spot, r=DEFAULT_RISK_FREE_RATE, T=None,
-                          r_curve=None, q=0.0):
-    """
-    Compatibility wrapper.
-    """
-    core = _compute_implied_spot_core(calls, puts, tradier_spot, r=r, T=T,
-                                      r_curve=r_curve, q=q)
-    return core["spot"], core["source"]
-
-
 def get_reference_spot_details(
     ticker,
     nearest_exp,
@@ -319,24 +309,3 @@ def get_reference_spot_details(
         details["implied_spot"] = round(float(core["spot"]), 2)
 
     return details
-
-
-def get_reference_spot(
-    ticker,
-    nearest_exp,
-    get_spot_price_func,
-    get_chain_cached_func,
-    r=DEFAULT_RISK_FREE_RATE,
-    now=None,
-    r_curve=None,
-):
-    details = get_reference_spot_details(
-        ticker=ticker,
-        nearest_exp=nearest_exp,
-        get_spot_price_func=get_spot_price_func,
-        get_chain_cached_func=get_chain_cached_func,
-        r=r,
-        now=now,
-        r_curve=r_curve,
-    )
-    return details["spot"], details["source"]

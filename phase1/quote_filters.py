@@ -29,11 +29,6 @@ def is_locked(row: dict) -> bool:
     return get_bid(row) == get_ask(row)
 
 
-def is_crossed_or_locked(row: dict) -> bool:
-    """Backward-compatible wrapper. Prefer is_crossed() for filtering."""
-    return is_crossed(row) or is_locked(row)
-
-
 def quote_spread(row: dict) -> float | None:
     if not has_two_sided_quote(row):
         return None

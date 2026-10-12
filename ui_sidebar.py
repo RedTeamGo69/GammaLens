@@ -329,11 +329,6 @@ def _wall_credibility_body(wall_cred) -> str:
     )
 
 
-def render_wall_credibility(wall_cred) -> str:
-    body = _wall_credibility_body(wall_cred)
-    return f'<section class="term-card">{body}</section>' if body else ""
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Quality
 # ─────────────────────────────────────────────────────────────────────────────
@@ -385,10 +380,6 @@ def _data_quality_body(stats, staleness_info) -> str:
   <div class="dq-grid">{grid}</div>
   {note}
 """
-
-
-def render_data_quality(stats, staleness_info) -> str:
-    return f'<section class="term-card">{_data_quality_body(stats, staleness_info)}</section>'
 
 
 def render_quality_card(wall_cred, stats, staleness_info) -> str:

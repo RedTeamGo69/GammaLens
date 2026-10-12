@@ -122,15 +122,7 @@ def test_buffer_ignores_rows_without_effective_range():
     assert buf["n"] == 0
 
 
-# ── rolling_coverage / coverage_by_model ──────────────────────────────────────
-
-def test_rolling_coverage_window():
-    rows = [(0.01, None, 0.02, None, "M3")] * 30
-    out = cal.rolling_coverage(_forecast_frame(rows), window=26)
-
-    assert out["rolling_one_sided"].isna().sum() == 25    # warmup
-    assert out["rolling_one_sided"].dropna().iloc[-1] == pytest.approx(1.0)
-
+# ── coverage_by_model ──────────────────────────────────────────────────────────
 
 def test_coverage_by_model_pools_unknown():
     rows = [

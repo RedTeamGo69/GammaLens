@@ -57,26 +57,6 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================================
-# DATABASE SETUP
-# =============================================================================
-
-def init_db():
-    """
-    Connect to Postgres (via DATABASE_URL) and ensure all range-finder tables
-    exist.
-
-    Tables:
-        weekly_spx  — SPX and VIX weekly OHLC + derived range metrics
-        macro_daily — Daily FRED macro series (joined to weekly during feature build)
-        event_flags — Manual or scraped FOMC/CPI/NFP week flags
-    """
-    from range_finder.db import get_connection, init_all_tables
-    conn = get_connection()
-    init_all_tables(conn)
-    return conn
-
-
-# =============================================================================
 # SPX + VIX DATA
 # =============================================================================
 
@@ -334,15 +314,11 @@ def save_underlying_weekly(conn, ticker: str, df: pd.DataFrame) -> int:
     return rows_written
 
 
-def get_weekly_underlying(conn, ticker: str, limit: int = None) -> pd.DataFrame:
+def get_weekly_underlying(conn, ticker: str) -> pd.DataFrame:
     """Return weekly_underlying for one ticker as a DataFrame indexed by week_start."""
-    query = "SELECT * FROM weekly_underlying WHERE ticker = ? ORDER BY week_start ASC"
-    params = (ticker,)
-    if limit:
-        query += " LIMIT ?"
-        params = (ticker, int(limit))
-    df = pd.read_sql_query(query, conn, params=params,
-                           parse_dates=["week_start", "week_end"])
+    df = pd.read_sql_query(
+        "SELECT * FROM weekly_underlying WHERE ticker = ? ORDER BY week_start ASC",
+        conn, params=(ticker,), parse_dates=["week_start", "week_end"])
     df.set_index("week_start", inplace=True)
     return df
 
@@ -547,7 +523,9 @@ def capture_and_save_monday_anchor(
     ``resolve_config`` for arbitrary tickers); when omitted we resolve via
     ``get_config``. Falls back to `spot_fallback` / `live_vix_fallback` only when
     NO anchor source (Tradier -> Cboe -> yfinance) has a daily bar for
-    `target_date`.
+    `target_date`, and only to create a missing row: a fallback never
+    overwrites an existing anchor, because a forced mid-week rebuild would
+    otherwise re-lock the week's strikes to that day's price.
     """
     from phase1.ticker_config import get_config, price_scale_divisor
 
@@ -557,6 +535,19 @@ def capture_and_save_monday_anchor(
     scale = price_scale_divisor(ticker)
 
     underlying_open = _daily_open_on(underlying_symbol, target_date)
+    vol_proxy_open = _daily_open_on(vol_proxy_symbol, target_date)
+    if underlying_open is None or vol_proxy_open is None:
+        existing = conn.execute(
+            "SELECT monday_open, monday_vix FROM weekly_setup "
+            "WHERE week_start = ? AND ticker = ?",
+            (week_start, ticker),
+        ).fetchone()
+        if existing and existing[0] and existing[1]:
+            log.info(f"[{ticker}] daily bar unavailable for {target_date} — "
+                     f"keeping the existing {week_start} anchor")
+            return (float(existing[0]), float(existing[1]),
+                    "existing weekly_setup row (daily bar unavailable)")
+
     if underlying_open is not None:
         monday_open = round(underlying_open / scale, 2)
         open_source = f"{underlying_symbol} daily Open ({target_date})"
@@ -569,7 +560,6 @@ def capture_and_save_monday_anchor(
             "and no spot fallback supplied"
         )
 
-    vol_proxy_open = _daily_open_on(vol_proxy_symbol, target_date)
     if vol_proxy_open is not None:
         monday_vix = round(vol_proxy_open, 2)
         vix_source = f"{vol_proxy_symbol} daily Open ({target_date})"
@@ -577,8 +567,9 @@ def capture_and_save_monday_anchor(
         monday_vix = round(float(live_vix_fallback), 2)
         vix_source = f"live {vol_proxy_symbol} (daily Open unavailable)"
     else:
-        monday_vix = 18.0
-        vix_source = "default 18.0 (no vol-proxy data)"
+        raise RuntimeError(
+            f"No daily Open or live value for {vol_proxy_symbol} on {target_date}"
+        )
 
     save_weekly_setup(conn, ticker, week_start, monday_open, monday_vix)
     log.info(
@@ -639,17 +630,6 @@ def populate_earnings_flags(conn, ticker: str) -> int:
     conn.commit()
     log.info(f"[{ticker}] earnings_flags: {rows} weeks flagged")
     return rows
-
-
-def get_earnings_flag(conn, ticker: str, week_start: str) -> bool:
-    """Return True if the (ticker, week_start) row has has_earnings=1."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT has_earnings FROM earnings_flags WHERE ticker = ? AND week_start = ?",
-        (ticker, week_start),
-    )
-    row = cur.fetchone()
-    return bool(row and row[0])
 
 
 # =============================================================================
@@ -744,24 +724,6 @@ from range_finder.event_calendars import (  # noqa: F401
 
 
 # =============================================================================
-# WEEKLY UPDATE  (call this every Friday evening)
-# =============================================================================
-
-def update_weekly(conn) -> None:
-    """
-    Incremental update — pulls the last 8 weeks of data and upserts.
-    Use this every Friday after market close instead of the full initial load.
-    """
-    log.info("Running incremental weekly update...")
-    df_spx = fetch_spx_vix(years=0.2)    # ~10 weeks
-    save_spx_vix(conn, df_spx)
-    df_macro = fetch_fred_macro(years=0.2)
-    save_fred_macro(conn, df_macro)
-    build_event_flags(conn)
-    log.info("Weekly update complete.")
-
-
-# =============================================================================
 # UTILITY
 # =============================================================================
 
@@ -776,16 +738,12 @@ def _safe(row: pd.Series, col: str):
         return None
 
 
-def get_weekly_spx(conn, limit: int = None) -> pd.DataFrame:
+def get_weekly_spx(conn) -> pd.DataFrame:
     """
     Convenience reader — returns weekly_spx as a DataFrame sorted by week_start.
     """
-    query = "SELECT * FROM weekly_spx ORDER BY week_start ASC"
-    params = None
-    if limit:
-        query += " LIMIT ?"
-        params = (int(limit),)
-    df = pd.read_sql_query(query, conn, params=params, parse_dates=["week_start", "week_end"])
+    df = pd.read_sql_query("SELECT * FROM weekly_spx ORDER BY week_start ASC", conn,
+                           parse_dates=["week_start", "week_end"])
     df.set_index("week_start", inplace=True)
     return df
 

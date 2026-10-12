@@ -14,7 +14,7 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 
-# Known 2016-2026 FOMC meeting dates (statement/decision days).
+# Known 2016-2027 FOMC meeting dates (statement/decision days).
 # 2016-2019 were backfilled (2026-07) for the history-depth experiment —
 # the training window can now extend to ~10y without event_count silently
 # reading 0 on pre-2020 weeks.
@@ -54,6 +54,12 @@ FOMC_DATES = [
     # Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9)
     "2026-01-28","2026-03-18","2026-04-29","2026-06-17","2026-07-29",
     "2026-09-16","2026-10-28","2026-12-09",
+    # 2027 (decision days per the Fed's published 2027 calendar, verified
+    # 2026-10-12 at federalreserve.gov/monetarypolicy/fomccalendars.htm:
+    # Jan 26-27, Mar 16-17, Apr 27-28, Jun 8-9, Jul 27-28, Sep 14-15,
+    # Oct 26-27, Dec 7-8 — tentative until confirmed at the prior meeting)
+    "2027-01-27","2027-03-17","2027-04-28","2027-06-09","2027-07-28",
+    "2027-09-15","2027-10-27","2027-12-08",
 ]
 
 CPI_DATES = [
@@ -106,6 +112,11 @@ CPI_DATES = [
     "2026-01-13","2026-02-13","2026-03-11","2026-04-10","2026-05-12",
     "2026-06-10","2026-07-14","2026-08-12","2026-09-11","2026-10-14",
     "2026-11-10","2026-12-10",
+    # 2027 (BLS schedule, verified 2026-10-12 at
+    # bls.gov/schedule/news_release/cpi.htm — Dec'26 through Nov'27 data)
+    "2027-01-13","2027-02-11","2027-03-10","2027-04-13","2027-05-12",
+    "2027-06-10","2027-07-14","2027-08-11","2027-09-14","2027-10-14",
+    "2027-11-10","2027-12-10",
 ]
 
 NFP_DATES = [
@@ -157,6 +168,11 @@ NFP_DATES = [
     "2026-01-09","2026-02-11","2026-03-06","2026-04-03","2026-05-08",
     "2026-06-05","2026-07-02","2026-08-07","2026-09-04","2026-10-02",
     "2026-11-06","2026-12-04",
+    # 2027 (BLS schedule, verified 2026-10-12 at
+    # bls.gov/schedule/news_release/empsit.htm — Dec'26 through Nov'27 data)
+    "2027-01-08","2027-02-05","2027-03-05","2027-04-02","2027-05-07",
+    "2027-06-04","2027-07-02","2027-08-06","2027-09-03","2027-10-08",
+    "2027-11-05","2027-12-03",
 ]
 
 
@@ -175,6 +191,10 @@ PPI_DATES = [
     "2026-01-14","2026-01-30","2026-02-27","2026-03-18","2026-04-14",
     "2026-05-13","2026-06-11","2026-07-15","2026-08-13","2026-09-10",
     "2026-10-15","2026-11-13","2026-12-15",
+    # 2027 (verified 2026-10-12 at bls.gov/schedule/news_release/ppi.htm)
+    "2027-01-14","2027-02-12","2027-03-12","2027-04-14","2027-05-13",
+    "2027-06-11","2027-07-15","2027-08-10","2027-09-10","2027-10-15",
+    "2027-11-12","2027-12-15",
 ]
 
 PCE_DATES = [
@@ -183,6 +203,12 @@ PCE_DATES = [
     # past dates retroactively, so the list starts at the June print.
     "2026-06-25","2026-07-30","2026-08-26","2026-09-30","2026-10-29",
     "2026-11-25","2026-12-23",
+    # 2027, verified 2026-10-12 on BEA's per-release schedule pages (Feb'27
+    # through Oct'27 data). BEA had not yet posted the Dec'26, Jan'27 or
+    # Nov'27 releases; add them when it does. Only the latest date matters
+    # today — this list feeds the staleness banner, not event flags.
+    "2027-03-31","2027-04-29","2027-05-27","2027-06-25","2027-07-29",
+    "2027-08-25","2027-09-30","2027-10-28","2027-11-24",
 ]
 
 def _get_week_start(date_str: str) -> str:

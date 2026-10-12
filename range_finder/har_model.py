@@ -14,7 +14,6 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from range_finder.feature_builder import get_features
 from range_finder.gex_policy import (
@@ -323,9 +322,12 @@ def evaluate_oos(
     y_true_pct = np.exp(y_test)
 
     oos_r2 = _oos_r2(y_test, y_pred_log, benchmark=y_train_mean)
-    mae    = mean_absolute_error(y_test, y_pred_log)
-    rmse   = math.sqrt(mean_squared_error(y_test, y_pred_log))
-    mae_pct = mean_absolute_error(y_true_pct, y_pred_pct)
+    # Positional arrays, so a mismatched index can never silently realign.
+    err_log = np.asarray(y_test, dtype=float) - np.asarray(y_pred_log, dtype=float)
+    mae    = float(np.mean(np.abs(err_log)))
+    rmse   = math.sqrt(float(np.mean(err_log ** 2)))
+    mae_pct = float(np.mean(np.abs(np.asarray(y_true_pct, dtype=float)
+                                   - np.asarray(y_pred_pct, dtype=float))))
 
     # Directional accuracy
     y_lag  = y_test.shift(1).dropna()

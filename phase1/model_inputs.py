@@ -281,11 +281,3 @@ def prepare_option_for_model(opt, sign, T, spot, r, q=0.0):
         "synthetic_fitted_gamma": None,
         "normalized": None,
     }
-
-
-def normalize_option_for_model(opt, sign, T, spot, r):
-    """
-    Backward-compatible wrapper.
-    """
-    result = prepare_option_for_model(opt, sign, T, spot, r)
-    return result["normalized"]

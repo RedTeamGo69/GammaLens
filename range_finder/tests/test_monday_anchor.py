@@ -156,6 +156,37 @@ def test_selfheal_without_spot_fallback_raises_and_persists_nothing(monkeypatch)
     assert conn.execute("SELECT COUNT(*) FROM weekly_setup").fetchone()[0] == 0
 
 
+def test_fallback_never_overwrites_an_existing_anchor(monkeypatch):
+    # A forced Wednesday rebuild whose bar sources all fail must not re-lock
+    # the week's strikes to Wednesday's spot.
+    conn = _make_conn()
+    conn.execute("INSERT INTO weekly_setup VALUES ('2026-06-29', 'SPX', 6800.0, 17.5, 'x')")
+    _patch_opens(monkeypatch, {})
+
+    open_, vix, src = dc.capture_and_save_monday_anchor(
+        conn, "SPX", "2026-06-29", dt.date(2026, 6, 29),
+        spot_fallback=7000.0, live_vix_fallback=25.0,
+    )
+
+    assert (open_, vix) == (6800.0, 17.5)
+    assert "existing" in src
+    row = conn.execute("SELECT monday_open, monday_vix FROM weekly_setup").fetchone()
+    assert row == (6800.0, 17.5)
+
+
+def test_no_vix_anywhere_raises_instead_of_inventing_one(monkeypatch):
+    conn = _make_conn()
+    _patch_opens(monkeypatch, {"^GSPC": 6800.0})   # VIX bar absent, no live VIX
+
+    with pytest.raises(RuntimeError, match="VIX"):
+        dc.capture_and_save_monday_anchor(
+            conn, "SPX", "2026-06-29", dt.date(2026, 6, 29),
+            spot_fallback=6790.0, live_vix_fallback=None,
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM weekly_setup").fetchone()[0] == 0
+
+
 # ── anchor-open source chain (Tradier -> Cboe -> yfinance) ─────────────────────
 # A 2026-07-02 yfinance flake made the anchor fall back to live spot mid-week
 # (7483.23 instead of Monday's 7391.88). These pin the Tradier-first chain and

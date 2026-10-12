@@ -16,7 +16,7 @@ import os
 import sys
 import logging
 from phase1 import credentials
-from phase1.trading_week import is_first_session, setup_week
+from phase1.trading_week import is_first_session, setup_week, trading_week
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _logger = logging.getLogger(__name__)
@@ -33,15 +33,18 @@ def _weekly_setup_artifacts_complete(ticker: str, week_start: str) -> bool:
     from range_finder.db import get_connection
 
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT ws.monday_open, ws.monday_vix, ws.captured_at, sm.fitted_at "
-        "FROM weekly_setup ws "
-        "JOIN saved_models sm ON sm.ticker = ws.ticker "
-        "WHERE ws.week_start = ? AND ws.ticker = ? AND sm.model_name = ?",
-        (week_start, ticker, _CALIBRATION_SPEC),
-    )
-    row = cur.fetchone()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ws.monday_open, ws.monday_vix, ws.captured_at, sm.fitted_at "
+            "FROM weekly_setup ws "
+            "JOIN saved_models sm ON sm.ticker = ws.ticker "
+            "WHERE ws.week_start = ? AND ws.ticker = ? AND sm.model_name = ?",
+            (week_start, ticker, _CALIBRATION_SPEC),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
     if not row:
         return False
     monday_open, monday_vix, captured_at, fitted_at = row
@@ -204,6 +207,14 @@ def capture_snapshot():
     if not force_weekly_setup and session.market_open is None:
         _logger.info(f"Market holiday ({today_str}) — skipping")
         sys.exit(0)
+
+    # EM snapshots are first-write-wins (ON CONFLICT DO NOTHING), so only a
+    # run inside the opening window may write them. A forced rebuild outside
+    # it — a weekend refit, say — would otherwise freeze next week's weekly EM
+    # from Friday's stale quotes and silently discard Monday's real capture.
+    # Every non-forced run that reaches the EM saves is inside the window.
+    in_capture_window = (session.market_open is not None
+                         and market_open <= time_val <= market_close)
 
     # ── Cadence gate: single-name tickers run weekly-only ──
     # Index/ETF tickers capture every market day (GEX/EM history + 0DTE for
@@ -422,7 +433,9 @@ def capture_snapshot():
 
     # ── Save EM snapshot (only first of day due to ON CONFLICT DO NOTHING) ──
     em_data = em_analysis.get("expected_move", {})
-    if em_data.get("expected_move_pts"):
+    if not in_capture_window:
+        _logger.info("Outside the 9:20-10:15 ET opening window — EM snapshots not saved")
+    elif em_data.get("expected_move_pts"):
         try:
             save_em_snapshot(em_data, today_str, ticker=ticker, em_type="daily")
             _logger.info(f"Daily EM snapshot saved: {em_data['expected_move_pts']:.2f} pts")
@@ -442,8 +455,8 @@ def capture_snapshot():
     # capture_snapshot (the single-name cadence gate needs it before the
     # market-open wait), so it's reused here rather than recomputed.
     weekly_key = get_weekly_em_date_key(run_now)
-    should_capture_weekly = is_week_first_trading_day
-    if not should_capture_weekly:
+    should_capture_weekly = in_capture_window and is_week_first_trading_day
+    if in_capture_window and not should_capture_weekly:
         # Backfill path: no snap yet for this week → capture today.
         try:
             existing_weekly = get_em_snapshot(weekly_key, ticker=ticker, em_type="weekly")
@@ -470,28 +483,16 @@ def capture_snapshot():
     # is normally that Monday, or the first non-holiday weekday after it.
     # Same backfill logic as weekly: if that run was missed, capture from a
     # later day rather than leaving the cycle blank.
-    from datetime import date as _date, timedelta as _td
+    from datetime import date as _date
 
     monthly_key = get_monthly_em_date_key(run_now)  # = Monday after last OpEx
-    cycle_open_mon = _date.fromisoformat(monthly_key)
-
-    # Find the actual first trading day of this cycle (skip holidays).
-    cycle_first_trading_day = None
-    walker = cycle_open_mon
-    for _ in range(7):
-        probe = run_now.replace(
-            year=walker.year, month=walker.month, day=walker.day,
-            hour=12, minute=0, second=0, microsecond=0,
-        )
-        probe_session = get_session_state(CASH_CALENDAR, probe)
-        if walker.weekday() < 5 and probe_session.market_open is not None:
-            cycle_first_trading_day = walker
-            break
-        walker = walker + _td(days=1)
+    # The cycle opens on that Monday's week's first session (Tuesday when the
+    # Monday is a holiday).
+    cycle_first_trading_day = trading_week(_date.fromisoformat(monthly_key)).first_session_day
 
     is_cycle_open = (cycle_first_trading_day == run_now.date())
-    should_capture_monthly = is_cycle_open
-    if not should_capture_monthly:
+    should_capture_monthly = in_capture_window and is_cycle_open
+    if in_capture_window and not should_capture_monthly:
         try:
             existing_monthly = get_em_snapshot(monthly_key, ticker=ticker, em_type="monthly")
         except Exception:
@@ -578,15 +579,6 @@ def capture_snapshot():
 # preferred_model default) — the calibration series should track what the
 # user actually trades off.
 _CALIBRATION_SPEC = "M3_extended"
-
-
-def _safe_float(val):
-    """float(val) or None — tolerates None/NaN/strings from feature rows."""
-    try:
-        f = float(val)
-        return f if f == f else None   # NaN != NaN
-    except (TypeError, ValueError):
-        return None
 
 
 def _side_share_q(conn):

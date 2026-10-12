@@ -269,23 +269,6 @@ def expectancy_summary(df: pd.DataFrame,
     return out
 
 
-def rolling_coverage(df: pd.DataFrame, window: int = 26,
-                     date_col: str = "week_start") -> pd.DataFrame:
-    """Rolling one-sided coverage — drift detection.
-
-    Returns a frame indexed by date with a `rolling_one_sided` column; NaN
-    until `window` observations accumulate.
-    """
-    if df.empty:
-        return pd.DataFrame(columns=["rolling_one_sided"])
-    s = (df.set_index(date_col)
-           .sort_index()
-           .apply(lambda r: float(r["actual_range_pct"] <= r["upper_pct"]),
-                  axis=1))
-    return s.rolling(window, min_periods=window).mean() \
-            .to_frame("rolling_one_sided")
-
-
 def coverage_by_model(df: pd.DataFrame) -> pd.DataFrame:
     """Per-spec coverage breakdown. Legacy rows without a stored spec pool
     under "(unknown)"."""

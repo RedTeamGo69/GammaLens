@@ -309,68 +309,67 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             if first_live_exp is None:
                 first_live_exp = exp
 
-            if exp in target_exps:
-                if K not in agg:
-                    agg[K] = {
-                        "call_gex": 0.0, "put_gex": 0.0,
-                        "call_oi": 0.0, "put_oi": 0.0,
-                    }
+            if K not in agg:
+                agg[K] = {
+                    "call_gex": 0.0, "put_gex": 0.0,
+                    "call_oi": 0.0, "put_oi": 0.0,
+                }
 
-                if sign == +1:
-                    agg[K]["call_gex"] += gex
-                    agg[K]["call_oi"] += oi
-                    total_call_oi += oi
-                    if oi > max_call_oi_strike[0]:
-                        max_call_oi_strike = (oi, K)
-                    if exp == first_live_exp:
-                        first_exp_call_ivs.append(model_iv)
-                else:
-                    agg[K]["put_gex"] += gex
-                    agg[K]["put_oi"] += oi
-                    total_put_oi += oi
-                    if oi > max_put_oi_strike[0]:
-                        max_put_oi_strike = (oi, K)
-                    if exp == first_live_exp:
-                        first_exp_put_ivs.append(model_iv)
+            if sign == +1:
+                agg[K]["call_gex"] += gex
+                agg[K]["call_oi"] += oi
+                total_call_oi += oi
+                if oi > max_call_oi_strike[0]:
+                    max_call_oi_strike = (oi, K)
+                if exp == first_live_exp:
+                    first_exp_call_ivs.append(model_iv)
+            else:
+                agg[K]["put_gex"] += gex
+                agg[K]["put_oi"] += oi
+                total_put_oi += oi
+                if oi > max_put_oi_strike[0]:
+                    max_put_oi_strike = (oi, K)
+                if exp == first_live_exp:
+                    first_exp_put_ivs.append(model_iv)
 
-                # all_options gets the full wider range for sweep/profile/scenarios.
-                # Use *size* (max of OI and volume) as the weight so zero-gamma
-                # sweeps and per-expiry GEX projections line up with the live
-                # volume-inclusive GEX computed above — otherwise the sweep would
-                # revert to OI-only and disagree with the bar chart on 0DTE.
-                all_options.append((K, size, model_iv, sign, T, exp))
-                used_option_count += 1
-                # Commit the per-strike amplification counters (now that the
-                # strike has actually been accepted into the aggregation).
-                total_used_oi_only += _this_strike_oi
-                total_used_max     += _this_strike_size
-                if _this_strike_volume_dominates:
-                    vol_dominated_strikes += 1
-                bid = raw_opt.get("bid", 0.0) or 0.0
-                ask = raw_opt.get("ask", 0.0) or 0.0
-                spread = float(ask - bid) if bid > 0 and ask > 0 and ask >= bid else np.nan
+            # all_options gets the full wider range for sweep/profile/scenarios.
+            # Use *size* (max of OI and volume) as the weight so zero-gamma
+            # sweeps and per-expiry GEX projections line up with the live
+            # volume-inclusive GEX computed above — otherwise the sweep would
+            # revert to OI-only and disagree with the bar chart on 0DTE.
+            all_options.append((K, size, model_iv, sign, T, exp))
+            used_option_count += 1
+            # Commit the per-strike amplification counters (now that the
+            # strike has actually been accepted into the aggregation).
+            total_used_oi_only += _this_strike_oi
+            total_used_max     += _this_strike_size
+            if _this_strike_volume_dominates:
+                vol_dominated_strikes += 1
+            bid = raw_opt.get("bid", 0.0) or 0.0
+            ask = raw_opt.get("ask", 0.0) or 0.0
+            spread = float(ask - bid) if bid > 0 and ask > 0 and ask >= bid else np.nan
 
-                support_records.append(
-                    {
-                        "expiration": exp,
-                        "strike": round(K, 2),
-                        "oi": float(oi),
-                        "iv_source": norm_opt["iv_source"],
-                        "spread": spread,
-                        "is_call": bool(sign == +1),
-                        "is_put": bool(sign == -1),
-                        "net_gex": float(gex),
-                        "abs_gex": float(abs(gex)),
-                    }
-                )                
+            support_records.append(
+                {
+                    "expiration": exp,
+                    "strike": round(K, 2),
+                    "oi": float(oi),
+                    "iv_source": norm_opt["iv_source"],
+                    "spread": spread,
+                    "is_call": bool(sign == +1),
+                    "is_put": bool(sign == -1),
+                    "net_gex": float(gex),
+                    "abs_gex": float(abs(gex)),
+                }
+            )                
 
-                if norm_opt["iv_source"] == "direct_iv":
-                    direct_iv_count += 1
-                elif norm_opt["iv_source"] == "synthetic_iv":
-                    synthetic_iv_count += 1
-                    synthetic_fit_accept_count += 1
-                    if norm_opt.get("synthetic_fit_rel_error") is not None:
-                        synthetic_fit_rel_errors.append(norm_opt["synthetic_fit_rel_error"])
+            if norm_opt["iv_source"] == "direct_iv":
+                direct_iv_count += 1
+            elif norm_opt["iv_source"] == "synthetic_iv":
+                synthetic_iv_count += 1
+                synthetic_fit_accept_count += 1
+                if norm_opt.get("synthetic_fit_rel_error") is not None:
+                    synthetic_fit_rel_errors.append(norm_opt["synthetic_fit_rel_error"])
 
         raw_contract_count = len(calls_raw) + len(puts_raw)
         if raw_contract_count > 0 and live_contract_count == 0:

@@ -10,11 +10,8 @@ driven by st.query_params (see ui_theme); all data/model logic is unchanged.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from theme import COLORS
@@ -52,6 +49,7 @@ from phase1.expected_move import (
 from phase1.gex_history import (
     get_weekly_em_date_key, get_monthly_em_date_key,
 )
+from phase1.gamma_archive_capture import canonical_gamma_expirations
 from phase1.gamma_level_history import archive_computed_gamma_levels
 
 _logger = logging.getLogger(__name__)
@@ -577,23 +575,28 @@ def main():
         puts_0dte=data.dte0_puts,
         market_open=data.market_open,
         expiration=data.dte0_exp,
+        as_of=run_now.date(),   # exchange date; the server clock is UTC
     )
 
     # Opportunistic research archive: the observation time comes from the
     # cached engine result, not this rerun, so a stale cached computation can
     # never be filed into a later 30-minute bucket. The archive helper skips
     # non-RTH times, deduplicates by ticker/session/bucket, and never raises.
-    archive_computed_gamma_levels(
-        captured_at=data.calendar_snapshot.get("now_ny", ""),
-        ticker=ticker,
-        spot=spot,
-        levels=levels,
-        regime_info=regime,
-        stats=data.stats,
-        confidence_info=data.confidence_info,
-        staleness_info=data.staleness_info,
-        em_analysis=em_analysis,
-    )
+    # Only the collectors' canonical expiration set is archived: rows are
+    # first-write-wins and record no expiration set, so a 0DTE-only or
+    # OpEx-cycle view would file an incomparable number into the bucket.
+    if tuple(data.target_exps) == canonical_gamma_expirations(data.avail, run_now.date()):
+        archive_computed_gamma_levels(
+            captured_at=data.calendar_snapshot.get("now_ny", ""),
+            ticker=ticker,
+            spot=spot,
+            levels=levels,
+            regime_info=regime,
+            stats=data.stats,
+            confidence_info=data.confidence_info,
+            staleness_info=data.staleness_info,
+            em_analysis=em_analysis,
+        )
 
     # EM freezing is UI/application state. Archive the live contemporaneous EM
     # above before this may substitute the first observation saved for the day.

@@ -1,7 +1,8 @@
 # =============================================================================
 # model_persistence.py
-# HAR model serialization — save/load fitted models to Postgres (with an
-# on-disk pickle fallback if the DB save fails transiently).
+# HAR model serialization — save/load fitted models to Postgres. There is
+# no on-disk fallback: Streamlit Cloud's disk is thrown away on restart, so a
+# local pickle only hid failed saves behind a "rows saved" success message.
 # =============================================================================
 
 import io
@@ -9,7 +10,6 @@ import logging
 import pickle
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 import statsmodels.api as sm
 
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 # ── Restricted unpickling ────────────────────────────────────────────────────
 #
-# pickle.loads on a blob from Postgres (or a file on disk) executes whatever
+# pickle.loads on a blob from Postgres executes whatever
 # callables the stream names — a poisoned saved_models row is an RCE
 # primitive for anyone who obtains DATABASE_URL. Model payloads only ever
 # contain statsmodels results + numpy/pandas containers + stdlib scalars, so
@@ -52,7 +52,6 @@ def _restricted_loads(blob: bytes):
     return _RestrictedUnpickler(io.BytesIO(blob)).load()
 
 # Pickle fallback path — used only if the DB save raises
-MODEL_DIR = Path(__file__).parent / "models"
 
 # Schema version for saved model payloads. Bump this whenever the payload
 # dict shape changes, or whenever the HAR feature definitions change in a
@@ -85,14 +84,13 @@ def save_model(
     feature_cols: list[str],
     model_name: str,
     metrics: dict,
-    conn=None,
+    conn,
     ticker: str = "SPX",
 ):
-    """Save the fitted model + metadata to Postgres (on-disk pickle fallback).
+    """Save the fitted model + metadata to Postgres; a DB error raises.
 
     `ticker` scopes the fit so SPX and XSP can coexist under the same
-    `model_name`. Both the DB row and the pickle-fallback filename are
-    keyed by (model_name, ticker).
+    `model_name`; the row is keyed by (model_name, ticker).
     """
     payload = {
         "schema_version":     SCHEMA_VERSION,
@@ -109,29 +107,17 @@ def save_model(
     blob = pickle.dumps(payload)
     now = datetime.now(timezone.utc).isoformat()
 
-    if conn is not None:
-        try:
-            import psycopg2
-            conn.execute("""
-                INSERT INTO saved_models (model_name, ticker, model_data, fitted_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT(model_name, ticker) DO UPDATE SET
-                    model_data = EXCLUDED.model_data,
-                    fitted_at  = EXCLUDED.fitted_at,
-                    updated_at = EXCLUDED.updated_at
-            """, (model_name, ticker, psycopg2.Binary(blob), payload["fitted_at"], now))
-            conn.commit()
-            log.info(f"Model saved to database: {ticker}/{model_name}")
-            return
-        except Exception as e:
-            log.warning(f"DB save failed, falling back to pickle: {e}")
-
-    # Fallback: pickle to disk, ticker-scoped filename
-    MODEL_DIR.mkdir(exist_ok=True)
-    path = MODEL_DIR / f"{ticker}_{model_name}.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(payload, f)
-    log.info(f"Model saved to disk: {path}")
+    import psycopg2
+    conn.execute("""
+        INSERT INTO saved_models (model_name, ticker, model_data, fitted_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT(model_name, ticker) DO UPDATE SET
+            model_data = EXCLUDED.model_data,
+            fitted_at  = EXCLUDED.fitted_at,
+            updated_at = EXCLUDED.updated_at
+    """, (model_name, ticker, psycopg2.Binary(blob), payload["fitted_at"], now))
+    conn.commit()
+    log.info(f"Model saved to database: {ticker}/{model_name}")
 
 
 class IncompatibleModelError(Exception):
@@ -185,50 +171,28 @@ def _validate_payload(payload: dict, source: str) -> None:
         )
 
 
-def load_model(model_name: str, conn=None, ticker: str = "SPX") -> dict:
-    """Load a previously saved model from Postgres (on-disk pickle fallback).
+def load_model(model_name: str, conn, ticker: str = "SPX") -> dict:
+    """Load a previously saved model from Postgres.
 
     `ticker` scopes the lookup so SPX and XSP fits don't collide.
 
-    Raises IncompatibleModelError if the payload schema_version doesn't
-    match the current SCHEMA_VERSION constant — caller should treat this
-    as "model needs refitting" and prompt the user accordingly.
+    Raises FileNotFoundError when no fit is saved (callers then try the
+    parent ticker or prompt a fit), IncompatibleModelError if the payload
+    schema_version doesn't match SCHEMA_VERSION ("model needs refitting"),
+    and lets a DB error propagate rather than serving a stale fit.
     """
-    if conn is not None:
-        try:
-            cur = conn.execute(
-                "SELECT model_data, fitted_at FROM saved_models "
-                "WHERE model_name = %s AND ticker = %s",
-                (model_name, ticker)
-            )
-            row = cur.fetchone()
-            if row:
-                blob = row[0]
-                if isinstance(blob, memoryview):
-                    blob = bytes(blob)
-                payload = _restricted_loads(blob)
-                _validate_payload(payload, f"DB:{ticker}/{model_name}")
-                log.info(f"Model loaded from database: {ticker}/{model_name}  (fitted {payload['fitted_at']})")
-                return payload
-        except IncompatibleModelError:
-            # Don't swallow — let the caller decide what to do
-            raise
-        except Exception as e:
-            log.warning(f"DB load failed, trying pickle fallback: {e}")
-
-    # Fallback: pickle from disk (ticker-scoped filename; legacy SPX fits
-    # fall back to the un-prefixed filename for one upgrade cycle).
-    path = MODEL_DIR / f"{ticker}_{model_name}.pkl"
-    if not path.exists() and ticker == "SPX":
-        legacy = MODEL_DIR / f"{model_name}.pkl"
-        if legacy.exists():
-            path = legacy
-    if not path.exists():
+    cur = conn.execute(
+        "SELECT model_data, fitted_at FROM saved_models "
+        "WHERE model_name = %s AND ticker = %s",
+        (model_name, ticker)
+    )
+    row = cur.fetchone()
+    if not row:
         raise FileNotFoundError(f"No saved model found for {ticker}/{model_name}")
-
-    with open(path, "rb") as f:
-        payload = _restricted_loads(f.read())
-
-    _validate_payload(payload, f"disk:{path}")
-    log.info(f"Model loaded from disk: {path}  (fitted {payload['fitted_at']})")
+    blob = row[0]
+    if isinstance(blob, memoryview):
+        blob = bytes(blob)
+    payload = _restricted_loads(blob)
+    _validate_payload(payload, f"DB:{ticker}/{model_name}")
+    log.info(f"Model loaded from database: {ticker}/{model_name}  (fitted {payload['fitted_at']})")
     return payload

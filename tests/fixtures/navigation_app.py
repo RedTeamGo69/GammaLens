@@ -32,6 +32,10 @@ DATA = SimpleNamespace(
     confidence_info={}, staleness_info={}, chain_cache={},
     avail=["2026-09-14", "2026-09-18"], wall_cred={}, run_time="11:00 ET",
 )
+# GL_NAV_CANONICAL_EXPS: select the collectors' canonical set (the nearest
+# four listed expirations — both of these), the only view the app archives.
+if os.environ.get("GL_NAV_CANONICAL_EXPS"):
+    DATA.target_exps = list(DATA.avail)
 
 
 def market_data(*args, **kwargs):
@@ -50,7 +54,8 @@ with (
     patch.object(app, "now_ny", lambda: NOW),
     patch.object(app, "get_expirations_cached", lambda *a: DATA.avail),
     patch.object(app, "fetch_all_data", market_data),
-    patch.object(app, "archive_computed_gamma_levels", lambda **k: None),
+    patch.object(app, "archive_computed_gamma_levels",
+                 lambda **k: st.session_state.__setitem__("fixture_archived", True)),
     patch.object(app, "build_expected_move_analysis", lambda **k: {"market_context": "live"}),
     patch.object(app, "TradierDataClient", lambda **k: SimpleNamespace(chain_cache={})),
     patch.object(app, "compute_em_for_expiration", lambda *a: {}),

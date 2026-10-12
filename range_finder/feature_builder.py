@@ -19,7 +19,6 @@ from range_finder.data_collector import (
     get_weekly_spx,
     get_macro_daily,
     get_event_flags,
-    init_db,
 )
 
 # =============================================================================
@@ -115,18 +114,6 @@ def select_forecast_row(features: pd.DataFrame, week_start) -> tuple:
             source_week=source_week, required_week=required_week,
         )
     return row, None
-
-
-# =============================================================================
-# DATABASE — add model_features table
-# =============================================================================
-
-def init_features_table(conn) -> None:
-    """
-    Ensure the model_features table exists.
-    Now handled by db.init_all_tables() — this is kept for backwards compatibility.
-    """
-    pass  # Tables created in db.init_all_tables()
 
 
 # =============================================================================
@@ -323,12 +310,6 @@ def load_gex_inputs(conn, ticker: str = "SPX") -> pd.DataFrame:
     except Exception:
         log.info("gex_inputs table not found — GEX features will be NULL")
         return pd.DataFrame(columns=["gex"])
-
-
-def create_gex_table(conn) -> None:
-    """Ensure the gex_inputs table exists.
-    Now handled by db.init_all_tables() — kept for backwards compatibility."""
-    pass  # Tables created in db.init_all_tables()
 
 
 def upsert_gex(conn, week_start: str, gex: float, notes: str = "",
@@ -537,6 +518,11 @@ def build_features(conn, exclude_covid: bool = True,
     # history experiment can build a full-depth matrix; production callers
     # leave the default 6) ---
     daily_underlying = inputs["daily"] if inputs is not None else _load_daily_for_ticker(ticker, years=history_years)
+    # No daily closes would upsert NULL HV over every stored week, and the fit
+    # would then silently drop hv_ratio from the production spec. Fail loudly
+    # instead and leave the stored rows as they are.
+    if daily_underlying.empty:
+        raise RuntimeError(f"No daily closes for {ticker} — HV features unavailable")
     # VIX9D/VIX3M term structure stays VIX-anchored across all tickers — it's
     # a macro-vol regime feature that single names also covary with. Cboe's
     # official CSVs carry both back past 2011, so any history_years the
@@ -833,35 +819,6 @@ def get_feature_for_week(conn, week_start: str, ticker: str = "SPX") -> pd.Serie
     # (M6_regime interaction terms were derived here when M6 existed; removed
     # along with the spec — see get_features() above.)
     return df.iloc[0]
-
-
-# =============================================================================
-# DIAGNOSTICS
-# =============================================================================
-
-def print_feature_summary(df: pd.DataFrame) -> None:
-    """Quick console summary of the feature matrix."""
-    print("\n" + "=" * 65)
-    print("  FEATURE BUILDER — FEATURE MATRIX SUMMARY")
-    print("=" * 65)
-    print(f"  Rows      : {len(df)}")
-    print(f"  Date range: {df.index.min().date()} → {df.index.max().date()}")
-    print(f"  Columns   : {len(df.columns)}")
-    print()
-
-    null_pct = (df.isnull().sum() / len(df) * 100).sort_values(ascending=False)
-    null_pct = null_pct[null_pct > 0]
-    if not null_pct.empty:
-        print("  NULL % by column (non-zero only):")
-        for col, pct in null_pct.items():
-            print(f"    {col:<25} {pct:.1f}%")
-    else:
-        print("  No nulls in feature matrix.")
-
-    print()
-    print("  Target (log_range) stats:")
-    print(df["log_range"].describe().to_string(float_format="{:.4f}".format))
-    print("=" * 65 + "\n")
 
 
 # =============================================================================

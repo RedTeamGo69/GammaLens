@@ -231,12 +231,13 @@ def _landing_chart(ranges, closes):
     import altair as alt
     # Every ticker is labelled; Vega otherwise drops alternate labels when rows are tight.
     y = alt.Y("Ticker:N", title=None, axis=alt.Axis(labelOverlap=False))
+    # Legends wrap into columns: a one-line legend runs past a phone's edge and is clipped.
     bars = alt.Chart(pd.DataFrame(ranges)).mark_bar(size=12).encode(
         x=alt.X("Put short:Q", axis=alt.Axis(format="+.1~%"), title="Move from the opening reference"),
         x2="Call short:Q", y=y,
         color=alt.Color("Range:N", scale=alt.Scale(domain=list(TIER_LABELS),
                                                    range=["#9cc2ff", "#6c9be0", "#4a77b5", "#33578a"]),
-                        legend=alt.Legend(orient="top", title=None)),
+                        legend=alt.Legend(orient="top", title=None, columns=2)),
         tooltip=["Ticker", "Model", alt.Tooltip("Ranges", title="Range"), "Strikes"])
     reference = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(strokeDash=[3, 3], opacity=.5).encode(x="x:Q")
     layers = bars + reference
@@ -246,13 +247,13 @@ def _landing_chart(ranges, closes):
             x="Close:Q", y=y,
             color=alt.Color("Outcome:N", scale=alt.Scale(
                 domain=list(LANDING_OUTCOMES), range=[TOKENS[c] for c in LANDING_OUTCOMES.values()]),
-                legend=alt.Legend(orient="bottom", title=None)),
+                legend=alt.Legend(orient="bottom", title=None, columns=1)),
             tooltip=["Ticker", alt.Tooltip("Price", title="Close"),
                      alt.Tooltip("Close:Q", format="+.2%", title="Move"), "Result"])
     tickers = len({r["Ticker"] for r in ranges})
-    # Streamlit's height covers both legends and the x-axis (~190px), not just the rows;
+    # Streamlit's height covers both legends and the x-axis (~280px), not just the rows;
     # a flat floor squeezed few-ticker weeks into one overlapping row.
-    return layers.resolve_scale(color="independent").properties(height=200 + 30 * tickers)
+    return layers.resolve_scale(color="independent").properties(height=290 + 30 * tickers)
 
 
 def _tradeoff_chart(points):
@@ -260,7 +261,7 @@ def _tradeoff_chart(points):
     base = alt.Chart(pd.DataFrame(points)).encode(
         # ".1~%" labels half-percent ticks as 7.5%, not a second "8%".
         x=alt.X("Width:Q", axis=alt.Axis(format=".1~%"), scale=alt.Scale(zero=False),
-                title="Average range width (share of the opening price)"),
+                title="Average width (share of opening price)"),
         y=alt.Y("Closed inside:Q", axis=alt.Axis(format=".1~%"), scale=alt.Scale(zero=False),
                 title="Closed inside"),
         # No four hues stay distinct when every pair can touch, so the baseline is the
@@ -268,15 +269,15 @@ def _tradeoff_chart(points):
         color=alt.Color("Model:N", scale=alt.Scale(
             domain=list(MODEL_LABELS.values()),
             range=[TOKENS["text_secondary"], "#3987e5", "#d95926", "#199e70"]),
-            legend=alt.Legend(orient="top", title=None, symbolOpacity=1)))
+            legend=alt.Legend(orient="top", title=None, symbolOpacity=1, columns=2)))
     lines = base.mark_line(strokeWidth=2, opacity=.7).encode(order="order:Q")
     dots = base.mark_point(filled=True, size=90, opacity=1, stroke=TOKENS["bg_base"], strokeWidth=1.5).encode(
         shape=alt.Shape("Range:N", sort=list(TIER_LABELS), legend=alt.Legend(
-            orient="bottom", title=None, symbolFillColor=TOKENS["text_muted"], symbolStrokeColor=TOKENS["text_muted"])),
+            orient="bottom", title=None, columns=2, symbolFillColor=TOKENS["text_muted"], symbolStrokeColor=TOKENS["text_muted"])),
         tooltip=[alt.Tooltip("Models", title="Model"), alt.Tooltip("Ranges", title="Range"),
                  alt.Tooltip("Widths", title="Average width"), alt.Tooltip("Inside", title="Closed inside"),
                  alt.Tooltip("Counts", title="Scored")])
-    return (lines + dots).properties(height=380)
+    return (lines + dots).properties(height=450)
 
 
 def _week_label(value):

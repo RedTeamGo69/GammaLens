@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from phase1.pg import connect
 from range_finder.forward_test.config import UNIVERSE
 
-KEEP = tuple(UNIVERSE)
+# NDX is back in the cron matrix as an app-only extra (2026-10-13).
+KEEP = tuple(UNIVERSE) + ("NDX",)
 
 
 def inventory(cur) -> dict[str, dict[str, int]]:

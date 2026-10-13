@@ -12,7 +12,7 @@ from phase1.config import (
     NY_TZ,
     DEFAULT_RISK_FREE_RATE,
 )
-from phase1.model_inputs import prepare_option_for_model
+from phase1.model_inputs import implied_vol_from_quote, prepare_option_for_model
 from phase1.market_clock import compute_time_to_expiry_years
 from phase1.liquidity import build_strike_support_df, build_expiration_support_df
 from phase1.rates import interpolate_rate
@@ -162,6 +162,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
 
     used_option_count = 0
     direct_iv_count = 0
+    live_iv_count = 0
     synthetic_iv_count = 0
     synthetic_fit_accept_count = 0
     synthetic_fit_reject_count = 0
@@ -225,6 +226,15 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
 
         contract_clocks = {}
         live_contract_count = 0
+        # Live IV per (root, strike), inverted from the OTM side's quote
+        # (calls at/above spot, puts below) and shared with the ITM contract
+        # at the same strike: ITM mids are mostly intrinsic and invert badly.
+        quotes = {
+            (str(o.get("root") or "").strip().upper() or None, o["strike"], is_call): o
+            for opts, is_call in ((calls_raw, True), (puts_raw, False))
+            for o in opts
+        }
+        live_ivs = {}
         live_T_values = []
 
         for raw_opt, sign in [(c, +1) for c in calls_raw] + [(p, -1) for p in puts_raw]:
@@ -284,8 +294,16 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
             r_for_option = interpolate_rate(
                 r_curve, T * DAYS_PER_YEAR_CAL, fallback=r,
             )
+            iv_key = (root, K, K >= spot)
+            if iv_key not in live_ivs:
+                otm = quotes.get(iv_key)
+                live_ivs[iv_key] = implied_vol_from_quote(
+                    otm.get("bid", 0.0) or 0.0, otm.get("ask", 0.0) or 0.0,
+                    spot, K, T, r_for_option, K >= spot, q=q,
+                ) if otm else 0.0
             prep = prepare_option_for_model(
                 raw_opt, sign, T, spot, r_for_option, q=q,
+                live_iv=live_ivs[iv_key],
             )
             norm_opt = prep["normalized"]
 
@@ -365,6 +383,7 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
 
             if norm_opt["iv_source"] == "direct_iv":
                 direct_iv_count += 1
+                live_iv_count += int(norm_opt.get("iv_live", False))
             elif norm_opt["iv_source"] == "synthetic_iv":
                 synthetic_iv_count += 1
                 synthetic_fit_accept_count += 1
@@ -472,6 +491,9 @@ def calculate_all(client, ticker, target_exps, spot, r=DEFAULT_RISK_FREE_RATE,
         "put_iv": np.mean(first_exp_put_ivs) * 100.0 if first_exp_put_ivs else 0.0,
         "used_option_count": int(used_option_count),
         "direct_iv_count": int(direct_iv_count),
+        # Subset of direct_iv_count priced from the live mid rather than
+        # Tradier's hourly ORATS IV.
+        "live_iv_count": int(live_iv_count),
         "synthetic_iv_count": int(synthetic_iv_count),
         "synthetic_fit_accept_count": int(synthetic_fit_accept_count),
         "synthetic_fit_reject_count": int(synthetic_fit_reject_count),

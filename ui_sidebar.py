@@ -352,7 +352,9 @@ def _data_quality_body(stats, staleness_info) -> str:
         cell(fmt_commas(stats.get("used_option_count", 0), 0), "USED OPTS")
         + cell(f"{coverage*100:.1f}%", "COVERAGE", cov_color)
         + cell(f"{fresh:.0f}", "FRESH", fresh_color)
-        + cell(fmt_commas(stats.get("direct_iv_count", 0), 0), "DIRECT IV")
+        # Share of used contracts priced from the live mid; the rest use
+        # Tradier's hourly ORATS IV or a synthetic fit.
+        + cell(f"{stats.get('live_iv_count', 0) / max(stats.get('used_option_count', 0), 1) * 100:.0f}%", "LIVE IV")
         + cell(fmt_commas(stats.get("synthetic_iv_count", 0), 0), "SYNTH IV")
         + cell(fmt_commas(stats.get("skipped_count", 0), 0), "SKIPPED", COLORS["warning"])
     )

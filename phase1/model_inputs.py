@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.stats import norm
 
@@ -23,6 +25,58 @@ from phase1.config import (
 # (the historic VIX minimum is ~9%) while still generous enough that a
 # legitimate low-vol weekly doesn't get filtered.
 SYNTH_IV_ECONOMIC_FLOOR = 0.05
+
+# Live IV from the bid/ask mid. Tradier's greeks are an hourly ORATS batch
+# (measured 2026-10-13: one updated_at for the whole chain, stamped :59 and
+# published ~17 min later), so its IV runs 17-77 min stale. Inverting the
+# live mid keeps IV as fresh as the quotes. Quotes wider than this fraction
+# of mid are too noisy to invert and fall back to the vendor IV.
+LIVE_IV_MAX_REL_SPREAD = 0.5
+LIVE_IV_MAX = 5.0
+
+_SQRT2 = math.sqrt(2.0)
+
+
+def _ncdf(x):
+    # math.erf, not scipy norm.cdf: ~50x faster per scalar call, and the
+    # solver below runs thousands of times per chain.
+    return 0.5 * (1.0 + math.erf(x / _SQRT2))
+
+
+def bs_price(S, K, T, r, sigma, is_call, q=0.0):
+    """Scalar European Black-Scholes price with continuous yield q."""
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    fwd_s, pv_k = S * math.exp(-q * T), K * math.exp(-r * T)
+    if is_call:
+        return fwd_s * _ncdf(d1) - pv_k * _ncdf(d2)
+    return pv_k * _ncdf(-d2) - fwd_s * _ncdf(-d1)
+
+
+def implied_vol_from_quote(bid, ask, S, K, T, r, is_call, q=0.0):
+    """
+    IV that reprices the live bid/ask mid, or 0.0 when the quote can't
+    support one (no two-sided market, spread too wide, mid outside the
+    no-arbitrage range). European BS: for American single names/ETFs this
+    slightly overstates OTM put IV (early-exercise premium), which the
+    callers keep small by inverting OTM quotes only.
+    """
+    from scipy.optimize import brentq
+
+    if not (bid > 0 and ask >= bid) or S <= 0 or K <= 0 or T <= 0:
+        return 0.0
+    mid = 0.5 * (bid + ask)
+    if (ask - bid) / mid > LIVE_IV_MAX_REL_SPREAD:
+        return 0.0
+
+    def residual(sigma):
+        return bs_price(S, K, T, r, sigma, is_call, q) - mid
+
+    lo, hi = SYNTH_IV_ECONOMIC_FLOOR, LIVE_IV_MAX
+    if residual(lo) >= 0 or residual(hi) <= 0:
+        return 0.0
+    return float(brentq(residual, lo, hi, xtol=1e-6))
 
 
 def bs_gamma(S, K, T, r, sigma, q=0.0):
@@ -204,9 +258,13 @@ def fit_synthetic_iv(target_gamma, S, K, T, r):
     }
 
 
-def prepare_option_for_model(opt, sign, T, spot, r, q=0.0):
+def prepare_option_for_model(opt, sign, T, spot, r, q=0.0, live_iv=0.0):
     """
     Rich evaluation path for model input selection.
+
+    live_iv (from implied_vol_from_quote) wins over the vendor IV when > 0;
+    it is still a market IV, so iv_source stays "direct_iv" and
+    normalized["iv_live"] tells the two apart.
 
     Returns a dict:
     {
@@ -220,7 +278,7 @@ def prepare_option_for_model(opt, sign, T, spot, r, q=0.0):
     """
     K = opt["strike"]
     oi = opt["openInterest"]
-    iv = opt.get("impliedVolatility", 0.0) or 0.0
+    iv = live_iv if live_iv > 0 else (opt.get("impliedVolatility", 0.0) or 0.0)
     vendor_gamma = opt.get("vendorGamma", 0.0) or 0.0
 
     if iv > 0:
@@ -239,6 +297,7 @@ def prepare_option_for_model(opt, sign, T, spot, r, q=0.0):
                 "T": T,
                 "gamma_now": gamma_now,
                 "iv_source": "direct_iv",
+                "iv_live": live_iv > 0,
                 "synthetic_fit_rel_error": None,
             },
         }

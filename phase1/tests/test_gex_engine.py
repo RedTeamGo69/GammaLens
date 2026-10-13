@@ -248,9 +248,11 @@ def test_calculate_all_iv_stats_fall_back_when_first_exp_expired():
             "openInterest": 100,
             "impliedVolatility": iv,
             "vendorGamma": 0.0,
-            "bid": 10.0,
-            "ask": 10.5,
-            "mid": 10.25,
+            # No two-sided quote, so no live IV: the stats must read the
+            # vendor IVs below.
+            "bid": 0.0,
+            "ask": 0.0,
+            "mid": 0.0,
         }
 
     class FakeClient:

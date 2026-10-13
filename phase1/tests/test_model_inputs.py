@@ -146,3 +146,32 @@ def test_infer_iv_deep_otm_still_prefers_low_root():
 
     fitted = infer_iv_from_gamma(target, S, K, T, r)
     assert abs(fitted - true_iv) < 1e-3
+
+
+def test_implied_vol_from_quote_round_trips_otm_call_and_put():
+    from phase1.model_inputs import bs_price, implied_vol_from_quote
+
+    S, T, r, q = 6000.0, 5 / 252.0, 0.045, 0.013
+    for K, is_call in ((6100.0, True), (5900.0, False)):
+        mid = bs_price(S, K, T, r, 0.18, is_call, q)
+        iv = implied_vol_from_quote(mid - 0.05, mid + 0.05, S, K, T, r, is_call, q)
+        assert abs(iv - 0.18) < 1e-4
+
+
+def test_implied_vol_from_quote_rejects_unusable_quotes():
+    from phase1.model_inputs import implied_vol_from_quote
+
+    S, K, T, r = 6000.0, 6300.0, 5 / 252.0, 0.045
+    assert implied_vol_from_quote(0.0, 0.10, S, K, T, r, True) == 0.0    # one-sided
+    assert implied_vol_from_quote(0.05, 0.15, S, K, T, r, True) == 0.0   # spread > 50% of mid
+    assert implied_vol_from_quote(6000.5, 6001.0, S, K, T, r, True) == 0.0  # call worth more than spot
+
+
+def test_prepare_option_prefers_live_iv_over_vendor():
+    opt = {"strike": 5000, "openInterest": 100, "impliedVolatility": 0.22, "vendorGamma": 0.0}
+
+    result = prepare_option_for_model(opt, sign=1, T=1/365, spot=5000, r=0.04, live_iv=0.30)
+
+    assert result["normalized"]["iv"] == 0.30
+    assert result["normalized"]["iv_source"] == "direct_iv"
+    assert result["normalized"]["iv_live"] is True

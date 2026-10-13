@@ -193,3 +193,27 @@ def test_recent_listing_requires_every_session_from_first_full_listed_week(monke
             provider.training_history(ticker, week)
     finally:
         provider.close()
+
+
+def test_timestampless_ndx_quote_is_proven_fresh_through_qqq(monkeypatch):
+    week=trading_week(date(2026,10,19)); clock=Clock(week.capture_start)
+    provider=TradierProvider('fixture',clock=clock)
+    day=week.sessions[0].day
+    try:
+        ndx={'symbol':'NDX','open':30400.,'last':30480.,'prevclose':30660.,'trade_date':0}
+        qqq={'symbol':'QQQ','open':739.8,'last':741.7,'prevclose':746.,'trade_date':int(clock().timestamp()*1000)}
+        provider.__dict__['quotes']={'NDX':ndx,'QQQ':qqq}
+        bar={'date':str(day),'open':30400.,'high':30500.,'low':30300.,'close':30480.}
+        monkeypatch.setattr(provider,'history',lambda *a,**k:[bar])
+        quote,at=provider.checked_quote('NDX',day)
+        assert quote['open']==30400. and at==clock()
+        ndx['last']=30660.  # frozen at yesterday's close while QQQ moved -0.6%
+        with pytest.raises(ValueError,match='drifted'):
+            provider.checked_quote('NDX',day)
+        ndx['last']=30480.; bar['open']=30800.  # quote open is not this session's
+        with pytest.raises(ValueError,match='open does not match'):
+            provider.checked_quote('NDX',day)
+        bar['open']=30400.; qqq['trade_date']-=600_000  # the proxy itself is stale
+        with pytest.raises(ValueError,match='Stale QQQ'):
+            provider.checked_quote('NDX',day)
+    finally:provider.close()

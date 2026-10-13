@@ -34,20 +34,27 @@ NASDAQ_ADDITIONS = ("QQQ", "NDX", "CRWV")
 # user's request: on the 10/2 weekly its ATM spreads were 1-4% of mid with ~10k
 # contracts traded by 10:00 ET.
 V6_ADDITIONS = ("IBIT",)
-UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, "QQQ", "CRWV", *V6_ADDITIONS)
+# v7, 2026-10-13: NDX returns. Its quote still has no timestamps, but its live
+# `last` tracks QQQ to ~0.02%, so provider.checked_quote proves freshness
+# through QQQ (QUOTE_PROXIES). Its 6y Tradier history passes the v2 policy and
+# full-session scoring needs only daily bars, so the empty timesales is moot.
+V7_ADDITIONS = ("NDX",)
+UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, "QQQ", "CRWV", *V6_ADDITIONS, *V7_ADDITIONS)
 # Tickers only an older registration still carries. They stay valid so the
 # scoring-only study below keeps running, but no new study may register them.
-RETIRED_TICKERS = ("NDX",)
+RETIRED_TICKERS = ()
 # Cash-settled indices: weekly contracts trade under a PM-settled root, and the
 # final session settles to the official close rather than a physical delivery.
 CASH_INDEX_ROOTS = {"SPX": "SPXW", "NDX": "NDXP"}
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v6-ibit"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v7-ndx"
 # Superseded studies that already froze forecasts keep reconciling and scoring
 # them, but seed no week after this Monday label. v5 captured 24 of 25 tickers
 # on 2026-09-28; dropping it from the schedule would leave that week unscored.
-SCORING_ONLY_STUDIES = {"spread-finder-weekly-v5-nasdaq": "2026-09-28"}
+# v6 opened 2026-10-05 and 2026-10-12; v7 seeds from 2026-10-19.
+SCORING_ONLY_STUDIES = {"spread-finder-weekly-v5-nasdaq": "2026-09-28",
+                        "spread-finder-weekly-v6-ibit": "2026-10-12"}
 SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14

@@ -81,13 +81,12 @@ highest = newest) is the cheap way to tell a recreated table from an original.
 ~4 hours late, so the script treats any run after the 9:20–10:15 ET window as **recovery**:
 it re-runs a missing first-session weekly setup (anchor from the daily bar; no GEX save, no
 spot fallback) and exits 1 if the opening EM snapshots are missing (the dead-man's-switch
-e-mail). Matrix (`fail-fast: false`, `max-parallel: 8`) = the 25-ticker forward-test roster
+e-mail). Matrix (`fail-fast: false`, `max-parallel: 8`) = the 26-ticker forward-test roster
 (`forward_test/config.py::UNIVERSE`; `tests/test_ticker_roster.py` enforces it, and the GEX
-quick-pick chips read the same list) plus NDX, an app-only extra (`CAPTURE_EXTRAS` in that
-test). Index/ETF (SPX, SPY, QQQ, NDX) capture daily; single names, IBIT included, run
-weekly-only on the week's first trading day. XSP and CAT were dropped from capture on
-2026-10-11; NDX was dropped then and restored 2026-10-13 — the forward study still rejects
-it (Tradier's NDX quote has zero trade/bid dates), but its live `last` serves GEX/EM. `scripts/purge_non_roster_tickers.py` removes off-roster
+quick-pick chips read the same list). Index/ETF (SPX, SPY, QQQ, NDX) capture daily; single
+names, IBIT included, run weekly-only on the week's first trading day. XSP and CAT were
+dropped from capture on 2026-10-11. NDX rejoined in study v7 (from 2026-10-19): Tradier's NDX
+quote has zero trade/bid dates, so `provider._proxied_quote` proves freshness through QQQ. `scripts/purge_non_roster_tickers.py` removes off-roster
 rows from app tables (CSV backup first; `ft_*` forward-test history is never touched).
 
 Architecture decisions live in `docs/adr/` (0001: the forward study keeps its own

@@ -20,8 +20,8 @@ def test_default_cli_targets_restart_only(tmp_path, monkeypatch):
     store = connect()
     store.migrate()
     store.register(DEFAULT_STUDY_ID, '2026-10-05', clock(), {'universe':UNIVERSE})
-    (scoring_only, _), = SCORING_ONLY_STUDIES.items()
-    store.register(scoring_only, '2026-09-28', clock(), {'universe':('SPY', 'NDX')})
+    for scoring_only, last_week in SCORING_ONLY_STUDIES.items():
+        store.register(scoring_only, last_week, clock(), {'universe':('SPY', 'QQQ')})
     store.register('spread-finder-weekly-v1', '2026-09-14', clock(), {'fixture':True})
     store.close()
     fixture = FixtureProvider(clock)
@@ -34,8 +34,7 @@ def test_default_cli_targets_restart_only(tmp_path, monkeypatch):
     store = connect()
     try:
         runs = store.query('SELECT study_id,status FROM ft_runs')
-        assert runs == [{'study_id':DEFAULT_STUDY_ID, 'status':'ok'},
-                        {'study_id':scoring_only, 'status':'ok'}]
+        assert runs == [{'study_id':s, 'status':'ok'} for s in (DEFAULT_STUDY_ID, *SCORING_ONLY_STUDIES)]
         assert not store.query('SELECT * FROM ft_slots')
     finally:
         store.close()

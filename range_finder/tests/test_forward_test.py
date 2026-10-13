@@ -294,17 +294,17 @@ def test_restarted_study_captures_full_roster_without_expanding_old_study(store,
     provider = FixtureProvider(clock)
     store.register(DEFAULT_STUDY_ID, str(week.monday), clock(), {'universe': UNIVERSE})
     result = run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
-    assert len(UNIVERSE) == 25
-    assert result['captured_models'] == 100 and not result['errors']
+    assert len(UNIVERSE) == 26
+    assert result['captured_models'] == 104 and not result['errors']
     frozen = store.forecasts(DEFAULT_STUDY_ID)
-    assert len(frozen) == 400 and {r['ticker'] for r in frozen} == set(UNIVERSE)
+    assert len(frozen) == 416 and {r['ticker'] for r in frozen} == set(UNIVERSE)
     # Running an older registration explicitly must preserve its original roster.
     run_study(store, provider, 'fixture', clock=clock, model_version='old-fixture')
     assert len(store.forecasts('fixture')) == 64
     clock.value = week.evaluation_close + timedelta(minutes=20)
     run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
     m = metrics(load_results(store, DEFAULT_STUDY_ID))
-    assert m['close_n'] == m['path_n'] == 400
+    assert m['close_n'] == m['path_n'] == 416
 
 
 def test_future_restart_does_not_seed_or_reconcile_old_study(store, week):
@@ -318,10 +318,11 @@ def test_future_restart_does_not_seed_or_reconcile_old_study(store, week):
     assert not store.slots(DEFAULT_STUDY_ID, str(week.monday))
 
 
-def test_v6_roster_drops_ndx_but_its_old_registration_still_validates():
+def test_v7_roster_restores_ndx_and_old_registrations_still_validate():
     from range_finder.forward_test.config import study_universe
-    assert 'NDX' not in UNIVERSE and 'IBIT' in UNIVERSE and 'QQQ' in UNIVERSE
+    assert {'NDX', 'IBIT', 'QQQ'} <= set(UNIVERSE)
     assert study_universe({'universe': ('SPX', 'NDX')}) == ('SPX', 'NDX')
+    assert study_universe({'universe': ('SPX', 'IBIT')}) == ('SPX', 'IBIT')
     with pytest.raises(ValueError):
         study_universe({'universe': ('SPX', 'PLTR')})
 

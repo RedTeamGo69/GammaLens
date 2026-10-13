@@ -35,6 +35,12 @@ from .history_policy import validated_tradier_history
 # 2024-01-08 week); that two-session week is excluded.
 FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8),
                            'CRWV': date(2025, 3, 31), 'IBIT': date(2024, 1, 15)}
+# Tradier's derived NDX quote has trade/bid/ask dates of 0, so its freshness is
+# proven through QQQ (see _proxied_quote). Measured 2026-10-13: NDX/QQQ held
+# within ~0.04% of the prevclose ratio intraday. The tolerance leaves room for
+# QQQ's quarterly ex-dividend gap (~0.15%, on Mondays after 3rd-Friday OpEx).
+QUOTE_PROXIES = {'NDX': 'QQQ'}
+PROXY_RATIO_TOLERANCE = 0.0025
 
 
 def finite_price(value):
@@ -117,12 +123,40 @@ class TradierProvider:
         quote = self.quotes.get(ticker)
         if not quote or quote.get("symbol") != ticker:
             raise ValueError(f"Missing quote for {ticker}")
+        if ticker in QUOTE_PROXIES:
+            return self._proxied_quote(quote, session_day)
         timestamp = epoch_time(quote.get("trade_date", 0))
         age = (self.clock() - timestamp).total_seconds()
         if timestamp.astimezone(NY).date() != session_day or not 0 <= age <= self.delay + 120:
             raise ValueError(f"Stale {ticker} quote; age={age:.0f}s")
         if not finite_price(quote.get("open")) or not finite_price(quote.get("last")):
             raise ValueError(f"Invalid {ticker} open/last")
+        return quote, timestamp
+
+    def _proxied_quote(self, quote, session_day):
+        """Freshness for a quote that carries no timestamp (Tradier's derived NDX).
+
+        Three checks replace the missing trade_date, each failing closed:
+        the proxy's own quote passes the normal freshness gate; the last/last
+        ratio sits within PROXY_RATIO_TOLERANCE of the prevclose ratio, so the
+        price moved with the proxy rather than freezing; and the quote's open
+        equals the open of the ticker's daily bar dated this session, so the
+        anchor is today's open, not a carried-over one. The returned timestamp
+        is the proxy's, the latest time the price is proven current.
+        """
+        ticker = quote["symbol"]
+        proxy_quote, timestamp = self.checked_quote(QUOTE_PROXIES[ticker], session_day)
+        if not all(finite_price(quote.get(k)) for k in ("open", "last", "prevclose")) \
+                or not finite_price(proxy_quote.get("prevclose")):
+            raise ValueError(f"Invalid {ticker} open/last/prevclose")
+        drift = (float(quote["last"]) / float(proxy_quote["last"])) \
+            / (float(quote["prevclose"]) / float(proxy_quote["prevclose"])) - 1
+        if abs(drift) > PROXY_RATIO_TOLERANCE:
+            raise ValueError(f"Stale {ticker} quote; ratio to {QUOTE_PROXIES[ticker]} drifted {drift:+.3%}")
+        bars = [b for b in self.history(ticker, session_day, session_day) if b.get("date") == str(session_day)]
+        if len(bars) != 1 or not finite_price(bars[0].get("open")) \
+                or abs(float(bars[0]["open"]) - float(quote["open"])) > 0.01:
+            raise ValueError(f"Stale {ticker} quote; open does not match the {session_day} daily bar")
         return quote, timestamp
 
     @cached_property

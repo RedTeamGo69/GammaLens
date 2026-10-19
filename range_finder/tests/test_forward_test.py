@@ -290,7 +290,9 @@ def test_runner_collects_final_session_at_twenty_minutes(store, week):
 
 def test_restarted_study_captures_full_roster_without_expanding_old_study(store, week):
     from range_finder.forward_test.config import DEFAULT_STUDY_ID
-    clock = Clock(week.capture_start)
+    from range_finder.forward_test.provider import PROXY_QUOTE_READY_MINUTES
+    # Late enough that the proxied NDX is attempted too.
+    clock = Clock(week.capture_start + timedelta(minutes=PROXY_QUOTE_READY_MINUTES))
     provider = FixtureProvider(clock)
     store.register(DEFAULT_STUDY_ID, str(week.monday), clock(), {'universe': UNIVERSE})
     result = run_study(store, provider, DEFAULT_STUDY_ID, clock=clock, model_version='new-fixture')
@@ -388,6 +390,29 @@ def test_versioned_correction_can_return_to_prior_value(store,week):
     c=store.append_observation('fixture',str(week.monday),'SPY',str(week.sessions[-1].day),{'value':1},now)
     assert c!=a
     assert store.observations('fixture',str(week.monday),'SPY')[str(week.sessions[-1].day)]['value']==1
+
+
+def test_proxied_ndx_waits_for_its_quote_without_spending_attempts(store, week):
+    from range_finder.forward_test.provider import PROXY_QUOTE_READY_MINUTES
+    clock = Clock(week.capture_start); provider = FixtureProvider(clock)
+    store.register('ndx', str(week.monday), clock(), {'universe': ('SPY', 'NDX')})
+    run_study(store, provider, 'ndx', clock=clock, model_version='v1')
+    assert provider.prepares == ['SPY']
+    assert all(s['attempts'] == 0 for s in store.slots('ndx', str(week.monday)) if s['ticker'] == 'NDX')
+    clock.value = week.sessions[0].open + timedelta(minutes=PROXY_QUOTE_READY_MINUTES)
+    run_study(store, provider, 'ndx', clock=clock, model_version='v1')
+    assert provider.prepares == ['SPY', 'NDX'] and len(store.forecasts('ndx')) == 32
+
+
+def test_history_archives_reads_shared_ticker_inputs_newest_first(store):
+    from range_finder.forward_test.config import json_text
+    rows = [('old', '2026-10-05', {'raw_inputs': {'history_evidence': {'tag': 'old'}}, 'sources': {}, 'ticker': 'META'}),
+            ('new', '2026-10-12', {'raw_inputs': {'history_evidence': {'tag': 'new'}}, 'sources': {}, 'ticker': 'META'}),
+            ('model', '2026-10-13', {'model': 'M1_baseline', 'ticker': 'META', 'vix': 20}),
+            ('other', '2026-10-14', {'raw_inputs': {'history_evidence': {'tag': 'other'}}, 'sources': {}, 'ticker': 'TSLA'})]
+    for input_id, when, payload in rows:
+        store.execute('INSERT INTO ft_inputs VALUES (?, ?, ?)', (input_id, when, json_text(payload)))
+    assert [e['tag'] for e in store.history_archives('META')] == ['new', 'old']
 
 
 def test_retry_budget_and_delayed_observations(store,week):

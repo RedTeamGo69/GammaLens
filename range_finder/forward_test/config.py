@@ -4,7 +4,7 @@ from importlib.metadata import version
 import json
 from pathlib import Path
 
-from .history_policy import TRADIER_POLICY_VERSION
+from .history_policy import ARCHIVE_FILL_POLICY, TRADIER_POLICY_VERSION
 
 LEGACY_UNIVERSE = ("SPX", "SPY", "AAPL", "AMD")
 OPEN_UNIVERSE = (*LEGACY_UNIVERSE, "META", "TSLA", "HOOD")
@@ -39,6 +39,10 @@ V6_ADDITIONS = ("IBIT",)
 # through QQQ (QUOTE_PROXIES). Its 6y Tradier history passes the v2 policy and
 # full-session scoring needs only daily bars, so the empty timesales is moot.
 V7_ADDITIONS = ("NDX",)
+# v8, 2026-10-19: same roster. Tradier's META history began at 2023-02-13 that
+# morning, so history_policy.archive_fill restores older bars from receipts an
+# earlier capture froze. NDX now waits PROXY_QUOTE_READY_MINUTES after the open
+# for its quote to fill instead of burning attempts on an empty one.
 UNIVERSE = (*OPEN_UNIVERSE, *BALANCED_ADDITIONS, "QQQ", "CRWV", *V6_ADDITIONS, *V7_ADDITIONS)
 # Tickers only an older registration still carries. They stay valid so the
 # scoring-only study below keeps running, but no new study may register them.
@@ -48,13 +52,14 @@ RETIRED_TICKERS = ()
 CASH_INDEX_ROOTS = {"SPX": "SPXW", "NDX": "NDXP"}
 MODELS = ("M1_baseline", "M2_vix", "M3_extended", "M4_full")
 COHORT = "prospective_opening_week"
-DEFAULT_STUDY_ID = "spread-finder-weekly-v7-ndx"
+DEFAULT_STUDY_ID = "spread-finder-weekly-v8-archive"
 # Superseded studies that already froze forecasts keep reconciling and scoring
 # them, but seed no week after this Monday label. v5 captured 24 of 25 tickers
 # on 2026-09-28; dropping it from the schedule would leave that week unscored.
-# v6 opened 2026-10-05 and 2026-10-12; v7 seeds from 2026-10-19.
+# v6 opened 2026-10-05 and 2026-10-12; v7 opened 2026-10-19; v8 seeds from 2026-10-26.
 SCORING_ONLY_STUDIES = {"spread-finder-weekly-v5-nasdaq": "2026-09-28",
-                        "spread-finder-weekly-v6-ibit": "2026-10-12"}
+                        "spread-finder-weekly-v6-ibit": "2026-10-12",
+                        "spread-finder-weekly-v7-ndx": "2026-10-19"}
 SCORER_VERSION = "weekly-close-path-v3-session-open"
 DATA_READY_MINUTES = 20
 RECONCILE_DAYS = 14
@@ -109,6 +114,6 @@ def methodology():
               "capture_minutes_after_open": [0, 45], "tracking_policy": "first_session_open",
               "gex_enabled": False,
               "conformal_enabled": False, "source_hashes": hashes,
-              "history_policy": TRADIER_POLICY_VERSION,
+              "history_policy": TRADIER_POLICY_VERSION, "archive_fill_policy": ARCHIVE_FILL_POLICY,
               "versions": {p: version(p) for p in ("numpy", "pandas", "statsmodels", "pandas_market_calendars")}}
     return digest(config), config

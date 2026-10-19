@@ -81,6 +81,17 @@ class Store:
                                            "volume":"spx_volume", "return_pct":"spx_return", "vol_proxy_close":"vix_close"})
         return frame
 
+    def history_archives(self, ticker):
+        """Training-history evidence earlier captures froze for ticker, newest first.
+
+        Shared input rows are canonical JSON with sorted keys, so their payload
+        ends with the ticker. Read only when live vendor history starts late.
+        """
+        rows = self.query("SELECT payload_json FROM ft_inputs WHERE payload_json LIKE ? ORDER BY captured_at DESC",
+                          ('%,"ticker":' + json.dumps(ticker) + '}',))
+        evidence = (json.loads(r["payload_json"]).get("raw_inputs", {}).get("history_evidence") for r in rows)
+        return [e for e in evidence if e]
+
     def migrate(self):
         root = Path(__file__).resolve().parents[2] / "migrations"
         with self.transaction():

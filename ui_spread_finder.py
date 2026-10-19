@@ -841,7 +841,9 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
     except Exception:
         pass
 
-    _render_spx_model_strikes(planning_week(run_now).key)
+    # Slot reserved here, filled after the button actions below so a Weekly
+    # Setup / Rebuild click shows its own result instead of the pre-click table.
+    _spx_strikes_slot = st.container()
 
     # ── Extract GEX context from current dashboard data ──
     gex_ctx = extract_gex_context(levels, spot, regime)
@@ -929,6 +931,8 @@ def _render_spread_finder_tab(spot: float, levels: dict, regime: dict, data, tic
 
     conn = _get_rf_conn()
     _run_data_actions(conn, ticker, ticker_cfg, refresh=do_refresh, rebuild=do_rebuild)
+    with _spx_strikes_slot:
+        _render_spx_model_strikes(planning_week(run_now).key)
 
     st.markdown("---")
 
@@ -1587,8 +1591,10 @@ def _run_data_actions(conn, ticker: str, ticker_cfg: dict, *,
                 rf_build_features(conn, ticker=feature_source_ticker(ticker))
                 # Drop the cached feature frame so the next read reflects
                 # the rebuild — otherwise the UI would keep serving the
-                # pre-rebuild rows until the 10-minute TTL expires.
+                # pre-rebuild rows until the 10-minute TTL expires. The
+                # pinned SPX table caches its own forecasts off those rows.
                 _cached_rf_get_features.clear()
+                _cached_nonactive_week_bands.clear()
                 st.success("Features rebuilt")
             except Exception as e:
                 st.error(f"Feature rebuild failed: {e}")
@@ -1661,6 +1667,7 @@ def _run_fit_action(conn, ticker: str, df_feat, model_choice: str, *,
     # switch sees the fresh weights instead of the previous fit until the
     # 1-hour TTL expires.
     _cached_rf_load_model.clear()
+    _cached_nonactive_week_bands.clear()
     for _spec, _reason in _report.skipped.items():
         if _reason.startswith("fit failed"):
             st.error(f"{_spec} fitting failed: {_reason}")

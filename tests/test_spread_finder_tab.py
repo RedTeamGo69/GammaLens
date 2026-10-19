@@ -53,3 +53,16 @@ def test_spx_strikes_from_every_model_stay_pinned(monkeypatch):
     assert table.loc["M2_vix", "Effective (+buffer)"] == "5,800 / 6,200"
     assert any("no saved M4_full fit" in c.value for c in at.caption)
     assert any("Anchored to SPX 6,000.00" in c.value for c in at.caption)
+
+
+def test_rebuild_drops_the_pinned_spx_cache(monkeypatch):
+    # 2026-10-19: the pinned table kept a pre-cron "forecast blocked" for its
+    # full 10-min TTL after Weekly Setup had already rebuilt the row.
+    from types import SimpleNamespace
+    import ui_spread_finder as usf
+    cleared = []
+    monkeypatch.setattr(usf, "rf_build_features", lambda conn, ticker: None)
+    monkeypatch.setattr(usf, "_cached_rf_get_features", SimpleNamespace(clear=lambda: cleared.append("features")))
+    monkeypatch.setattr(usf, "_cached_nonactive_week_bands", SimpleNamespace(clear=lambda: cleared.append("bands")))
+    usf._run_data_actions(None, "SPX", {}, refresh=False, rebuild=True)
+    assert cleared == ["features", "bands"]

@@ -43,7 +43,7 @@ def main():
             from range_finder.forward_test.runner import run_study
             provider = TradierProvider(os.environ.get("TRADIER_TOKEN"), clock=utcnow,
                                        declared_delay_seconds=int(os.environ.get("FORWARD_TEST_DATA_DELAY_SECONDS", "0")),
-                                       history_loader=store.legacy_weekly)
+                                       history_loader=store.legacy_weekly, archive_loader=store.history_archives)
             # The scheduled run also settles superseded studies' frozen weeks.
             # Each study runs even if an earlier one fails; any error exits 1.
             from range_finder.forward_test.config import SCORING_ONLY_STUDIES

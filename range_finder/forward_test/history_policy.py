@@ -18,6 +18,8 @@ from phase1.trading_week import NY
 
 POLICY_VERSION = 'tradier-reviewed-whole-bars-v1'
 TRADIER_POLICY_VERSION = 'tradier-primary-history-v2'
+ARCHIVE_FILL_POLICY = 'tradier-receipt-archive-fill-v1'
+ARCHIVE_SEAM_BARS = {'weekly': 13, 'daily': 63}  # one quarter of overlap must agree
 PRICE_PRECISION = 0.0051  # half-cent reporting plus float32 representation
 OHLC = ('open', 'high', 'low', 'close')
 CATALOG = Path(__file__).with_name('history_resolutions.json')
@@ -206,6 +208,48 @@ def validated_tradier_history(ticker, start, end, daily_start, primary_weekly,
                 'adjustment':'as supplied by Tradier; no price replacements or local adjustments',
                 'daily_consumed_fields':['close'], 'weekly_consumed_fields':list(OHLC)}
     return weekly, daily, evidence
+
+
+def archive_fill(ticker, interval, start, live_rows, archives):
+    """Prepend older Tradier bars a prior capture froze when live history starts late.
+
+    On 2026-10-19 Tradier's META history began at 2023-02-13, a week after it
+    served the full six years. Earlier captures kept every raw response with its
+    SHA-256, so the gap is filled only from those receipts: same source, policy,
+    symbol and interval, an intact hash, and a full quarter of seam bars that
+    agree with live ones on the consumed fields. Live bars always win where both
+    exist. The newest archive holding gap bars decides; any failed check fails
+    closed rather than trying an older archive.
+    """
+    live_rows = sorted(live_rows, key=lambda r: r['date'])
+    live_first = live_rows[0]['date'] if live_rows else None
+    fields = OHLC if interval == 'weekly' else ('close',)
+    for archive in archives:
+        if archive.get('policy_version') != TRADIER_POLICY_VERSION or archive.get('source') != 'Tradier Brokerage history':
+            continue
+        for receipt in archive.get('primary_receipts') or ():
+            params = receipt.get('params') or {}
+            if params.get('symbol') != ticker or params.get('interval') != interval:
+                continue
+            raw = receipt.get('raw_response') or ''
+            if sha256(raw.encode()).hexdigest() != receipt.get('raw_sha256'):
+                _fail(f'{ticker} {interval} archive receipt hash mismatch')
+            rows = (json.loads(raw).get('history') or {}).get('day') or []
+            rows = [rows] if isinstance(rows, dict) else rows
+            gap = [r for r in rows if str(start) <= r['date'] and (live_first is None or r['date'] < live_first)]
+            if not gap:
+                continue
+            seam = live_rows[:ARCHIVE_SEAM_BARS[interval]]
+            archived = {r['date']: r for r in rows}
+            if len(seam) < ARCHIVE_SEAM_BARS[interval] or not all(
+                    r['date'] in archived and _aligned(r, archived[r['date']], fields) for r in seam):
+                _fail(f'{ticker} {interval} archive disagrees with live bars at the {live_first} seam')
+            return gap + live_rows, {
+                'policy_version': ARCHIVE_FILL_POLICY, 'interval': interval,
+                'receipt_sha256': receipt['raw_sha256'], 'receipt_retrieved_at': receipt.get('retrieved_at'),
+                'receipt_params': params, 'filled_rows': len(gap), 'first': gap[0]['date'],
+                'last': gap[-1]['date'], 'live_first': live_first, 'seam_rows': len(seam)}
+    return live_rows, None
 
 
 def validated_history(ticker, start, end, daily_start, primary_weekly, primary_daily,

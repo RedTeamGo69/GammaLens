@@ -20,7 +20,7 @@ from range_finder.event_calendars import event_flag_rows, FOMC_DATES, CPI_DATES,
 from range_finder.feature_builder import build_features
 from phase1.trading_week import NY, UTC, listed_week_expiration, trading_week
 from .config import UNIVERSE
-from .history_policy import validated_tradier_history
+from .history_policy import archive_fill, validated_tradier_history
 
 # HOOD began trading on 2021-07-29. Its first full exchange week starts August 2.
 # Never demand nonexistent pre-IPO bars or treat the two-day IPO week as a full
@@ -41,6 +41,10 @@ FIRST_FULL_HISTORY_WEEK = {'HOOD': date(2021, 8, 2), 'GEV': date(2024, 4, 8),
 # QQQ's quarterly ex-dividend gap (~0.15%, on Mondays after 3rd-Friday OpEx).
 QUOTE_PROXIES = {'NDX': 'QQQ'}
 PROXY_RATIO_TOLERANCE = 0.0025
+# That quote also lacks open/last/prevclose for ~15 minutes after the bell
+# (2026-10-19: still empty at 09:44:56 ET, filled by 09:47:49). The runner holds
+# proxied tickers until this many minutes after the open, spending no attempt.
+PROXY_QUOTE_READY_MINUTES = 20
 
 
 def finite_price(value):
@@ -75,7 +79,7 @@ def frame_records(frame):
 
 
 class TradierProvider:
-    def __init__(self, token, *, clock, declared_delay_seconds=0, history_loader=None):
+    def __init__(self, token, *, clock, declared_delay_seconds=0, history_loader=None, archive_loader=None):
         if not token:
             raise ValueError("TRADIER_TOKEN is required")
         if declared_delay_seconds not in (0, 900):
@@ -84,6 +88,7 @@ class TradierProvider:
         self.clock = clock
         self.delay = declared_delay_seconds
         self.history_loader = history_loader
+        self.archive_loader = archive_loader
         self.http = requests.Session()
         self.http.headers.update(self.client.tradier_headers())
         self.http.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -224,9 +229,18 @@ class TradierProvider:
         self.history_receipts = []
         weekly_rows = self.history(ticker, start, end, 'weekly')
         daily_rows = self.history(ticker, daily_start, end)
+        receipts = list(self.history_receipts)
+        fills = []
+        # The first weekly label is always the requested Monday, so a later one
+        # means the vendor's history starts late; only then read the archives.
+        if self.archive_loader and (not weekly_rows or min(r['date'] for r in weekly_rows) > str(start)):
+            archives = self.archive_loader(ticker)
+            weekly_rows, weekly_fill = archive_fill(ticker, 'weekly', start, weekly_rows, archives)
+            daily_rows, daily_fill = archive_fill(ticker, 'daily', daily_start, daily_rows, archives)
+            fills = [f for f in (weekly_fill, daily_fill) if f]
         weekly, daily, evidence = validated_tradier_history(ticker, start, end, daily_start,
             weekly_rows, daily_rows, as_of=self.clock())
-        evidence.update(primary_receipts=list(self.history_receipts),
+        evidence.update(primary_receipts=receipts, archive_fills=fills,
                         first_full_listed_week=str(listing_start) if listing_start else None,
                         required_prior_session=str(prior), audit_only=review_end is not None,
                         legacy_context={'rows':len(older), 'start':str(start),

@@ -88,7 +88,7 @@ def main():
         report['blockers'].append('Database read-only identity check: '+type(exc).__name__)
     history_store=Store.postgres(url)
     history_store.conn.set_session(readonly=True)
-    provider=TradierProvider(cfg.get('TRADIER_TOKEN'),clock=utcnow,history_loader=history_store.legacy_weekly)
+    provider=TradierProvider(cfg.get('TRADIER_TOKEN'),clock=utcnow,history_loader=history_store.legacy_weekly,archive_loader=history_store.history_archives)
     try:
         report['tradier_endpoint']=provider.client.base_url
         report['market_clock']=provider._get('clock').get('clock')

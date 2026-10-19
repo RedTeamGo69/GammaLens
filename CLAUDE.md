@@ -86,7 +86,10 @@ e-mail). Matrix (`fail-fast: false`, `max-parallel: 8`) = the 26-ticker forward-
 quick-pick chips read the same list). Index/ETF (SPX, SPY, QQQ, NDX) capture daily; single
 names, IBIT included, run weekly-only on the week's first trading day. XSP and CAT were
 dropped from capture on 2026-10-11. NDX rejoined in study v7 (from 2026-10-19): Tradier's NDX
-quote has zero trade/bid dates, so `provider._proxied_quote` proves freshness through QQQ. `scripts/purge_non_roster_tickers.py` removes off-roster
+quote has zero trade/bid dates, so `provider._proxied_quote` proves freshness through QQQ.
+Study v8 (from 2026-10-26) waits 20 min after the open for that quote to fill, and refills
+history Tradier truncates (META, 2026-10-19) from receipts earlier captures froze
+(`history_policy.archive_fill`). `scripts/purge_non_roster_tickers.py` removes off-roster
 rows from app tables (CSV backup first; `ft_*` forward-test history is never touched).
 
 Architecture decisions live in `docs/adr/` (0001: the forward study keeps its own

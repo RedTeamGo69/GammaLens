@@ -1,5 +1,7 @@
 """Source identity and freshness gates exercised without network traffic."""
 from datetime import date, timedelta
+from hashlib import sha256
+import json
 
 import pytest
 import numpy as np
@@ -217,3 +219,52 @@ def test_timestampless_ndx_quote_is_proven_fresh_through_qqq(monkeypatch):
         with pytest.raises(ValueError,match='Stale QQQ'):
             provider.checked_quote('NDX',day)
     finally:provider.close()
+
+
+def _receipt(ticker, interval, rows):
+    raw = json.dumps({'history': {'day': rows}})
+    return {'params': {'symbol': ticker, 'interval': interval}, 'raw_response': raw,
+            'raw_sha256': sha256(raw.encode()).hexdigest(), 'retrieved_at': '2026-10-12T13:32:02+00:00'}
+
+
+def test_truncated_history_is_filled_only_from_an_intact_agreeing_archive(monkeypatch):
+    # 2026-10-19: Tradier's META history began at 2023-02-13 instead of six years back.
+    import pandas_market_calendars as mcal
+    from range_finder.cboe_data import resample_cboe_weekly
+    week = trading_week(date(2026, 10, 26)); clock = Clock(week.capture_start)
+    previous = trading_week(week.monday - timedelta(days=7)).sessions[-1].day
+    start = week.monday - timedelta(days=int(6 * 365.25) + 30)
+    days = mcal.get_calendar('NYSE').valid_days(start_date=start - timedelta(days=start.weekday()),
+                                                end_date=previous).tz_localize(None)
+    close = 600 + np.sin(np.arange(len(days)) * .4) * 20
+    daily = pd.DataFrame({'open': close - 1, 'high': close + 2, 'low': close - 2, 'close': close}, index=days)
+    full = {interval: [{'date': str(d.date()), **{k: float(v) for k, v in r.items()}} for d, r in frame.iterrows()]
+            for interval, frame in (('weekly', resample_cboe_weekly(daily)), ('daily', daily))}
+    cut = '2023-02-13'
+    live = {'cut': cut}
+    archives = [{'policy_version': 'tradier-primary-history-v2', 'source': 'Tradier Brokerage history',
+                 'primary_receipts': [_receipt('META', i, full[i]) for i in ('weekly', 'daily')]}]
+    provider = TradierProvider('fixture', clock=clock, archive_loader=lambda ticker: archives)
+    monkeypatch.setattr(provider, 'history', lambda ticker, s, e, interval='daily':
+                        [r for r in full[interval] if max(str(s), live['cut']) <= r['date'] <= str(e)])
+    try:
+        weekly, _, evidence = provider.training_history('META', week)
+        assert str(weekly.index[0].date()) < cut
+        assert [(f['interval'], f['live_first']) for f in evidence['archive_fills']] == [('weekly', cut), ('daily', cut)]
+        # A vendor revision across the seam (say, a re-based split) fails closed.
+        archives[0]['primary_receipts'][0] = _receipt('META', 'weekly', [
+            dict(r, close=r['close'] * 1.01) if r['date'] == cut else r for r in full['weekly']])
+        with pytest.raises(ValueError, match='seam'):
+            provider.training_history('META', week)
+        archives[0]['primary_receipts'][0] = dict(_receipt('META', 'weekly', full['weekly']), raw_sha256='0' * 64)
+        with pytest.raises(ValueError, match='hash mismatch'):
+            provider.training_history('META', week)
+        provider.archive_loader = None
+        with pytest.raises(ValueError, match='primary weekly coverage'):
+            provider.training_history('META', week)
+        # Complete live history never reads the archive.
+        live['cut'] = ''
+        provider.archive_loader = lambda ticker: pytest.fail('archive read without a gap')
+        assert provider.training_history('META', week)[2]['archive_fills'] == []
+    finally:
+        provider.close()

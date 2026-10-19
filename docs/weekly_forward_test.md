@@ -22,8 +22,14 @@ The Nasdaq set was added on 2026-09-27 at the user's request and passed the same
 
 NDX was dropped on 2026-09-28 after its first live Monday. During market hours Tradier's NDX quote carries `trade_date`, `bid_date` and `ask_date` of 0 and volume 0, and `/markets/timesales` returns no NDX data, so no NDX open can pass the quote-freshness check. Every other ticker captured that morning. QQQ keeps the Nasdaq-100 exposure. IBIT was added at the user's request the same day: on the 10/2 weekly its ATM spreads were 1–4% of mid with ~10k contracts traded by 10:00 ET.
 
-The active study is **`spread-finder-weekly-v6-ibit`**, starting **October 5, 2026**.
-The CLI's default `run` targets this study plus any study in `SCORING_ONLY_STUDIES`.
+NDX returned in `spread-finder-weekly-v7-ndx` (from October 19), with its timestampless quote proven fresh through QQQ. On v7's first Monday, NDX captured only on its third and last attempt (09:50 ET): Tradier's NDX quote lacks open/last/prevclose until about 09:45 ET. META failed every attempt because Tradier's META history now began at 2023-02-13, although the full six years had been served on October 12.
+
+The active study is **`spread-finder-weekly-v8-archive`**, starting **October 26, 2026**, with v7's 26-ticker roster. Two changes from v7:
+
+- **Archive fill** (`tradier-receipt-archive-fill-v1`). When Tradier's weekly history starts after the requested Monday, older bars come from the raw Tradier responses an earlier capture stored in `ft_inputs`. A receipt qualifies only if its SHA-256 matches, its policy, source, symbol and interval match, and the first quarter of live bars (13 weekly, 63 daily) agree with it on the consumed fields. Live bars win wherever both exist. Each fill is recorded in `history_evidence.archive_fills`. Any failed check is fatal (fail closed). No other vendor is consulted.
+- **NDX waits.** Proxied tickers are not attempted until 20 minutes after the open (`PROXY_QUOTE_READY_MINUTES`), so the empty quote spends no attempts. 10:00 and 10:10 ET triggers give NDX three tries.
+
+The CLI's default `run` targets this study plus any study in `SCORING_ONLY_STUDIES` (v5, v6 and v7).
 `spread-finder-weekly-v5-nasdaq` is scoring-only: it froze 24 of its 25 tickers on
 September 28 (NDX failed), keeps reconciling and scoring that week, and seeds no
 later week. The original
@@ -73,7 +79,7 @@ The target week's outcomes and later rows cannot enter training. Daily exchange-
 All decisions use **America/New_York** and the NYSE exchange-session calendar. Timestamps are stored with UTC offsets. The week is labeled by its Monday date even when Monday is closed.
 
 - Capture opens **at the first actual session open** and ends **45 minutes after that open, exclusive**: normally **09:30 <= availability < 10:15 ET**.
-- Scheduled attempts are 09:30, 09:40 and 09:50 ET on weekdays. Only the week's first actual session admits a primary capture.
+- Scheduled attempts are 09:30, 09:40, 09:50, 10:00 and 10:10 ET on weekdays (the last two since v8; proxied tickers such as NDX start at 09:50). Only the week's first actual session admits a primary capture.
 - `scheduled_at` is the opening-window start. `prepared_at`, actual `captured_at`, `available_at`, anchor time, prior-session feature cutoff, actual last training-outcome close and declared data delay are stored separately. Availability is measured after computation finishes, not at the opening anchor or runner start.
 - PostgreSQL checks its own current clock under the slot lock and again after the input/forecast writes, before commit. Crossing the deadline during those writes rolls back the entire capture. An application timestamp inside the window cannot override either check.
 - Each model has at most three capture attempts. Its four tiers and inputs commit together. Other models/tickers may succeed independently. Successful slots cannot be reopened by a new fit, version, expiry, duplicate trigger or later deployment.

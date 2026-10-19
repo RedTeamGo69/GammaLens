@@ -9,7 +9,7 @@ from .capture import capture_model
 from .config import (CASH_INDEX_ROOTS, DATA_READY_MINUTES, MAX_CAPTURE_ATTEMPTS, RECONCILE_DAYS,
                      SCORER_VERSION, SCORING_ONLY_STUDIES, methodology, study_universe)
 from .scoring import score_forecast
-from .provider import valid_ohlc
+from .provider import PROXY_QUOTE_READY_MINUTES, QUOTE_PROXIES, valid_ohlc
 
 
 def run_study(store, provider, study_id, *, clock, model_version=None):
@@ -62,6 +62,10 @@ def run_study(store, provider, study_id, *, clock, model_version=None):
                     pending = [s for s in slots if s["ticker"] == ticker and s["status"] != "captured"
                                and s["attempts"] < MAX_CAPTURE_ATTEMPTS]
                     if not pending:
+                        continue
+                    # A proxied quote is empty right after the bell; waiting
+                    # costs no attempt, failing would spend one per run.
+                    if ticker in QUOTE_PROXIES and clock() < week.sessions[0].open + timedelta(minutes=PROXY_QUOTE_READY_MINUTES):
                         continue
                     try:
                         prepared = provider.prepare(ticker, week)

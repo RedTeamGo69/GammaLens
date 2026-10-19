@@ -6,6 +6,8 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "30,40,50 13,14 * * 1-5"
+    # 10:00 and 10:10 ET give NDX retries after its quote fills (~09:45).
+    - cron: "0,10 14,15 * * 1-5"
     # 13:20 ET covers early closes; 16:20 ET covers regular closes.
     - cron: "20 17,18,20,21 * * 1-5"
 

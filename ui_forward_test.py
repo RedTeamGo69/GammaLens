@@ -9,6 +9,11 @@ import streamlit as st
 from range_finder.forward_test.results import load_results, metrics, scoreboard, build_workbook
 from range_finder.forward_test.config import UNIVERSE, MODELS, COHORT, DEFAULT_STUDY_ID
 
+ALL_STUDIES = "All studies"
+# The 4-ticker v1 pilot would skew a pooled view toward SPX/SPY/AAPL/AMD.
+# Kept here, not in forward_test/config.py, whose bytes the study hashes.
+POOL_EXCLUDED = {"spread-finder-weekly-v1"}
+
 
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
 def load_snapshot():
@@ -63,14 +68,19 @@ def render_forward_test(rows=None, runs=None, studies=None):
             from ui_forward_summary import _choose
             dates = {s['study_id']: s['start_week'] for s in studies}
             def label(sid):
+                if sid == ALL_STUDIES:
+                    return "All studies (v1 pilot excluded)"
                 status = 'Current study' if sid == preferred else 'Archived study'
                 return f"{status} · {dates.get(sid, sid)}"
-            selected = _choose('Study', study_ids, 'ft_active_study', format_func=label)
+            selected = _choose('Study', study_ids + [ALL_STUDIES], 'ft_active_study', format_func=label)
         else:
             selected = preferred
-        rows = [r for r in rows if r['study_id'] == selected]
-        studies = [s for s in studies if s['study_id'] == selected]
-        runs = [r for r in runs if r['study_id'] == selected]
+        # Studies never share a market week, so pooling them counts no week twice.
+        chosen = ({sid for sid in study_ids if sid not in POOL_EXCLUDED} if selected == ALL_STUDIES
+                  else {selected})
+        rows = [r for r in rows if r['study_id'] in chosen]
+        studies = [s for s in studies if s['study_id'] in chosen]
+        runs = [r for r in runs if r['study_id'] in chosen]
         if selected == DEFAULT_STUDY_ID:
             st.caption("Tracking starts at the first trading session's 9:30 AM ET open. "
                        "Opening prices anchor the ranges; actual forecast save times are recorded separately.")

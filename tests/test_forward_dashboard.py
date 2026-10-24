@@ -88,7 +88,8 @@ def test_restart_defaults_to_empty_active_study_and_keeps_archive_separate(monke
     monkeypatch.setattr(ui_forward_test, 'load_snapshot', lambda: (rows, runs, studies))
     at = AppTest.from_string('from ui_forward_test import render_forward_test\nrender_forward_test()').run()
     assert not at.exception and at.selectbox(key='ft_active_study').value == DEFAULT_STUDY_ID
-    assert len(at.selectbox(key='ft_active_study').options) == 2
+    # Current, the populated archive, and the pooled view.
+    assert len(at.selectbox(key='ft_active_study').options) == 3
     assert any('9:30 AM ET open' in c.value for c in at.caption)
     assert 'No frozen predictions' in at.info[0].value
     assert not at.warning and not any('53 of 64' in m.value for m in at.markdown)

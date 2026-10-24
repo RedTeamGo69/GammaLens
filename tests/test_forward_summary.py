@@ -76,6 +76,30 @@ def test_recap_pools_several_weeks_of_one_study():
     assert "week of" in result["spotlight"]
 
 
+def test_recap_pools_studies_that_hold_separate_weeks():
+    rows = _two_weeks()
+    for r in rows:
+        r["study_id"] = "v6" if r["week_start"] == "2026-09-14" else "v5"
+    result = weekly_summary(rows)
+    assert result["week_count"] == 2 and result["metrics"]["close_n"] == 128
+
+
+def test_all_studies_pools_every_study_but_the_v1_pilot(monkeypatch):
+    rows = _two_weeks()
+    for r in rows:
+        r["study_id"] = "spread-finder-weekly-v6-ibit" if r["week_start"] == "2026-09-14" else "v5"
+    pilot = deepcopy(fixture_rows())
+    for r in pilot:
+        r.update(study_id="spread-finder-weekly-v1", week_start="2026-08-31")
+    at = _summary_app(monkeypatch, rows + pilot)
+    at.selectbox(key="ft_active_study").set_value("All studies").run()
+    at.multiselect(key="ft_summary_week_start").set_value([]).run()
+    assert not at.exception
+    assert any("106 of 128" in m.value for m in at.markdown)
+    assert any("Pooled across 2 studies" in c.value for c in at.caption)
+    assert not any("Aug 31" in o for o in at.multiselect(key="ft_summary_week_start").options)
+
+
 def _summary_app(monkeypatch, rows):
     import ui_forward_test
     monkeypatch.setattr(ui_forward_test, "load_snapshot", lambda: (rows, [], []))

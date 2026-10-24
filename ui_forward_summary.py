@@ -56,15 +56,17 @@ def condor_cell(rows):
 
 
 def weekly_summary(rows):
-    """One study/cohort only; never silently blend independent studies.
+    """One cohort only; studies pool only when no market week belongs to two of them.
 
-    Several weeks of the same study may be pooled — the caller labels the
-    result as a multi-week recap so it is not read as one market week.
+    Several weeks may be pooled — the caller labels the result as a
+    multi-week recap so it is not read as one market week.
     """
-    scopes = {(r["study_id"], r["cohort"]) for r in rows}
-    if len(scopes) > 1:
+    if len({r["cohort"] for r in rows}) > 1:
         raise ValueError("Select one study and capture cohort for a summary")
     week_count = len({r["week_start"] for r in rows})
+    # Two studies scoring the same week would count that week twice.
+    if len({(r["study_id"], r["week_start"]) for r in rows}) > week_count:
+        raise ValueError("Studies overlap a week; select one study for a summary")
     m = metrics(rows)
     captured = sum(bool(r.get("forecast_id")) for r in rows)
     complete = bool(rows) and captured == len(rows) and m["close_n"] == len(rows) and m["path_n"] == len(rows)
@@ -319,11 +321,11 @@ def render_summary(rows, studies):
             st.caption(f"First eligible week: {study['start_week']}")
         return []
     scoped = list(rows)
-    for field, label in (("study_id", "Study"), ("cohort", "Capture cohort")):
-        options = sorted({r[field] for r in scoped})
-        if len(options) > 1:
-            chosen = _choose(label, options, f"ft_summary_{field}")
-            scoped = [r for r in scoped if r[field] == chosen]
+    # The study is picked (or pooled) above the view; only the cohort is chosen here.
+    cohorts = sorted({r["cohort"] for r in scoped})
+    if len(cohorts) > 1:
+        chosen = _choose("Capture cohort", cohorts, "ft_summary_cohort")
+        scoped = [r for r in scoped if r["cohort"] == chosen]
     weeks = sorted({r["week_start"] for r in scoped}, reverse=True)
     # Options come from the whole study so a ticker or model stays pickable
     # while the week selection changes; the latest week is the opening view.
@@ -365,6 +367,10 @@ def render_summary(rows, studies):
         if m["close_n"]:
             st.caption(f"Closed above the upper boundary: {m['call_failures']} · "
                        f"Closed below the lower boundary: {m['put_failures']}")
+    study_count = len({r["study_id"] for r in scoped})
+    if study_count > 1:
+        st.caption(f"Pooled across {study_count} studies. Each study froze slightly different model code and "
+                   "ticker rosters, so this is the system's record so far, not one fixed model's.")
     st.caption(f"{result['ticker_count']} tickers · {result['model_count']} models · "
                f"{result['tier_count']} range widths · {len(scoped)} comparison rows. " +
                ("These are overlapping predictions for one market week, not independent trading weeks."

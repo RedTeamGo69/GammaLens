@@ -18,6 +18,7 @@ from typing import Any
 
 import streamlit as st
 
+from phase1.config import EXTRA_CAPTURE_INDICES
 from range_finder.forward_test.config import UNIVERSE
 
 
@@ -68,10 +69,10 @@ TOKENS = {
     "text_dim": "#5b6878",
 }
 
-# Quick-pick (featured) tickers: the forward-test roster, which is also the set
-# the daily/Monday cron captures (GEX, EM, weekly setup). Read from the study
-# config so a roster change moves the chips with it.
-QUICK_TICKERS = list(UNIVERSE)
+# Quick-pick (featured) tickers: the forward-test roster plus the extra cash
+# indices, which together are the set the daily/Monday cron captures (GEX, EM,
+# weekly setup). Read from the study config so a roster change moves the chips.
+QUICK_TICKERS = [*UNIVERSE, *EXTRA_CAPTURE_INDICES]
 
 EXP_MODES = [
     ("0dte", "0DTE"),

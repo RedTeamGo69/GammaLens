@@ -83,7 +83,9 @@ it re-runs a missing first-session weekly setup (anchor from the daily bar; no G
 spot fallback) and exits 1 if the opening EM snapshots are missing (the dead-man's-switch
 e-mail). Matrix (`fail-fast: false`, `max-parallel: 8`) = the 26-ticker forward-test roster
 (`forward_test/config.py::UNIVERSE`; `tests/test_ticker_roster.py` enforces it, and the GEX
-quick-pick chips read the same list). Index/ETF (SPX, SPY, QQQ, NDX) capture daily; single
+quick-pick chips read the same list), plus `phase1/config.py::EXTRA_CAPTURE_INDICES` (RUT,
+from 2026-10-26: chips + capture only, kept out of the study roster). Index/ETF (SPX, SPY, QQQ,
+NDX, RUT) capture daily; single
 names, IBIT included, run weekly-only on the week's first trading day. XSP and CAT were
 dropped from capture on 2026-10-11. NDX rejoined in study v7 (from 2026-10-19): Tradier's NDX
 quote has zero trade/bid dates, so `provider._proxied_quote` proves freshness through QQQ.

@@ -21,9 +21,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from phase1.pg import connect
+from phase1.config import EXTRA_CAPTURE_INDICES
 from range_finder.forward_test.config import UNIVERSE
 
-KEEP = tuple(UNIVERSE)
+KEEP = (*UNIVERSE, *EXTRA_CAPTURE_INDICES)
 
 
 def inventory(cur) -> dict[str, dict[str, int]]:

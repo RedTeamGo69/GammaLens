@@ -51,14 +51,15 @@ jobs:
       max-parallel: 8
       matrix:
         # The forward-test roster (range_finder/forward_test/config.py
-        # UNIVERSE; tests/test_ticker_roster.py keeps the two in sync). Daily
+        # UNIVERSE) plus phase1/config.py EXTRA_CAPTURE_INDICES (RUT);
+        # tests/test_ticker_roster.py keeps them in sync. Daily
         # index/ETF captures go first so they land at the open. Single names
         # (stock category; IBIT resolves as one through the dynamic-config
         # path) run weekly-only on the week's first trading day - see the
         # cadence gate in scheduled_snapshot.py. The weekly HAR fit fires
         # Mondays for all, refreshing 6y of bars, so a new ticker builds its
         # own history on its first Monday.
-        ticker: [SPX, SPY, QQQ, NDX, IBIT, AAPL, AMD, AMZN, AVGO, BAC, COST, CRWV, CVX, GE,
+        ticker: [SPX, SPY, QQQ, NDX, RUT, IBIT, AAPL, AMD, AMZN, AVGO, BAC, COST, CRWV, CVX, GE,
                  GEV, GOOGL, HOOD, JPM, META, MSFT, MU, NVDA, TSLA, UNH, WMT, XOM]
     steps:
       - name: Checkout repository

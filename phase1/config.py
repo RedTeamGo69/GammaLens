@@ -17,7 +17,15 @@ INDEX_OPTION_EXPIRATION_RULES = {
     "XSP":  {"settlement": "PM", "session": "expiration", "close_offset_minutes": -15},
     "NDX":  {"settlement": "AM", "session": "previous",   "close_offset_minutes": 0},
     "NDXP": {"settlement": "PM", "session": "expiration", "close_offset_minutes": -15},
+    "RUT":  {"settlement": "AM", "session": "previous",   "close_offset_minutes": 0},
+    "RUTW": {"settlement": "PM", "session": "expiration", "close_offset_minutes": -15},
 }
+
+# Cash indices the GEX quick-picks show and the cron captures beyond the
+# forward-study roster. They stay out of TICKER_CONFIG because its bytes are
+# forward-study hashed; the cron registers them as indices instead (daily
+# cadence, no single-name earnings) and the app derives them from the chain.
+EXTRA_CAPTURE_INDICES = ("RUT",)
 
 # Wider range for computation (all_options used in sweep/profile/scenarios)
 # Captures deep OTM put gamma relevant during tail events

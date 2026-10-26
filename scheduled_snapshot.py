@@ -227,7 +227,11 @@ def capture_snapshot():
     # weekly-setup block below reuses it.
     is_week_first_trading_day = is_first_session(run_now)
 
-    from phase1.ticker_config import get_config as _get_cfg
+    from phase1.ticker_config import get_config as _get_cfg, register_dynamic_config
+    from phase1.config import EXTRA_CAPTURE_INDICES
+    if ticker in EXTRA_CAPTURE_INDICES:
+        # Uncurated, so get_config would default it to a weekly-only stock.
+        register_dynamic_config(ticker, instrument_type="index")
     if (_get_cfg(ticker).get("category") == "stock"
             and not force_weekly_setup and not is_week_first_trading_day):
         _logger.info(

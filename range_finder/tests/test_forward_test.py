@@ -14,7 +14,7 @@ from range_finder.forward_test.config import MODELS, UNIVERSE
 from range_finder.forward_test.store import Store
 from range_finder.forward_test.runner import run_study
 from range_finder.forward_test.scoring import score_forecast
-from range_finder.forward_test.results import condor_return, load_results, metrics, scoreboard, build_workbook
+from range_finder.forward_test.results import condor_entry, condor_return, load_results, metrics, scoreboard, build_workbook
 from range_finder.recommendations import TIER_KEYS, build_recommendations, tier_bands, chain_entry_to_quotes
 from phase1.trading_week import trading_week, listed_week_expiration
 from range_finder.tests.forward_fixtures import Clock, FixtureProvider, prepared_fixture, scoring_fixture
@@ -257,6 +257,9 @@ def test_end_to_end_and_immutable_duplicate_trigger(store,week):
     wb=load_workbook(BytesIO(workbook),data_only=False)
     assert wb.sheetnames==['Scoreboard',str(week.monday),'Breach details','Read me']
     assert wb['Breach details'].max_row==68
+    details=wb['Breach details']; header=[c.value for c in details[4]]
+    returns=[r[header.index('Condor return')] for r in details.iter_rows(min_row=5,values_only=True)]
+    assert all(isinstance(x,float) for x in returns)
     assert sum(r['close_n'] for r in scoreboard(records))==64
     assert store.forecasts('fixture')==frozen
 
@@ -548,6 +551,7 @@ def test_condor_return_prices_natural_fills_and_caps_loss_at_width():
            "wings": {"put": [{"width": 5.0, "ask": 0.4}, {"width": 10.0, "ask": 0.1}],
                      "call": [{"width": 5.0, "ask": 0.3}]}}
     credit = 1.0 - 0.4 + 0.8 - 0.3
+    assert condor_entry(row) == pytest.approx((credit, 5 - credit))
     assert condor_return({**row, "final_close": 100.0}) == pytest.approx(credit / (5 - credit))
     assert condor_return({**row, "final_close": 106.0}) == pytest.approx((credit - 1) / (5 - credit))
     assert condor_return({**row, "final_close": 80.0}) == pytest.approx((credit - 5) / (5 - credit))

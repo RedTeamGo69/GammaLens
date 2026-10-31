@@ -54,15 +54,15 @@ def metrics(rows):
             "average_width_ratio": sum(widths) / len(widths) if widths else None, "width_n": len(widths)}
 
 
-def condor_return(row):
-    """Iron condor P&L at the recommended wing width, held to the weekly close, per unit of max risk.
+def condor_entry(row):
+    """(credit, max risk) of the iron condor at the recommended wing width, or None.
 
     Natural fills from the capture snapshot: short legs sold at the bid, wings
-    bought at the ask. None for records captured before wing quotes were frozen,
-    rows without a valid close, or a width not offered on both sides.
+    bought at the ask. None for records captured before wing quotes were frozen
+    or a width not offered on both sides.
     """
-    width, close = row.get("recommended_width"), row.get("final_close")
-    if not (row.get("close_eligible") is True and width and close is not None):
+    width = row.get("recommended_width")
+    if not width:
         return None
     credit = 0.0
     for side in ("put", "call"):
@@ -75,6 +75,18 @@ def condor_return(row):
     risk = width - credit
     if risk <= 0:  # a quote error, not a riskless trade
         return None
+    return credit, risk
+
+
+def condor_return(row):
+    """Iron condor P&L at the recommended wing width, held to the weekly close, per unit of max risk.
+
+    None without frozen entry quotes (condor_entry) or a valid close.
+    """
+    entry, close, width = condor_entry(row), row.get("final_close"), row.get("recommended_width")
+    if not (row.get("close_eligible") is True and entry and close is not None):
+        return None
+    credit, risk = entry
     loss = min(max(0.0, row["put_short"] - close), width) + min(max(0.0, close - row["call_short"]), width)
     return (credit - loss) / risk
 
@@ -105,7 +117,8 @@ def build_workbook(rows):
     wb.remove(wb.active)
     subtitle = ("Deterministic fixture data. Synthetic prices and outcomes; excluded from the prospective study."
                 if rows and all(r.get('cohort') == 'deterministic_fixture' for r in rows)
-                else "Durable observational records. Close inside includes equality. No trade returns are calculated.")
+                else "Durable observational records. Close inside includes equality. "
+                     "Condor returns are hold-to-close natural fills before fees; see Read me.")
     labels = dict(zip(TIER_KEYS, TIER_LABELS))
     versions = {r.get('model_version', '') for r in rows}
     # Keep the visible version label short without merging distinct identities.
@@ -163,7 +176,7 @@ def build_workbook(rows):
                 if key in ('close_inside', 'lower_pi_inside', 'point_inside', 'pi_upper_inside', 'effective_inside') and isinstance(c.value, bool):
                     c.fill = PatternFill('solid', fgColor='DDECE5' if c.value else 'FBE8D4')
                 if isinstance(c.value, (float, int)) and not isinstance(c.value, bool):
-                    c.number_format = "0.0%" if key.endswith(("_rate", "_ratio")) else "#,##0.00" if isinstance(c.value, float) else "#,##0"
+                    c.number_format = "0.0%" if key.endswith(("_rate", "_ratio", "_return")) else "#,##0.00" if isinstance(c.value, float) else "#,##0"
         for row in range(5, ws.max_row+1):
             ws.row_dimensions[row].height = 22
         ws.print_title_rows = '1:4'
@@ -208,8 +221,13 @@ def build_workbook(rows):
                    "scheduled_at", "captured_at", "available_at", "feature_cutoff",
                    "training_cutoff", "data_delay_seconds", "expiration", "contract_root", "settlement_convention",
                    "settlement_status", "settlement_value", "settlement_inside", "interpretation", "sources",
-                   "path_limitations", "scored_at", "score_revision", "forecast_id", "error", "wings"]
-    table("Breach details", "Weekly close and prospective breach evidence", rows, detail_keys)
+                   "path_limitations", "scored_at", "score_revision", "forecast_id", "error",
+                   "recommended_width", "entry_credit", "max_risk", "condor_return", "short_contracts", "wings"]
+    details = []
+    for r in rows:
+        credit, risk = condor_entry(r) or (None, None)
+        details.append({**r, "entry_credit": credit, "max_risk": risk, "condor_return": condor_return(r)})
+    table("Breach details", "Weekly close and prospective breach evidence", details, detail_keys)
     notes = [
         ("Close sample", "Valid final regular-session daily OHLC; inclusive put <= close <= call. Independent of path completeness."),
         ("Breach sample", "Complete declared tracking-window coverage and known strict-breach flags on both sides. New opening-session forecasts track from the first session open; legacy forecasts track from availability. Missing intervals do not mean no breach."),
@@ -220,6 +238,7 @@ def build_workbook(rows):
         ("Versions", "Different cohorts and model versions remain separate in the Scoreboard. Counts are tier records."),
         ("Version labels", "Short version labels identify groups. Full model version hashes are retained in each data sheet."),
         ("Settlement", "Official contract settlement is separate from the weekly close. Stock/ETF results are theoretical expiration proxies."),
+        ("Condor return", "Iron condor at the recommended wing width from the capture-time chain snapshot: shorts sold at the bid, wings bought at the ask. Entry credit and max risk are per share; return = (credit - loss at the weekly close) / max risk. No fees, stops or early exits. Blank for records captured before quotes were frozen (2026-10-11) or without a valid close."),
         ("Source", "https://docs.tradier.com/reference/brokerage-api-markets-get-timesales"),
         ("SPX contracts", "https://www.cboe.com/available_weeklys/"),
         ("Legacy masters", "M2_Vix_Master.xlsx and M3_Extended_Master.xlsx are layout references only; none of their rows were imported."),

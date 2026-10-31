@@ -14,7 +14,7 @@ def database_url():
 def main():
     from range_finder.forward_test.config import DEFAULT_STUDY_ID
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("migrate", "register", "run", "export"))
+    parser.add_argument("command", choices=("migrate", "register", "run", "marks", "export"))
     parser.add_argument("--study", help=f"default: {DEFAULT_STUDY_ID}")
     parser.add_argument("--start-week")
     parser.add_argument("--output")
@@ -60,6 +60,20 @@ def main():
             finally:
                 provider.close()
             if failed:
+                raise SystemExit(1)
+        elif args.command == "marks":
+            from range_finder.forward_test.provider import TradierProvider
+            from range_finder.forward_test.marks import sample_marks, tradier_quotes
+            from range_finder.forward_test.config import SCORING_ONLY_STUDIES
+            provider = TradierProvider(os.environ.get("TRADIER_TOKEN"), clock=utcnow)
+            try:
+                result = sample_marks(store, lambda symbols: tradier_quotes(provider, symbols),
+                                      [args.study] if args.study else [DEFAULT_STUDY_ID, *SCORING_ONLY_STUDIES],
+                                      clock=utcnow)
+            finally:
+                provider.close()
+            print(json.dumps(result, indent=2))
+            if result["errors"]:
                 raise SystemExit(1)
         else:
             if not args.output:

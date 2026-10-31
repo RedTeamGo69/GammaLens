@@ -1,0 +1,31 @@
+name: Forward Test Closing Marks
+
+on:
+  # cron-job.org owns the schedule: workflow_dispatch at 15:45 America/New_York,
+  # Mon-Fri. Deliberately no GitHub cron: it starts hours late, after the close,
+  # and a post-close quote is not an executable mark. marks.py rejects any run
+  # outside the last 20 minutes of a regular session, so a stray dispatch fails
+  # loudly instead of writing stale quotes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  marks:
+    if: vars.FORWARD_TEST_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Append closing marks for the week's frozen spreads
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
+        run: python forward_test.py marks

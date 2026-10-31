@@ -4,6 +4,7 @@ from io import BytesIO
 import json
 
 from range_finder.recommendations import TIER_KEYS, TIER_LABELS
+from .marks import SAMPLE_MINUTES_BEFORE_CLOSE
 
 
 def load_results(store, study_id):
@@ -15,6 +16,10 @@ def load_results(store, study_id):
             SELECT MAX(c2.revision) FROM ft_scores c2 WHERE c2.forecast_id=f.forecast_id)
         WHERE s.study_id=? ORDER BY s.week_start DESC, s.ticker, s.model, f.tier
     """, (study_id,))
+    try:
+        marks = store.marks(study_id)
+    except Exception:  # ft_marks predates `forward_test.py migrate`; hold-to-close still loads
+        marks = {}
     result = []
     for row in rows:
         base = {k: row[k] for k in ("study_id", "week_start", "ticker", "model", "model_version", "cohort",
@@ -22,7 +27,8 @@ def load_results(store, study_id):
         if row["forecast_json"]:
             f = json.loads(row["forecast_json"])
             score = json.loads(row["score_json"]) if row["score_json"] else {}
-            result.append({**base, **f, **score, "capture_status": row["status"],
+            result.append({**base, **f, **score, "marks": marks.get(row["forecast_id"], []),
+                           "capture_status": row["status"],
                            "status": score.get("status", "pending"),
                            "classification": score.get("classification", "Pending")})
         else:
@@ -91,6 +97,40 @@ def condor_return(row):
     return (credit - loss) / risk
 
 
+# Declared management rule for the export: close once the debit reaches twice
+# the entry credit, or once it has decayed to half of it.
+STOP_MULTIPLE = 2.0
+PROFIT_TARGET = 0.5
+
+
+def condor_managed_return(row, *, stop=STOP_MULTIPLE, target=PROFIT_TARGET):
+    """Iron condor P&L per unit of max risk with a premium stop and/or profit target.
+
+    Exits at the first ft_marks sample, in time order, whose debit to close at
+    natural fills (shorts bought at the ask, wings sold at the bid) reaches
+    stop x entry credit, or falls to (1 - target) x entry credit. Pass None to
+    disable either rule. A sample missing any leg's quote cannot be traded and
+    is skipped. With no exit, the condor is held to close (condor_return). None
+    for a non-positive entry credit, where a credit multiple means nothing.
+    """
+    entry = condor_entry(row)
+    if entry is None or entry[0] <= 0:
+        return None
+    credit, risk = entry
+    samples = defaultdict(dict)
+    for mark in row.get("marks") or ():
+        samples[mark["collected_at"]][mark["leg"]] = mark
+    for collected_at in sorted(samples):
+        legs = samples[collected_at]
+        if any((legs.get(f"{side}_short") or {}).get("ask") is None or (legs.get(f"{side}_wing") or {}).get("bid") is None
+               for side in ("put", "call")):
+            continue
+        debit = sum(legs[f"{side}_short"]["ask"] - legs[f"{side}_wing"]["bid"] for side in ("put", "call"))
+        if (stop is not None and debit >= stop * credit) or (target is not None and debit <= (1 - target) * credit):
+            return (credit - debit) / risk
+    return condor_return(row)
+
+
 GROUP_KEYS = ("study_id", "cohort", "model_version", "ticker", "model", "tier")
 
 
@@ -118,7 +158,7 @@ def build_workbook(rows):
     subtitle = ("Deterministic fixture data. Synthetic prices and outcomes; excluded from the prospective study."
                 if rows and all(r.get('cohort') == 'deterministic_fixture' for r in rows)
                 else "Durable observational records. Close inside includes equality. "
-                     "Condor returns are hold-to-close natural fills before fees; see Read me.")
+                     "Condor returns are hypothetical natural fills before fees; no trades are submitted. See Read me.")
     labels = dict(zip(TIER_KEYS, TIER_LABELS))
     versions = {r.get('model_version', '') for r in rows}
     # Keep the visible version label short without merging distinct identities.
@@ -212,7 +252,8 @@ def build_workbook(rows):
                 merged[f"{row['tier']}_{field}"] = row.get(source)
         table(week, f"Week of {week}", list(groups.values()), weekly_keys)
     detail_keys = ["week_start", "ticker", "model", "tier_label", "cohort", "model_version", "put_short", "call_short",
-                   "final_close", "close_inside", "close_eligible", "path_eligible", "classification",
+                   "final_close", "close_inside", "condor_return", "condor_managed_return",
+                   "close_eligible", "path_eligible", "classification",
                    "put_touch", "call_touch", "put_breach", "call_breach", "either_breach", "both_breached",
                    "earlier_close_outside", "returned_inside", "close_on_boundary", "observed_low", "observed_high",
                    "whole_week_low", "whole_week_high", "whole_week_complete", "first_breach_session",
@@ -222,11 +263,12 @@ def build_workbook(rows):
                    "training_cutoff", "data_delay_seconds", "expiration", "contract_root", "settlement_convention",
                    "settlement_status", "settlement_value", "settlement_inside", "interpretation", "sources",
                    "path_limitations", "scored_at", "score_revision", "forecast_id", "error",
-                   "recommended_width", "entry_credit", "max_risk", "condor_return", "short_contracts", "wings"]
+                   "recommended_width", "entry_credit", "max_risk", "short_contracts", "wings"]
     details = []
     for r in rows:
         credit, risk = condor_entry(r) or (None, None)
-        details.append({**r, "entry_credit": credit, "max_risk": risk, "condor_return": condor_return(r)})
+        details.append({**r, "entry_credit": credit, "max_risk": risk, "condor_return": condor_return(r),
+                        "condor_managed_return": condor_managed_return(r)})
     table("Breach details", "Weekly close and prospective breach evidence", details, detail_keys)
     notes = [
         ("Close sample", "Valid final regular-session daily OHLC; inclusive put <= close <= call. Independent of path completeness."),
@@ -237,8 +279,15 @@ def build_workbook(rows):
         ("Extremes", "Opening-session forecasts include all regular-session movement from the opening anchor, including before the recorded save time. Legacy observed extremes use verified post-availability intervals. Whole-week daily extremes cover full sessions."),
         ("Versions", "Different cohorts and model versions remain separate in the Scoreboard. Counts are tier records."),
         ("Version labels", "Short version labels identify groups. Full model version hashes are retained in each data sheet."),
+        ("Condor return", "Iron condor at the recommended wing width held to the weekly close, per unit of max risk. "
+                          "Natural fills from the capture chain: shorts sold at the bid, wings bought at the ask. Blank before wing quotes "
+                          "were frozen (2026-10-11) or without a valid close. Entry credit and max risk are per share; no fees."),
+        ("Managed return", f"The same condor closed at the first ft_marks sample whose debit to close (shorts bought at the ask, "
+                           f"wings sold at the bid) reaches {STOP_MULTIPLE:g}x the entry credit or decays to {1 - PROFIT_TARGET:.0%} of it; "
+                           f"otherwise held to close. Marks are sampled once per session in the last {SAMPLE_MINUTES_BEFORE_CLOSE} minutes "
+                           "before the close (cron-job.org dispatch at 15:45 ET), so moves between samples are not seen and an exit fills at "
+                           "the sample, not the trigger. Weeks without marks equal the condor return. Blank for a non-positive entry credit."),
         ("Settlement", "Official contract settlement is separate from the weekly close. Stock/ETF results are theoretical expiration proxies."),
-        ("Condor return", "Iron condor at the recommended wing width from the capture-time chain snapshot: shorts sold at the bid, wings bought at the ask. Entry credit and max risk are per share; return = (credit - loss at the weekly close) / max risk. No fees, stops or early exits. Blank for records captured before quotes were frozen (2026-10-11) or without a valid close."),
         ("Source", "https://docs.tradier.com/reference/brokerage-api-markets-get-timesales"),
         ("SPX contracts", "https://www.cboe.com/available_weeklys/"),
         ("Legacy masters", "M2_Vix_Master.xlsx and M3_Extended_Master.xlsx are layout references only; none of their rows were imported."),

@@ -145,6 +145,26 @@ Coverage includes all 16 ticker/model combinations and four tiers, shared UI/hea
 
 The demonstration requires a new output directory and produces fixture-only SQLite, JSON and Excel evidence. Its separate `DEMO_ONLY` study and `deterministic_fixture` cohort captured 64 forecasts, rejected a replacement-version trigger, then scored 48/64 close successes, 48/64 breached records and 32/48 breach recoveries. This is synthetic evidence, not model performance. Streamlit AppTest verifies 64 records, 16 after AMD filtering and 4 after selecting M2. A local browser additionally verifies the rendered fixture view and served Excel content.
 
+## Closing marks
+
+The capture chain prices only hold-to-close. `ft_marks` (migration 003, append-only, same immutability trigger) adds what each frozen spread cost to close during the week: once per session, in the last 20 minutes before the close, `forward_test.py marks` quotes both short legs and the recommended-width wings of every unexpired current-week forecast in the default and scoring-only studies. It writes one row per forecast contract with bid, ask, quote times, underlying last and time, and `collected_at`. Tradier calls are deduped by OCC symbol and POSTed in batches of 400 (at most 26 × 4 × 4 × 4 = 1,664 legs before deduplication, so a handful of requests per day). A contract Tradier does not quote is reported and the run exits 1. A run on an exchange holiday is a no-op. Any other run outside the window raises, because a post-close quote cannot be traded. `results.condor_managed_return` uses these marks for the export's **Condor managed return** column: stop at 2× entry credit, target at 50% of credit, natural fills, hold-to-close when neither triggers.
+
+Before the first run, apply the new table once with `.venv\Scripts\python.exe forward_test.py migrate` (step 2 below). Until then the dashboard still loads; the managed column just equals hold-to-close.
+
+`.github/workflows/forward_test_marks.yml` has no GitHub cron, because GitHub's own schedule lands hours late, after the close. Add this cron-job.org job; the easiest way is to clone the existing 9:28 snapshot job, which already carries the GitHub token:
+
+| Field | Value |
+|---|---|
+| URL | `https://api.github.com/repos/RedTeamGo69/GammaLens/actions/workflows/forward_test_marks.yml/dispatches` |
+| Method | `POST` |
+| Headers | `Accept: application/vnd.github+json`, `Authorization: Bearer <the same PAT as the 9:28 job>`, `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json` |
+| Body | `{"ref":"main"}` (no `inputs`: the workflow declares none, so extra inputs return 422) |
+| Schedule | Custom: minute `45`, hour `15`, Monday–Friday, every day of month and month |
+| Time zone | `America/New_York` |
+| Success | HTTP `204 No Content` |
+
+The job also needs `FORWARD_TEST_ENABLED=true`, like the capture workflow. On 13:00 early closes (2026-11-27, 2026-12-24) the 15:45 run fails by design. Add a one-off 12:45 job for those dates if those sessions should be sampled.
+
 ## Activation instructions
 
 The original pre-activation review is in [weekly_forward_test_release_review.md](weekly_forward_test_release_review.md), followed by the [source resolution](weekly_forward_test_history_resolution.md). Keep `FORWARD_TEST_ENABLED=false` until all release gates below pass. Read-only prerequisites can be repeated with `scripts/check_forward_test_prerequisites.py --secrets-file .streamlit/secrets.toml --output <local-evidence.json>` using the project interpreter. This command never fits models, writes forecasts or migrates tables. Midweek checks clearly distinguish available completed history from a still-future prior Friday required at capture.

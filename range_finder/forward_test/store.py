@@ -95,11 +95,13 @@ class Store:
     def migrate(self):
         root = Path(__file__).resolve().parents[2] / "migrations"
         with self.transaction():
-            for stmt in (root / "001_forward_test.sql").read_text().split(";"):
-                if stmt.strip():
-                    self.execute(stmt)
+            # Every table before 002, whose triggers cover them all.
+            for name in ("001_forward_test.sql", "003_forward_test_marks.sql"):
+                for stmt in (root / name).read_text().split(";"):
+                    if stmt.strip():
+                        self.execute(stmt)
             if self.sqlite:
-                for table in ("ft_studies", "ft_forecasts", "ft_inputs", "ft_observations", "ft_scores"):
+                for table in ("ft_studies", "ft_forecasts", "ft_inputs", "ft_observations", "ft_scores", "ft_marks"):
                     for op in ("UPDATE", "DELETE"):
                         self.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_{op} BEFORE {op} ON {table} "
                                      "BEGIN SELECT RAISE(ABORT, 'Forward study evidence is immutable'); END")
@@ -253,6 +255,25 @@ class Store:
             self.execute("INSERT INTO ft_scores VALUES (?, ?, ?, ?, ?, ?, ?)",
                          (sid, fid, version, now.isoformat(), content, revision, finalized))
         return True
+
+    def append_marks(self, marks):
+        """One sample's rows commit together. No lock: every sample is a new
+        collected_at key, and a retried identical sample is a no-op."""
+        cols = ("forecast_id", "leg", "symbol", "bid", "ask", "bid_at", "ask_at",
+                "underlying_last", "underlying_at", "collected_at")
+        with self.transaction():
+            for m in marks:
+                self.execute("INSERT INTO ft_marks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                             tuple(m[c] for c in cols))
+
+    def marks(self, study_id):
+        rows = self.query("SELECT m.* FROM ft_marks m JOIN ft_forecasts f ON f.forecast_id=m.forecast_id "
+                          "JOIN ft_slots s ON s.slot_id=f.slot_id WHERE s.study_id=? ORDER BY m.collected_at",
+                          (study_id,))
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row["forecast_id"], []).append(row)
+        return grouped
 
     def run_record(self, run_id, study_id, started, finished, status, details):
         with self.transaction():

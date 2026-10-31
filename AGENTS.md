@@ -94,6 +94,10 @@ history Tradier truncates (META, 2026-10-19) from receipts earlier captures froz
 (`history_policy.archive_fill`). `scripts/purge_non_roster_tickers.py` removes off-roster
 rows from app tables (CSV backup first; `ft_*` forward-test history is never touched).
 
+`.github/workflows/forward_test_marks.yml` appends closing marks to `ft_marks` (stop/target
+simulation in `forward_test/results.py`). cron-job.org dispatches it at 15:45 ET, and it has no
+GitHub cron because a late fire would land after the close. Setup: `docs/weekly_forward_test.md`.
+
 Architecture decisions live in `docs/adr/` (0001: the forward study keeps its own
 fail-closed market-data path — don't merge it into `bar_sources`).
 

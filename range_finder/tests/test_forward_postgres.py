@@ -53,7 +53,11 @@ def test_postgres_full_lifecycle_rollback_and_immutability(pg_store):
     assert result['captured_models']==16 and not result['errors']
     assert len(store.forecasts('postgres-fixture'))==64
     import psycopg2
-    for table in ('ft_forecasts','ft_inputs','ft_studies'):
+    fid=store.forecasts('postgres-fixture')[0]['forecast_id']
+    store.append_marks([{'forecast_id':fid,'leg':'put_short','symbol':'SPY260911P00095000','bid':1.0,'ask':1.2,
+                         'bid_at':None,'ask_at':None,'underlying_last':None,'underlying_at':None,
+                         'collected_at':clock().isoformat()}])
+    for table in ('ft_forecasts','ft_inputs','ft_studies','ft_marks'):
         with pytest.raises(psycopg2.Error,match='immutable'):
             with store.transaction():
                 store.execute(f'DELETE FROM {table}')

@@ -14,6 +14,8 @@ DROP TRIGGER IF EXISTS ft_scores_immutable ON ft_scores;
 CREATE TRIGGER ft_scores_immutable BEFORE UPDATE OR DELETE ON ft_scores FOR EACH ROW EXECUTE FUNCTION ft_reject_mutation();
 DROP TRIGGER IF EXISTS ft_studies_immutable ON ft_studies;
 CREATE TRIGGER ft_studies_immutable BEFORE UPDATE OR DELETE ON ft_studies FOR EACH ROW EXECUTE FUNCTION ft_reject_mutation();
+DROP TRIGGER IF EXISTS ft_marks_immutable ON ft_marks;
+CREATE TRIGGER ft_marks_immutable BEFORE UPDATE OR DELETE ON ft_marks FOR EACH ROW EXECUTE FUNCTION ft_reject_mutation();
 CREATE OR REPLACE FUNCTION ft_guard_slot_identity() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.slot_id, NEW.study_id, NEW.week_start, NEW.ticker, NEW.model, NEW.model_version, NEW.cohort)
